@@ -51,12 +51,12 @@ class ToolRegistry:
             payload={"candidate": str(candidate)},
         )
 
-    def repo_get_issues(self, candidate: object) -> object:
+    def repo_get_issues(self, candidate: object, filters: object | None = None) -> object:
         return self._record(
             state=RunState.OPPORTUNITIES_RANKED,
             event="repo.issues",
-            fn=lambda: repo_get_issues(candidate),  # type: ignore[arg-type]
-            payload={"candidate": str(candidate)},
+            fn=lambda: repo_get_issues(candidate, filters=filters),  # type: ignore[arg-type]
+            payload={"candidate": str(candidate), "filters": str(filters)},
         )
 
     def workspace_run(self, cmd: str, timeout_seconds: int | None = None) -> CommandResult:

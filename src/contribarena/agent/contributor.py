@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from typing import Any
 
 from agents.models.interface import ModelProvider
 
@@ -51,24 +50,25 @@ class ContributorAgent:
 
         @function_tool
         def repo_search(query: str = "", filters_json: str = "{}") -> str:
-            """Return configured repository candidates as JSON."""
+            """Search GitHub repositories or return configured candidates as JSON."""
             filters = json.loads(filters_json) if filters_json else None
             return _to_json(tools.repo_search(query=query, filters=filters))
 
         @function_tool
         def repo_check_eligibility(owner: str, repo: str) -> str:
-            """Check whether a candidate repository is eligible for M0.0 inspection."""
-            return _to_json(tools.repo_check_eligibility(_find_candidate(config, owner, repo)))
+            """Check whether a repository is eligible for M0.1 shadow-mode inspection."""
+            return _to_json(tools.repo_check_eligibility(_candidate_ref(config, owner, repo)))
 
         @function_tool
         def repo_get_metadata(owner: str, repo: str) -> str:
             """Return read-only repository metadata."""
-            return _to_json(tools.repo_get_metadata(_find_candidate(config, owner, repo)))
+            return _to_json(tools.repo_get_metadata(_candidate_ref(config, owner, repo)))
 
         @function_tool
-        def repo_get_issues(owner: str, repo: str) -> str:
+        def repo_get_issues(owner: str, repo: str, filters_json: str = "{}") -> str:
             """Return read-only candidate issues for a repository."""
-            return _to_json(tools.repo_get_issues(_find_candidate(config, owner, repo)))
+            filters = json.loads(filters_json) if filters_json else None
+            return _to_json(tools.repo_get_issues(_candidate_ref(config, owner, repo), filters))
 
         @function_tool
         def workspace_run(cmd: str, timeout_seconds: int | None = None) -> str:
@@ -83,10 +83,10 @@ class ContributorAgent:
         agent = Agent(
             name="contribarena-contributor",
             instructions=(
-                "Use the provided tools to inspect exactly one configured candidate repository. "
+                "Use the provided tools to discover and inspect exactly one repository. "
                 "Repository code interaction must go through workspace tools. "
                 "Do not inspect the empty workspace before cloning the repository. "
-                "Finish with the structured ContribArena M0.0 completion result as soon as "
+                "Finish with the structured ContribArena completion result as soon as "
                 "you have a repo profile, opportunities, one selected task, and a workspace summary."
             ),
             tools=[
@@ -107,7 +107,7 @@ class ContributorAgent:
         try:
             run_config = AgentsRunConfig(
                 model_provider=model_provider,
-                workflow_name="ContribArena M0.0",
+                workflow_name="ContribArena M0.1",
                 # trace.jsonl is the M0 source of truth; SDK spans can be enabled later.
                 tracing_disabled=True,
             )
@@ -129,9 +129,9 @@ class ContributorAgent:
     ) -> AgentFinalResult:
         candidate = tools.repo_search()[0]
         if not isinstance(candidate, RepoCandidate):
-            candidate = config.discovery.candidates[0]
+            candidate = _first_config_candidate(config)
         eligibility = tools.repo_check_eligibility(candidate)
-        metadata: dict[str, Any] = tools.repo_get_metadata(candidate)  # type: ignore[assignment]
+        metadata = tools.repo_get_metadata(candidate)
         issues = tools.repo_get_issues(candidate)
         command = tools.workspace_run("pwd")
 
@@ -139,7 +139,7 @@ class ContributorAgent:
             title="Inspect repository and identify a low-risk follow-up",
             rationale="M0.0 local fallback creates a structured result when LLM dependencies are unavailable.",
             risk="low",
-            source=str(issues[0].get("url")) if issues else "",
+            source=_issue_source(issues[0]) if issues else "",
         )
         return AgentFinalResult(
             status="completed" if eligibility.eligible else "blocked",
@@ -147,7 +147,7 @@ class ContributorAgent:
             repo_profile=(
                 f"# Repo Profile: {candidate.full_name}\n\n"
                 f"- URL: {candidate.url}\n"
-                f"- Branch: {candidate.branch or metadata.get('default_branch', 'main')}\n"
+                f"- Branch: {candidate.branch or _metadata_default_branch(metadata)}\n"
                 f"- Notes: {candidate.notes or 'n/a'}\n"
                 f"- Agent backend: local fallback ({reason})\n"
             ),
@@ -167,11 +167,17 @@ class ContributorAgent:
         )
 
 
-def _find_candidate(config: RunConfig, owner: str, repo: str) -> RepoCandidate:
+def _candidate_ref(config: RunConfig, owner: str, repo: str) -> RepoCandidate:
     for candidate in config.discovery.candidates:
         if candidate.owner == owner and candidate.repo == repo:
             return candidate
-    raise AgentError(f"unknown repository candidate: {owner}/{repo}")
+    return RepoCandidate(owner=owner, repo=repo, url=f"https://github.com/{owner}/{repo}")
+
+
+def _first_config_candidate(config: RunConfig) -> RepoCandidate:
+    if not config.discovery.candidates:
+        raise AgentError("local-stub requires at least one configured discovery candidate")
+    return config.discovery.candidates[0]
 
 
 def _to_json(value: object) -> str:
@@ -186,3 +192,19 @@ def _jsonable(value: object) -> object:
     if isinstance(value, dict):
         return value
     return value
+
+
+def _issue_source(issue: object) -> str:
+    if hasattr(issue, "url"):
+        return str(issue.url)  # type: ignore[attr-defined]
+    if isinstance(issue, dict):
+        return str(issue.get("url") or "")
+    return ""
+
+
+def _metadata_default_branch(metadata: object) -> str:
+    if hasattr(metadata, "default_branch"):
+        return str(metadata.default_branch)  # type: ignore[attr-defined]
+    if isinstance(metadata, dict):
+        return str(metadata.get("default_branch") or "main")
+    return "main"

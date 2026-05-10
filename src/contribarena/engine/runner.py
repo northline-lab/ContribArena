@@ -33,16 +33,20 @@ class Runner:
     def run(
         self, config: RunConfig, output_dir: Path | None = None, verbose: bool = False
     ) -> RunResult:
-        candidate = config.discovery.candidates[0]
+        repo_slug = (
+            config.discovery.candidates[0].full_name
+            if config.discovery.candidates
+            else config.discovery.query or "github-discovery"
+        )
         run_id = config.run.id or uuid.uuid4().hex[:12]
         output_root = output_dir or config.artifacts.output_root
-        artifacts = ArtifactWriter(output_root, run_id, candidate.full_name, config.run.model)
+        artifacts = ArtifactWriter(output_root, run_id, repo_slug, config.run.model)
         trace = TraceWriter(artifacts.run_dir / "trace.jsonl", run_id)
         trace.write(RunState.RUN_STARTED, "run.started", {"verbose": verbose})
         trace.write(RunState.CONFIG_LOADED, "config.loaded", {"model": config.run.model})
 
         artifacts.write_json("config.json", config.model_dump(mode="json"))
-        workspace = DockerWorkspaceManager(run_id, candidate.full_name, config.workspace)
+        workspace = DockerWorkspaceManager(run_id, repo_slug, config.workspace)
         budget = BudgetTracker(config.run.budget)
         capture = ArtifactCapture()
 

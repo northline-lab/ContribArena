@@ -62,6 +62,7 @@ def version() -> None:
     typer.echo(f"contribarena {__version__}")
     typer.echo(f"python {sys.version.split()[0]}")
     typer.echo(f"docker {_docker_status()}")
+    typer.echo(f"gh {_command_status('gh', ['gh', '--version'])}")
     typer.echo(f"openai-agents {_package_version('openai-agents')}")
     typer.echo(f"openai {_package_version('openai')}")
 
@@ -74,10 +75,15 @@ def _package_version(name: str) -> str:
 
 
 def _docker_status() -> str:
-    if shutil.which("docker") is None:
+    return _command_status("docker", ["docker", "--version"])
+
+
+def _command_status(name: str, command: list[str]) -> str:
+    if shutil.which(name) is None:
         return "missing"
-    result = subprocess.run(["docker", "--version"], capture_output=True, text=True, check=False)
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
     if result.returncode == 0:
-        return result.stdout.strip()
-    detail = (result.stderr or result.stdout).strip().splitlines()[0]
+        return result.stdout.strip().splitlines()[0]
+    lines = (result.stderr or result.stdout).strip().splitlines()
+    detail = lines[0] if lines else f"{name} returned exit code {result.returncode}"
     return f"unusable: {detail}"

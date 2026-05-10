@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, HttpUrl, field_validator
+from pydantic import BaseModel, Field, HttpUrl, model_validator
 
 
 class BudgetConfig(BaseModel):
@@ -31,15 +31,33 @@ class RepoCandidate(BaseModel):
         return f"{self.owner}/{self.repo}"
 
 
-class DiscoveryConfig(BaseModel):
-    candidates: list[RepoCandidate]
+class RepoSearchFilters(BaseModel):
+    language: str | None = None
+    stars_min: int | None = Field(default=None, ge=0)
+    pushed_after: str | None = None
+    topic: str | None = None
 
-    @field_validator("candidates")
-    @classmethod
-    def require_candidate(cls, value: list[RepoCandidate]) -> list[RepoCandidate]:
-        if not value:
-            raise ValueError("at least one discovery candidate is required")
-        return value
+    def is_empty(self) -> bool:
+        return not any(
+            [
+                self.language,
+                self.stars_min is not None,
+                self.pushed_after,
+                self.topic,
+            ]
+        )
+
+
+class DiscoveryConfig(BaseModel):
+    candidates: list[RepoCandidate] = Field(default_factory=list)
+    query: str = ""
+    filters: RepoSearchFilters = Field(default_factory=RepoSearchFilters)
+
+    @model_validator(mode="after")
+    def require_candidate_or_search(self) -> DiscoveryConfig:
+        if not self.candidates and not self.query.strip() and self.filters.is_empty():
+            raise ValueError("discovery requires at least one candidate or a search query/filter")
+        return self
 
 
 class WorkspaceResources(BaseModel):
