@@ -1,0 +1,65 @@
+run:
+  mode: shadow
+  # Immediate runnable options:
+  # - compatible/maas-gpt-5-chat
+  # - compatible/funai-gpt-5-4
+  #
+  # Deferred until provider adapters exist:
+  # - anthropic/maas-claude-sonnet-4-6
+  # - gemini/maas-gemini-3-flash-preview
+  model: compatible/maas-gpt-5-chat
+  budget:
+    max_steps: 25
+    max_tokens:
+    max_wall_time_seconds: 900
+
+discovery:
+  candidates:
+    - owner: openai
+      repo: openai-agents-python
+      url: https://github.com/openai/openai-agents-python
+      branch: main
+      notes: Example M0.0 candidate.
+
+workspace:
+  backend: docker
+  image: contribarena/workspace:latest
+  workdir: /workspace
+  command_timeout_seconds: 300
+  resources:
+    cpus: "2"
+    memory: 4g
+    disk: 10g
+
+artifacts:
+  output_root: runs
+
+models:
+  providers:
+    compatible:
+      maas-gpt-5-chat:
+        # User-provided full endpoint:
+        # https://your-compatible-endpoint.example/v1
+        #
+        # OpenAI-compatible clients need the base URL, not the final
+        # /chat/completions path.
+        base_url: https://your-compatible-endpoint.example/v1
+        api_key_env: CONTRIBARENA_MAAS_API_KEY
+        model: gpt-5
+
+      funai-gpt-5-4:
+        base_url: https://your-responses-endpoint.example/v1
+        api_key_env: CONTRIBARENA_FUNAI_API_KEY
+        model: gpt-5.4
+
+    anthropic:
+      maas-claude-sonnet-4-6:
+        base_url: https://your-anthropic-endpoint.example/v1
+        api_key_env: CONTRIBARENA_MAAS_API_KEY
+        model: claude-sonnet-4-6
+
+    gemini:
+      maas-gemini-3-flash-preview:
+        endpoint: https://your-gemini-endpoint.example/v1beta/models/gemini-3-flash-preview:generateContent?alt=sse
+        api_key_env: CONTRIBARENA_MAAS_API_KEY
+        model: gemini-3-flash-preview
