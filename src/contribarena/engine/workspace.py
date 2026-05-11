@@ -45,16 +45,29 @@ class DockerWorkspaceManager:
                 f"docker run failed: {result.stderr.strip() or result.stdout.strip()}"
             )
 
-    def stop(self) -> None:
+    def stop(self) -> CommandResult:
         try:
-            subprocess.run(
+            completed = subprocess.run(
                 ["docker", "rm", "-f", self.container_name],
                 capture_output=True,
                 text=True,
                 check=False,
             )
         except FileNotFoundError:
-            return
+            return CommandResult(
+                command=f"docker rm -f {self.container_name}",
+                stdout="",
+                stderr="docker CLI not found in PATH",
+                exit_code=127,
+                duration_seconds=0.0,
+            )
+        return CommandResult(
+            command=f"docker rm -f {self.container_name}",
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            exit_code=completed.returncode,
+            duration_seconds=0.0,
+        )
 
     def run(self, cmd: str, timeout_seconds: int | None = None) -> CommandResult:
         timeout = timeout_seconds or self.config.command_timeout_seconds

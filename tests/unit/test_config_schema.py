@@ -27,6 +27,7 @@ class ConfigSchemaTest(unittest.TestCase):
 
             self.assertEqual("shadow", config.run.mode)
             self.assertEqual("docker", config.workspace.backend)
+            self.assertEqual("always", config.workspace.cleanup_policy)
             self.assertEqual(
                 "openai/openai-agents-python", config.discovery.candidates[0].full_name
             )

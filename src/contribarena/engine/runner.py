@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,11 +10,27 @@ from contribarena.agent.prompts import build_goal_prompt
 from contribarena.config.schema import RunConfig
 from contribarena.engine.artifacts import ArtifactWriter
 from contribarena.engine.context import ContextBuilder
+from contribarena.engine.lifecycle import (
+    apply_quality_gate_to_result,
+    build_ci_status,
+    build_pr_draft,
+    evaluate_contribution_quality,
+    live_action_log_entries,
+    render_postmortem,
+    render_pr_description,
+    render_quality_gate_section,
+)
 from contribarena.engine.middleware.artifact import ArtifactCapture
 from contribarena.engine.middleware.budget import BudgetTracker
 from contribarena.engine.workspace import DockerWorkspaceManager
 from contribarena.errors import AgentError, BudgetExhausted, InfrastructureError
-from contribarena.models import AgentFinalResult, RunState, TerminalState
+from contribarena.models import (
+    AgentFinalResult,
+    PullRequestDraft,
+    QualityGateResult,
+    RunState,
+    TerminalState,
+)
 from contribarena.providers import ContribArenaModelProvider
 from contribarena.trace import TraceWriter
 from contribarena.tools.registry import ToolRegistry
@@ -52,9 +69,20 @@ class Runner:
         workspace = DockerWorkspaceManager(run_id, repo_slug, config.workspace)
         budget = BudgetTracker(config.run.budget)
         capture = ArtifactCapture()
+        terminal: TerminalState | None = None
+        workspace_started = False
 
         try:
+            trace.write(
+                RunState.WORKSPACE_STARTING,
+                "workspace.starting",
+                {
+                    "container": workspace.container_name,
+                    "cleanup_policy": config.workspace.cleanup_policy,
+                },
+            )
             workspace.start()
+            workspace_started = True
             trace.write(
                 RunState.WORKSPACE_READY,
                 "workspace.ready",
@@ -67,8 +95,14 @@ class Runner:
                 budget=budget,
                 capture=capture,
             )
+            trace.write(RunState.AGENT_INITIALIZED, "agent.initialized", {"agent": "builtin"})
             prompt = (
                 ContextBuilder().build_system_prompt(config) + "\n\n" + build_goal_prompt(config)
+            )
+            trace.write(
+                RunState.AGENT_CONTEXT_LOADED,
+                "agent.context_loaded",
+                {"prompt_bytes": len(prompt.encode("utf-8"))},
             )
             result = self.agent.run(
                 config,
@@ -76,9 +110,26 @@ class Runner:
                 prompt,
                 model_provider=ContribArenaModelProvider(config.models),
             )
+            trace.write(
+                RunState.AGENT_FINAL_RESULT,
+                "agent.final_result",
+                {"status": result.status},
+            )
             agent_status = result.status
             _enforce_issue_completion(config, result, capture)
-            terminal = _terminal_state_for_result(result, capture, agent_status)
+            patch = _submitted_patch(capture)
+            quality_gate = evaluate_contribution_quality(config, result, capture, patch)
+            apply_quality_gate_to_result(result, quality_gate)
+            trace.write(
+                RunState.AGENT_HARNESS_REVIEWED,
+                "agent.harness_reviewed",
+                {
+                    "agent_status": agent_status,
+                    "harness_status": result.status,
+                    "quality_gate": quality_gate.status,
+                },
+            )
+            terminal = _terminal_state_for_result(result, capture, agent_status, quality_gate)
             self._write_issue_artifacts(config, artifacts, result, capture)
             self._write_agent_artifacts(artifacts, result)
             trace.write(
@@ -95,12 +146,28 @@ class Runner:
                 {"artifact": "selected_task.md", "title": result.selected_task.title},
             )
             _write_capture_artifacts(artifacts, capture)
-            artifacts.write_text("patch.diff", _submitted_patch(capture), kind="diff")
+            artifacts.write_text("patch.diff", patch, kind="diff")
             artifacts.write_text("test_log.txt", _command_log(capture.commands), required=False)
+            artifacts.write_json("quality_gate.json", quality_gate.model_dump(mode="json"))
+            trace.write(
+                RunState.CONTRIBUTION_REVIEWED,
+                "contribution.quality_gate",
+                quality_gate.model_dump(mode="json"),
+            )
+            pr_draft = _write_pr_dry_run_artifacts(
+                config=config,
+                artifacts=artifacts,
+                trace=trace,
+                result=result,
+                capture=capture,
+                quality_gate=quality_gate,
+                terminal=terminal,
+                patch=patch,
+            )
             artifacts.write_json("terminal_state.json", terminal.model_dump(mode="json"))
             artifacts.write_markdown(
                 "quality_report.md",
-                _quality_report(result, capture, terminal),
+                _quality_report(result, capture, terminal, quality_gate, pr_draft),
                 required=False,
             )
             trace.write(
@@ -166,7 +233,8 @@ class Runner:
             artifacts.finalize_manifest()
             raise
         finally:
-            workspace.stop()
+            if workspace_started:
+                _finalize_workspace(workspace, trace, terminal, config.workspace.cleanup_policy)
 
     def _write_agent_artifacts(self, artifacts: ArtifactWriter, result: AgentFinalResult) -> None:
         artifacts.write_markdown("repo_profile.md", result.repo_profile)
@@ -249,11 +317,75 @@ def _write_capture_artifacts(artifacts: ArtifactWriter, capture: ArtifactCapture
     )
 
 
+def _write_pr_dry_run_artifacts(
+    config: RunConfig,
+    artifacts: ArtifactWriter,
+    trace: TraceWriter,
+    result: AgentFinalResult,
+    capture: ArtifactCapture,
+    quality_gate: QualityGateResult,
+    terminal: TerminalState,
+    patch: str,
+) -> PullRequestDraft | None:
+    pr_draft: PullRequestDraft | None = None
+    if quality_gate.status == "pass":
+        trace.write(
+            RunState.PR_DRY_RUN_STARTED,
+            "pr_dry_run.started",
+            {"mode": "dry_run"},
+        )
+        pr_draft = build_pr_draft(config, result, patch)
+        artifacts.write_markdown("pr_description.md", render_pr_description(pr_draft))
+        trace.write(
+            RunState.PR_DRAFT_CREATED,
+            "pr_dry_run.draft_created",
+            {"title": pr_draft.title, "branch": pr_draft.branch, "labels": pr_draft.labels},
+        )
+
+    ci_status = build_ci_status(capture, quality_gate)
+    artifacts.write_json("ci_status.json", ci_status.model_dump(mode="json"))
+    trace.write(RunState.CI_OBSERVED, "ci.observed", ci_status.model_dump(mode="json"))
+    artifacts.write_text(
+        "live_action_log.jsonl",
+        "\n".join(
+            json.dumps(entry, ensure_ascii=True)
+            for entry in live_action_log_entries(pr_draft)
+        ),
+        kind="jsonl",
+        required=False,
+    )
+    artifacts.write_markdown(
+        "postmortem.md",
+        render_postmortem(terminal, quality_gate, ci_status, pr_draft),
+    )
+    trace.write(
+        RunState.POSTMORTEM_WRITTEN,
+        "postmortem.written",
+        {"artifact": "postmortem.md"},
+    )
+    return pr_draft
+
+
 def _terminal_state_for_result(
     result: AgentFinalResult,
     capture: ArtifactCapture,
     agent_status: str,
+    quality_gate: QualityGateResult | None = None,
 ) -> TerminalState:
+    if (
+        quality_gate is not None
+        and quality_gate.status != "pass"
+        and agent_status == "completed"
+        and result.status != "failed"
+    ):
+        return TerminalState(
+            status=result.status,  # type: ignore[arg-type]
+            reason="quality_gate_blocked",
+            layer="contribution",
+            message="; ".join(quality_gate.blockers),
+            agent_status=agent_status,
+            harness_status=result.status,
+        )
     if result.status != agent_status:
         return TerminalState(
             status=result.status,  # type: ignore[arg-type]
@@ -296,6 +428,41 @@ def _terminal_state_for_result(
         agent_status=agent_status,
         harness_status=result.status,
     )
+
+
+def _finalize_workspace(
+    workspace: DockerWorkspaceManager,
+    trace: TraceWriter,
+    terminal: TerminalState | None,
+    cleanup_policy: str,
+) -> None:
+    retain = cleanup_policy == "retain_always" or (
+        cleanup_policy == "retain_on_failure"
+        and terminal is not None
+        and terminal.status != "completed"
+    )
+    if retain:
+        trace.write(
+            RunState.WORKSPACE_RETAINED,
+            "workspace.retained",
+            {"container": workspace.container_name, "cleanup_policy": cleanup_policy},
+        )
+        return
+    trace.write(
+        RunState.WORKSPACE_STOPPING,
+        "workspace.stopping",
+        {"container": workspace.container_name, "cleanup_policy": cleanup_policy},
+    )
+    result = workspace.stop()
+    payload = {
+        "container": workspace.container_name,
+        "exit_code": result.exit_code,
+        "stderr": result.stderr,
+    }
+    if result.exit_code == 0:
+        trace.write(RunState.WORKSPACE_STOPPED, "workspace.stopped", payload)
+    else:
+        trace.write(RunState.WORKSPACE_CLEANUP_FAILED, "workspace.cleanup_failed", payload)
 
 
 def _terminal_state_for_exception(exc: Exception) -> TerminalState:
@@ -433,6 +600,8 @@ def _quality_report(
     result: AgentFinalResult,
     capture: ArtifactCapture,
     terminal: TerminalState,
+    quality_gate: QualityGateResult,
+    pr_draft: PullRequestDraft | None,
 ) -> str:
     submitted = _has_submitted_patch(capture)
     failed_commands = [command for command in capture.commands if command.exit_code != 0]
@@ -455,6 +624,8 @@ def _quality_report(
         f"- Commands run: {len(capture.commands)}",
         f"- Failed commands: {len(failed_commands)}",
         f"- Patch applications: {len(capture.patches)}",
+        f"- Contribution gate: {quality_gate.status}",
+        f"- PR draft produced: {pr_draft is not None}",
         "",
         result.workspace_summary.notes or "No additional workspace notes.",
     ]
@@ -491,6 +662,7 @@ def _quality_report(
                 ],
             ]
         )
+    sections.extend(render_quality_gate_section(quality_gate))
     if result.blockers:
         sections.extend(["", "## Blockers", "", *[f"- {blocker}" for blocker in result.blockers]])
     return "\n".join(sections)

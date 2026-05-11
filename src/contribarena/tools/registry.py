@@ -401,6 +401,34 @@ class ToolRegistry:
         self.capture.record_aci_result(result)
         if execution.undo_diff:
             self.capture.record_undo_diff(execution.undo_diff)
+        if phase == "recovery":
+            self.trace.write(
+                RunState.AGENT_RECOVERING,
+                "agent.recovering",
+                {
+                    "tool": tool,
+                    "recovery_kind": result.recovery_kind,
+                    "terminal_status": result.terminal_status,
+                },
+            )
+        elif phase in {"exploration", "implementation", "verification", "submission"}:
+            self.trace.write(
+                RunState.AGENT_ACTING,
+                "agent.acting",
+                {"phase": phase, "tool": tool, "success": result.success},
+            )
+        if tool in {"aci_replace", "aci_insert", "aci_create", "aci_undo"} and result.success:
+            self.trace.write(
+                RunState.WORKSPACE_DIRTY,
+                "workspace.dirty",
+                {"tool": tool, "files_modified": result.files_modified},
+            )
+        if tool == "aci_submit_patch" and result.success:
+            self.trace.write(
+                RunState.WORKSPACE_PATCH_CAPTURED,
+                "workspace.patch_captured",
+                {"bytes": len((result.output or "").encode("utf-8"))},
+            )
         self.trace.write(state, f"{event}.finished", {"result": _safe_result(result)})
         self.capture.record_step(
             AgentStep(

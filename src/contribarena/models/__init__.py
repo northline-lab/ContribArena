@@ -1,6 +1,6 @@
 from .agent_result import AgentFinalResult, OpportunitySummary, RepoSummary, SelectedTask
 from .artifacts import ArtifactEntry, ArtifactManifest
-from .lifecycle import TerminalState
+from .lifecycle import CiCheck, CiStatus, PullRequestDraft, QualityGateCheck, QualityGateResult, TerminalState
 from .run_state import RunState
 from .tool_results import (
     AciResult,
@@ -18,11 +18,16 @@ __all__ = [
     "AgentStep",
     "ArtifactEntry",
     "ArtifactManifest",
+    "CiCheck",
+    "CiStatus",
     "CommandResult",
     "EligibilityResult",
     "IssueCandidate",
     "OpportunitySummary",
     "PatchResult",
+    "PullRequestDraft",
+    "QualityGateCheck",
+    "QualityGateResult",
     "RepoMetadata",
     "RepoSummary",
     "RunState",

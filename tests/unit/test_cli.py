@@ -70,6 +70,10 @@ class CliTest(unittest.TestCase):
                     "patch.diff",
                     "test_log.txt",
                     "terminal_state.json",
+                    "quality_gate.json",
+                    "ci_status.json",
+                    "postmortem.md",
+                    "live_action_log.jsonl",
                     "quality_report.md",
                 }.issubset(names)
             )
@@ -86,16 +90,25 @@ class CliTest(unittest.TestCase):
                 {
                     "run_started",
                     "config_loaded",
+                    "workspace_starting",
                     "workspace_ready",
+                    "agent_initialized",
+                    "agent_context_loaded",
+                    "agent_final_result",
+                    "agent_harness_reviewed",
                     "repo_discovered",
                     "repo_eligible",
                     "repo_profiled",
                     "opportunities_ranked",
                     "task_selected",
                     "workspace_checked",
+                    "contribution_reviewed",
+                    "ci_observed",
+                    "postmortem_written",
                     "artifacts_written",
                     "run_terminal",
                     "run_completed",
+                    "workspace_stopped",
                 }.issubset(trace_states)
             )
 

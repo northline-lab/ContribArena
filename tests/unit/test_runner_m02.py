@@ -295,8 +295,39 @@ class RunnerM02Test(unittest.TestCase):
             terminal = json.loads((result.run_dir / "terminal_state.json").read_text())
             self.assertEqual("completed", terminal["status"])
             self.assertEqual("run_completed", terminal["reason"])
+            quality_gate = json.loads((result.run_dir / "quality_gate.json").read_text())
+            self.assertEqual("pass", quality_gate["status"])
+            ci_status = json.loads((result.run_dir / "ci_status.json").read_text())
+            self.assertEqual("success", ci_status["status"])
+            self.assertIn("Replace old marker", (result.run_dir / "pr_description.md").read_text())
+            self.assertIn("Draft produced: True", (result.run_dir / "postmortem.md").read_text())
+            live_action_log = (result.run_dir / "live_action_log.jsonl").read_text()
+            self.assertIn('"external_write": false', live_action_log)
+            trace_states = {
+                json.loads(line)["state"]
+                for line in (result.run_dir / "trace.jsonl").read_text().splitlines()
+            }
+            self.assertTrue(
+                {
+                    "workspace_starting",
+                    "workspace_dirty",
+                    "workspace_patch_captured",
+                    "agent_initialized",
+                    "agent_context_loaded",
+                    "agent_acting",
+                    "agent_final_result",
+                    "agent_harness_reviewed",
+                    "contribution_reviewed",
+                    "pr_dry_run_started",
+                    "pr_draft_created",
+                    "ci_observed",
+                    "postmortem_written",
+                    "workspace_stopped",
+                }.issubset(trace_states)
+            )
             report = (result.run_dir / "quality_report.md").read_text()
             self.assertIn("Terminal reason: run_completed", report)
+            self.assertIn("Contribution Quality Gate", report)
 
     def test_runner_writes_issue_solving_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -331,6 +362,12 @@ class RunnerM02Test(unittest.TestCase):
                 "compileall",
                 (result.run_dir / "verification_summary.md").read_text(),
             )
+            quality_gate = json.loads((result.run_dir / "quality_gate.json").read_text())
+            self.assertEqual("pass", quality_gate["status"])
+            self.assertIn("Fix old marker", (result.run_dir / "pr_description.md").read_text())
+            ci_status = json.loads((result.run_dir / "ci_status.json").read_text())
+            self.assertEqual("success", ci_status["status"])
+            self.assertIn("Draft produced: True", (result.run_dir / "postmortem.md").read_text())
 
     def test_runner_records_rejected_action_recovery_step(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -366,15 +403,18 @@ class RunnerM02Test(unittest.TestCase):
             )
 
             self.assertEqual("blocked", result.status)
-            self.assertEqual("harness_review_blocked", result.terminal_reason)
-            self.assertEqual("run", result.terminal_layer)
+            self.assertEqual("quality_gate_blocked", result.terminal_reason)
+            self.assertEqual("contribution", result.terminal_layer)
             report = (result.run_dir / "quality_report.md").read_text()
             self.assertIn("Submit-Time Review", report)
             self.assertIn("requires successful focused verification after the last edit", report)
-            self.assertIn("Terminal reason: harness_review_blocked", report)
+            self.assertIn("Terminal reason: quality_gate_blocked", report)
             terminal = json.loads((result.run_dir / "terminal_state.json").read_text())
             self.assertEqual("completed", terminal["agent_status"])
             self.assertEqual("blocked", terminal["harness_status"])
+            quality_gate = json.loads((result.run_dir / "quality_gate.json").read_text())
+            self.assertEqual("block", quality_gate["status"])
+            self.assertFalse((result.run_dir / "pr_description.md").exists())
             trajectory = json.loads((result.run_dir / "trajectory.json").read_text())
             submit_step = [step for step in trajectory if step["tool"] == "aci_submit_patch"][-1]
             self.assertFalse(submit_step["accepted"])
@@ -498,6 +538,7 @@ class RunnerM02Test(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             config = _config(tmp_path / "runs")
+            config.workspace.cleanup_policy = "retain_on_failure"
 
             with self.assertRaises(AgentError):
                 _run_with_fake_docker(FakeFailingAgent(), config, tmp_path)
@@ -512,6 +553,11 @@ class RunnerM02Test(unittest.TestCase):
             manifest_names = {entry["name"] for entry in manifest["artifacts"]}
             self.assertIn("terminal_state.json", manifest_names)
             self.assertIn("quality_report.md", manifest_names)
+            trace_states = {
+                json.loads(line)["state"]
+                for line in (run_dirs[0] / "trace.jsonl").read_text().splitlines()
+            }
+            self.assertIn("workspace_retained", trace_states)
 
 
 def _config(output_root: Path) -> RunConfig:
