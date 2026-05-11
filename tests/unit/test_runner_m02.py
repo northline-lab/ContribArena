@@ -36,7 +36,8 @@ class FakeM02Agent:
         tools.aci_insert("repo/app.py", 1, "temporary")  # type: ignore[attr-defined]
         tools.aci_undo()  # type: ignore[attr-defined]
         tools.aci_replace("repo/app.py", "old", "new")  # type: ignore[attr-defined]
-        tools.aci_verify("python -m compileall .", "repo")  # type: ignore[attr-defined]
+        tools.aci_suggest_verification("repo")  # type: ignore[attr-defined]
+        tools.aci_verify("python3 -m compileall .", "repo")  # type: ignore[attr-defined]
         tools.aci_submit_patch()  # type: ignore[attr-defined]
 
         return AgentFinalResult(
@@ -80,10 +81,11 @@ class RunnerM02Test(unittest.TestCase):
                 'if [ "$1" = "exec" ]; then\n'
                 '  case "$args" in\n'
                 '    *"find repo"*) printf "repo/app.py\\n"; exit 0 ;;\n'
+                '    *"find . -maxdepth 3"*) printf "./pyproject.toml\\n./app.py\\n"; exit 0 ;;\n'
                 '    *"cat -- repo/app.py"*) printf "old\\n"; exit 0 ;;\n'
                 '    *"nl -ba repo/app.py"*) printf "     1\\told\\n"; exit 0 ;;\n'
                 '    *"rg --line-number"*) printf "repo/app.py:1:old\\n"; exit 0 ;;\n'
-                '    *"python -m compileall ."*) printf "compile ok\\n"; exit 0 ;;\n'
+                '    *"python3 -m compileall ."*) printf "compile ok\\n"; exit 0 ;;\n'
                 '    *"git diff --binary -- ."*) '
                 'printf "diff --git a/repo/app.py b/repo/app.py\\n"; exit 0 ;;\n'
                 '    *"git apply -"*) exit 0 ;;\n'
@@ -120,6 +122,7 @@ class RunnerM02Test(unittest.TestCase):
             self.assertIn("aci_insert", {step["tool"] for step in trajectory})
             self.assertIn("aci_undo", {step["tool"] for step in trajectory})
             self.assertIn("aci_replace", {step["tool"] for step in trajectory})
+            self.assertIn("aci_suggest_verification", {step["tool"] for step in trajectory})
             self.assertIn("aci_verify", {step["tool"] for step in trajectory})
             self.assertIn("aci_submit_patch", {step["tool"] for step in trajectory})
             workspace_command = json.loads(

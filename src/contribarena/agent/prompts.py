@@ -20,7 +20,7 @@ def build_goal_prompt(config: RunConfig) -> str:
             "5. Call workspace_run to clone the repo, using this command exactly:\n"
             f"   git -c http.version=HTTP/1.1 clone --depth 1 {clone_url} repo && cd repo && git status --short && ls -la\n"
             "6. Use ACI tools against paths under repo/ to inspect, search, and make the smallest useful change.\n"
-            "7. Prefer aci_verify for the most relevant lightweight verification command.\n"
+            "7. If the verification command is not obvious, call aci_suggest_verification(path='repo'); then use aci_verify.\n"
             "8. Call aci_submit_patch(path='repo') to capture the shadow patch.\n"
             "9. Return the final structured completion result.\n"
         )
@@ -38,7 +38,7 @@ def build_goal_prompt(config: RunConfig) -> str:
             "6. Call workspace_run to clone the repo into repo/. Use a GitHub HTTPS clone URL and prefer "
             "`git -c http.version=HTTP/1.1 clone --depth 1 <url> repo`.\n"
             "7. Use ACI tools against paths under repo/ to inspect, search, and make the smallest useful change.\n"
-            "8. Prefer aci_verify for the most relevant lightweight verification command.\n"
+            "8. If the verification command is not obvious, call aci_suggest_verification(path='repo'); then use aci_verify.\n"
             "9. Call aci_submit_patch(path='repo') to capture the shadow patch.\n"
             "10. Return the final structured completion result.\n"
         )
@@ -49,7 +49,8 @@ def build_goal_prompt(config: RunConfig) -> str:
         "Do not open a PR, write GitHub comments, or perform live GitHub writes. "
         "Prefer ACI tools over raw shell editing: aci_find_files for file discovery, aci_view for bounded reading, "
         "aci_search for bounded text search, aci_replace or aci_insert for edits, aci_create for new files, "
-        "aci_undo when an edit needs to be reverted, aci_verify for focused checks, and aci_submit_patch to finish. "
+        "aci_undo when an edit needs to be reverted, aci_suggest_verification when test commands are unclear, "
+        "aci_verify for focused checks, and aci_submit_patch to finish. "
         "If a tool output is truncated or too broad, narrow the query. If a command is missing or the environment is blocked, "
         "record the blocker instead of making broad setup changes."
     )

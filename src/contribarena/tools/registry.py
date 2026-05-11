@@ -17,6 +17,7 @@ from contribarena.tools.aci import (
     aci_insert,
     aci_replace,
     aci_search,
+    aci_suggest_verification,
     aci_submit_patch,
     aci_undo,
     aci_verify,
@@ -207,6 +208,16 @@ class ToolRegistry:
             tool="aci_verify",
             fn=lambda: aci_verify(self.workspace, command, path, timeout_seconds),
             payload={"command": command, "path": path, "timeout_seconds": timeout_seconds},
+        )
+
+    def aci_suggest_verification(self, path: str = "repo") -> AciResult:
+        return self._record_aci(
+            state=RunState.WORKSPACE_CHECKED,
+            event="aci.suggest_verification",
+            phase="verification",
+            tool="aci_suggest_verification",
+            fn=lambda: aci_suggest_verification(self.workspace, path),
+            payload={"path": path},
         )
 
     def aci_submit_patch(self, path: str = "repo") -> AciResult:

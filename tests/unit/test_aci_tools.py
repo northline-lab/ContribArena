@@ -12,6 +12,7 @@ from contribarena.tools.aci import (
     aci_insert,
     aci_replace,
     aci_search,
+    aci_suggest_verification,
     aci_submit_patch,
     aci_undo,
     aci_verify,
@@ -128,7 +129,9 @@ class AciToolsTest(unittest.TestCase):
             create = create_execution.result
 
             self.assertTrue(replace.success, replace.error)
+            self.assertIn("Snippet", replace.output)
             self.assertTrue(create.success, create.error)
+            self.assertIn("Snippet", create.output)
             self.assertEqual("print('new')\n", (root / "repo" / "app.py").read_text())
             self.assertEqual("value = 1\n", (root / "repo" / "new.py").read_text())
 
@@ -146,12 +149,16 @@ class AciToolsTest(unittest.TestCase):
             workspace = LocalWorkspace(root)
 
             found = aci_find_files(workspace, "*.py", "repo").result  # type: ignore[arg-type]
+            broad_found = aci_find_files(workspace, "**/*", "repo").result  # type: ignore[arg-type]
             insert = aci_insert(workspace, "repo/app.py", 1, "print('b')").result  # type: ignore[arg-type]
-            verify = aci_verify(workspace, "python -m compileall .", "repo").result  # type: ignore[arg-type]
+            verify = aci_verify(workspace, "python3 -m compileall .", "repo").result  # type: ignore[arg-type]
 
             self.assertTrue(found.success, found.error)
             self.assertIn("repo/app.py", found.output)
+            self.assertTrue(broad_found.success, broad_found.error)
+            self.assertIn("repo/app.py", broad_found.output)
             self.assertTrue(insert.success, insert.error)
+            self.assertIn("Snippet", insert.output)
             self.assertTrue(verify.success, verify.error)
 
             undo_diff = aci_insert(workspace, "repo/app.py", 2, "print('temp')").undo_diff  # type: ignore[arg-type]
@@ -160,6 +167,20 @@ class AciToolsTest(unittest.TestCase):
 
             self.assertTrue(undo.success, undo.error)
             self.assertNotIn("temp", (root / "repo" / "app.py").read_text())
+
+    def test_suggest_verification_from_project_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "repo").mkdir()
+            (root / "repo" / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
+            (root / "repo" / "package.json").write_text('{"scripts":{"test":"echo ok"}}\n', encoding="utf-8")
+            workspace = LocalWorkspace(root)
+
+            result = aci_suggest_verification(workspace, "repo").result  # type: ignore[arg-type]
+
+            self.assertTrue(result.success, result.error)
+            self.assertIn("python3 -m pytest", result.output)
+            self.assertIn("npm test", result.output)
 
 
 def _cmd(command: str, stdout: str = "", stderr: str = "", exit_code: int = 0) -> CommandResult:

@@ -23,6 +23,8 @@ RUN apt-get update \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+RUN ln -sf /usr/bin/python3 /usr/local/bin/python
+
 WORKDIR /workspace
 
 CMD ["sleep", "infinity"]

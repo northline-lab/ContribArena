@@ -127,6 +127,11 @@ class ContributorAgent:
             return _to_json(tools.aci_verify(command, path=path, timeout_seconds=timeout_seconds))
 
         @function_tool
+        def aci_suggest_verification(path: str = "repo") -> str:
+            """Suggest likely lightweight verification commands from repository files."""
+            return _to_json(tools.aci_suggest_verification(path))
+
+        @function_tool
         def aci_submit_patch(path: str = "repo") -> str:
             """Return the current workspace git diff as the shadow submission patch."""
             return _to_json(tools.aci_submit_patch(path))
@@ -143,7 +148,8 @@ class ContributorAgent:
                 "If output is too broad, narrow the search instead of repeating it. If an edit "
                 "or verification fails, inspect the smallest relevant context, fix once, or use "
                 "aci_undo before trying a safer edit. Make the smallest useful reviewable "
-                "change, verify it locally with aci_verify or workspace_run, call "
+                "change, ask aci_suggest_verification when unsure how to test, verify it "
+                "locally with aci_verify or workspace_run, call "
                 "aci_submit_patch, then finish with the structured ContribArena result. Do not "
                 "continue exploring after the expected shadow patch and verification summary "
                 "are complete."
@@ -163,6 +169,7 @@ class ContributorAgent:
                 aci_create,
                 aci_undo,
                 aci_verify,
+                aci_suggest_verification,
                 aci_submit_patch,
             ],
             model=config.run.model,
