@@ -60,6 +60,15 @@ class DiscoveryConfig(BaseModel):
         return self
 
 
+class IssueConfig(BaseModel):
+    problem_statement: str = Field(min_length=1)
+    clone_url: HttpUrl | None = None
+    title: str | None = None
+    source_url: HttpUrl | None = None
+    reproduction_hint: str | None = None
+    verification_hint: str | None = None
+
+
 class WorkspaceResources(BaseModel):
     cpus: str = "2"
     memory: str = "4g"
@@ -79,29 +88,64 @@ class ArtifactConfig(BaseModel):
 
 
 class CompatibleModelConfig(BaseModel):
-    base_url: str
+    base_url: str | None = None
+    base_url_env: str | None = None
     model: str | None = None
     api_key_env: str = "OPENAI_API_KEY"
+
+    @model_validator(mode="after")
+    def require_base_url(self) -> CompatibleModelConfig:
+        if not self.base_url and not self.base_url_env:
+            raise ValueError("compatible model config requires base_url or base_url_env")
+        return self
+
+
+class ResponsesModelConfig(BaseModel):
+    base_url: str | None = None
+    base_url_env: str | None = None
+    model: str | None = None
+    api_key_env: str = "OPENAI_API_KEY"
+
+    @model_validator(mode="after")
+    def require_base_url(self) -> ResponsesModelConfig:
+        if not self.base_url and not self.base_url_env:
+            raise ValueError("responses model config requires base_url or base_url_env")
+        return self
 
 
 class AnthropicModelConfig(BaseModel):
     base_url: str | None = None
+    base_url_env: str | None = None
     model: str | None = None
     api_key_env: str = "ANTHROPIC_API_KEY"
     max_tokens: int = Field(default=4096, ge=1)
 
+    @model_validator(mode="after")
+    def require_base_url(self) -> AnthropicModelConfig:
+        if not self.base_url and not self.base_url_env:
+            raise ValueError("anthropic model config requires base_url or base_url_env")
+        return self
+
 
 class GeminiModelConfig(BaseModel):
-    endpoint: str
+    endpoint: str | None = None
+    endpoint_env: str | None = None
     model: str | None = None
     api_key_env: str = "GEMINI_API_KEY"
     api_key_header: str = "Authorization"
     auth_scheme: str = "Bearer"
     max_tokens: int = Field(default=4096, ge=1)
 
+    @model_validator(mode="after")
+    def require_endpoint(self) -> GeminiModelConfig:
+        if not self.endpoint and not self.endpoint_env:
+            raise ValueError("gemini model config requires endpoint or endpoint_env")
+        return self
+
 
 class ModelProvidersConfig(BaseModel):
     compatible: dict[str, CompatibleModelConfig] = Field(default_factory=dict)
+    responses: dict[str, ResponsesModelConfig] = Field(default_factory=dict)
     anthropic: dict[str, AnthropicModelConfig] = Field(default_factory=dict)
     gemini: dict[str, GeminiModelConfig] = Field(default_factory=dict)
 
@@ -113,6 +157,17 @@ class ModelsConfig(BaseModel):
 class RunConfig(BaseModel):
     run: RunSection
     discovery: DiscoveryConfig
+    issue: IssueConfig | None = None
     workspace: WorkspaceConfig
     artifacts: ArtifactConfig = Field(default_factory=ArtifactConfig)
     models: ModelsConfig = Field(default_factory=ModelsConfig)
+
+    @model_validator(mode="after")
+    def validate_issue_solving_target(self) -> RunConfig:
+        if self.issue is None:
+            return self
+        if len(self.discovery.candidates) != 1:
+            raise ValueError("issue-solving mode requires exactly one fixed discovery candidate")
+        if self.issue.clone_url is None:
+            raise ValueError("issue-solving mode requires issue.clone_url")
+        return self

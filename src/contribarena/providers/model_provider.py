@@ -6,6 +6,7 @@ from pathlib import Path
 from agents.models.interface import Model, ModelProvider
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.models.openai_provider import OpenAIProvider
+from agents.models.openai_responses import OpenAIResponsesModel
 from openai import AsyncOpenAI
 
 from contribarena.config.schema import ModelsConfig
@@ -20,6 +21,7 @@ class ContribArenaModelProvider(ModelProvider):
         self.config = config or ModelsConfig()
         self._openai: OpenAIProvider | None = None
         self._compatible_cache: dict[str, Model] = {}
+        self._responses_cache: dict[str, Model] = {}
         self._anthropic_cache: dict[str, Model] = {}
         self._gemini_cache: dict[str, Model] = {}
 
@@ -34,6 +36,8 @@ class ContribArenaModelProvider(ModelProvider):
             return self._get_openai_model(model_name.removeprefix("openai/"))
         if model_name.startswith("compatible/"):
             return self._get_compatible_model(model_name.removeprefix("compatible/"))
+        if model_name.startswith("responses/"):
+            return self._get_responses_model(model_name.removeprefix("responses/"))
         if model_name.startswith("anthropic/"):
             return self._get_anthropic_model(model_name.removeprefix("anthropic/"))
         if model_name.startswith("gemini/"):
@@ -55,12 +59,41 @@ class ContribArenaModelProvider(ModelProvider):
         if provider_config is None:
             raise ValueError(f"missing compatible model config: {name}")
         api_key = os.environ.get(provider_config.api_key_env, "EMPTY")
-        client = AsyncOpenAI(api_key=api_key, base_url=provider_config.base_url)
+        client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=_openai_compatible_base_url(_resolve_env_value(
+                provider_config.base_url,
+                provider_config.base_url_env,
+                "compatible base_url",
+            )),
+        )
         model = OpenAIChatCompletionsModel(
             model=provider_config.model or name,
             openai_client=client,
         )
         self._compatible_cache[name] = model
+        return model
+
+    def _get_responses_model(self, name: str) -> Model:
+        if name in self._responses_cache:
+            return self._responses_cache[name]
+        provider_config = self.config.providers.responses.get(name)
+        if provider_config is None:
+            raise ValueError(f"missing responses model config: {name}")
+        api_key = os.environ.get(provider_config.api_key_env, "EMPTY")
+        client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=_openai_compatible_base_url(_resolve_env_value(
+                provider_config.base_url,
+                provider_config.base_url_env,
+                "responses base_url",
+            )),
+        )
+        model = OpenAIResponsesModel(
+            model=provider_config.model or name,
+            openai_client=client,
+        )
+        self._responses_cache[name] = model
         return model
 
     def _get_anthropic_model(self, name: str) -> Model:
@@ -72,6 +105,11 @@ class ContribArenaModelProvider(ModelProvider):
         api_key = os.environ.get(provider_config.api_key_env)
         if not api_key:
             raise ValueError(f"{provider_config.api_key_env} is required for anthropic/{name}")
+        provider_config.base_url = _resolve_env_value(
+            provider_config.base_url,
+            provider_config.base_url_env,
+            "anthropic base_url",
+        )
         model = AnthropicMessagesModel(name, provider_config, api_key)
         self._anthropic_cache[name] = model
         return model
@@ -85,6 +123,11 @@ class ContribArenaModelProvider(ModelProvider):
         api_key = os.environ.get(provider_config.api_key_env)
         if not api_key:
             raise ValueError(f"{provider_config.api_key_env} is required for gemini/{name}")
+        provider_config.endpoint = _resolve_env_value(
+            provider_config.endpoint,
+            provider_config.endpoint_env,
+            "gemini endpoint",
+        )
         model = GeminiGenerateContentModel(name, provider_config, api_key)
         self._gemini_cache[name] = model
         return model
@@ -92,6 +135,7 @@ class ContribArenaModelProvider(ModelProvider):
     async def aclose(self) -> None:
         cached_models = [
             *self._compatible_cache.values(),
+            *self._responses_cache.values(),
             *self._anthropic_cache.values(),
             *self._gemini_cache.values(),
         ]
@@ -111,3 +155,22 @@ def _load_local_env(path: Path = Path(".env")) -> None:
         value = value.strip().strip("\"'")
         if key and key not in os.environ:
             os.environ[key] = value
+
+
+def _resolve_env_value(value: str | None, env_name: str | None, label: str) -> str:
+    if value:
+        return value
+    if env_name:
+        env_value = os.environ.get(env_name)
+        if env_value:
+            return env_value
+        raise ValueError(f"{env_name} is required for {label}")
+    raise ValueError(f"{label} is required")
+
+
+def _openai_compatible_base_url(url: str) -> str:
+    stripped = url.rstrip("/")
+    suffix = "/chat/completions"
+    if stripped.endswith(suffix):
+        return stripped[: -len(suffix)]
+    return stripped

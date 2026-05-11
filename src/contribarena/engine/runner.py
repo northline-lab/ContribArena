@@ -73,6 +73,8 @@ class Runner:
                 prompt,
                 model_provider=ContribArenaModelProvider(config.models),
             )
+            _enforce_issue_completion(config, result, capture)
+            self._write_issue_artifacts(config, artifacts, result, capture)
             self._write_agent_artifacts(artifacts, result)
             trace.write(
                 RunState.REPO_PROFILED, "repo.profile.write", {"artifact": "repo_profile.md"}
@@ -153,12 +155,117 @@ class Runner:
             ),
         )
 
+    def _write_issue_artifacts(
+        self,
+        config: RunConfig,
+        artifacts: ArtifactWriter,
+        result: AgentFinalResult,
+        capture: ArtifactCapture,
+    ) -> None:
+        if config.issue is None:
+            return
+        issue = config.issue
+        sections = [
+            f"# Problem Statement: {issue.title or 'Configured Issue'}",
+            "",
+        ]
+        if issue.source_url:
+            sections.extend([f"- Source: {issue.source_url}", ""])
+        if issue.reproduction_hint:
+            sections.extend(["## Reproduction Hint", "", issue.reproduction_hint, ""])
+        if issue.verification_hint:
+            sections.extend(["## Verification Hint", "", issue.verification_hint, ""])
+        sections.extend(["## Statement", "", issue.problem_statement])
+        artifacts.write_markdown("problem_statement.md", "\n".join(sections))
+        artifacts.write_markdown(
+            "reproduction_notes.md",
+            result.reproduction_notes or "No reproduction notes were returned.",
+        )
+        artifacts.write_markdown(
+            "verification_summary.md",
+            result.verification_summary or _verification_summary_from_capture(capture),
+        )
+
 
 def _submitted_patch(capture: ArtifactCapture) -> str:
     for result in reversed(capture.aci_results):
-        if result.tool == "aci_submit_patch":
+        if result.tool == "aci_submit_patch" and result.success:
             return result.output or ""
     return ""
+
+
+def _enforce_issue_completion(
+    config: RunConfig, result: AgentFinalResult, capture: ArtifactCapture
+) -> None:
+    if config.issue is None:
+        return
+    if result.status != "completed":
+        if not result.blockers and not result.verification_summary.strip():
+            result.blockers.append(
+                "issue-solving run ended without an explicit blocker or failure reason"
+            )
+            result.verification_summary = result.blockers[-1]
+        return
+
+    blockers: list[str] = []
+    if not _has_submitted_patch(capture):
+        blockers.append("issue-solving run completed without a submitted patch")
+    if not _has_successful_verification_after_last_edit(capture):
+        blockers.append(
+            "issue-solving run completed without a successful local verification after the last edit"
+        )
+    if not result.problem_statement_summary.strip():
+        blockers.append("issue-solving run completed without a problem statement summary")
+    if not result.reproduction_notes.strip():
+        blockers.append("issue-solving run completed without reproduction notes")
+    if not result.verification_summary.strip():
+        blockers.append("issue-solving run completed without a verification summary")
+    if blockers:
+        result.status = "blocked"
+        result.blockers.extend(blockers)
+        if not result.verification_summary:
+            result.verification_summary = "; ".join(blockers)
+
+
+def _has_submitted_patch(capture: ArtifactCapture) -> bool:
+    patch = _submitted_patch(capture).strip()
+    return patch.startswith("diff --git ") or "\ndiff --git " in patch
+
+
+def _has_successful_verification_after_last_edit(capture: ArtifactCapture) -> bool:
+    last_edit_index = -1
+    for index, item in enumerate(capture.aci_results):
+        if item.tool in {"aci_replace", "aci_insert", "aci_create", "aci_undo"} and item.success:
+            last_edit_index = index
+    accepted_no_command_review = any(
+        item.tool == "aci_submit_patch"
+        and item.success
+        and "no-command verification rationale accepted" in item.review_notes
+        for item in capture.aci_results[last_edit_index + 1 :]
+    )
+    if accepted_no_command_review:
+        return True
+    return any(
+        item.tool == "aci_verify" and item.success
+        for item in capture.aci_results[last_edit_index + 1 :]
+    )
+
+
+def _verification_summary_from_capture(capture: ArtifactCapture | None) -> str:
+    if capture is None:
+        return "No verification summary was returned."
+    verification_results = [
+        item
+        for item in capture.aci_results
+        if item.tool in {"aci_suggest_verification", "aci_verify"}
+    ]
+    if not verification_results:
+        return "No verification command was recorded."
+    sections = ["# Verification Summary", ""]
+    for item in verification_results:
+        status = "passed" if item.success else "failed"
+        sections.extend([f"## {item.tool}: {status}", "", item.output or item.error or "", ""])
+    return "\n".join(sections)
 
 
 def _command_log(commands: list[object]) -> str:
@@ -189,21 +296,63 @@ def _command_log(commands: list[object]) -> str:
 
 
 def _quality_report(result: AgentFinalResult, capture: ArtifactCapture) -> str:
-    submitted = any(item.tool == "aci_submit_patch" and item.success for item in capture.aci_results)
+    submitted = _has_submitted_patch(capture)
     failed_commands = [command for command in capture.commands if command.exit_code != 0]
-    return "\n".join(
-        [
-            "# Quality Report",
-            "",
-            f"- Agent status: {result.status}",
-            f"- Patch submitted in shadow mode: {submitted}",
-            f"- Commands run: {len(capture.commands)}",
-            f"- Failed commands: {len(failed_commands)}",
-            f"- Patch applications: {len(capture.patches)}",
-            "",
-            result.workspace_summary.notes or "No additional workspace notes.",
-        ]
-    )
+    review_results = [
+        item.review_notes for item in capture.aci_results if item.tool == "aci_submit_patch"
+    ]
+    recovery_results = [
+        item
+        for item in capture.aci_results
+        if item.recovery_kind or item.terminal_status
+    ]
+    sections = [
+        "# Quality Report",
+        "",
+        f"- Agent status: {result.status}",
+        f"- Patch submitted in shadow mode: {submitted}",
+        f"- Commands run: {len(capture.commands)}",
+        f"- Failed commands: {len(failed_commands)}",
+        f"- Patch applications: {len(capture.patches)}",
+        "",
+        result.workspace_summary.notes or "No additional workspace notes.",
+    ]
+    if result.problem_statement_summary:
+        sections.extend(["", "## Problem Summary", "", result.problem_statement_summary])
+    if result.verification_summary:
+        sections.extend(["", "## Verification Summary", "", result.verification_summary])
+    if review_results:
+        sections.extend(["", "## Submit-Time Review", "", *review_results])
+    if recovery_results:
+        sections.extend(
+            [
+                "",
+                "## Recovery Evidence",
+                "",
+                *[
+                    f"- {item.tool}: {item.recovery_kind or 'n/a'}"
+                    + (
+                        f" retry={item.retry_count}"
+                        if item.retry_count
+                        else ""
+                    )
+                    + (
+                        f" -> {item.terminal_status}"
+                        if item.terminal_status
+                        else ""
+                    )
+                    + (
+                        " terminal_after_retries"
+                        if item.terminal_after_retries
+                        else ""
+                    )
+                    for item in recovery_results
+                ],
+            ]
+        )
+    if result.blockers:
+        sections.extend(["", "## Blockers", "", *[f"- {blocker}" for blocker in result.blockers]])
+    return "\n".join(sections)
 
 
 def _cap(text: str, max_chars: int = 8000) -> str:

@@ -70,10 +70,9 @@ class AnthropicMessagesModel(Model):
         if model_settings.top_p is not None:
             body["top_p"] = model_settings.top_p
 
-        if not self.config.base_url:
-            raise ValueError("Anthropic adapter requires base_url")
+        endpoint = _anthropic_messages_endpoint(self.config.base_url)
         response = await self._client.post(
-            f"{self.config.base_url.rstrip('/')}/messages",
+            endpoint,
             headers={
                 "Content-Type": "application/json",
                 "x-api-key": self._api_key,
@@ -209,6 +208,15 @@ def _raise_for_status_with_body(response: httpx.Response) -> None:
             request=exc.request,
             response=exc.response,
         ) from exc
+
+
+def _anthropic_messages_endpoint(base_url: str | None) -> str:
+    if not base_url:
+        raise ValueError("Anthropic adapter requires base_url")
+    stripped = base_url.rstrip("/")
+    if stripped.endswith("/messages"):
+        return stripped
+    return f"{stripped}/messages"
 
 
 def _system_with_schema(

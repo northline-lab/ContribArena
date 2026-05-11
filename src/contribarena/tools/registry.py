@@ -220,14 +220,55 @@ class ToolRegistry:
             payload={"path": path},
         )
 
-    def aci_submit_patch(self, path: str = "repo") -> AciResult:
+    def aci_recover_invalid_action(
+        self,
+        recovery_kind: str,
+        message: str,
+        attempted_tool: str = "",
+    ) -> AciResult:
+        return self._record_aci(
+            state=RunState.WORKSPACE_CHECKED,
+            event="aci.recover_invalid_action",
+            phase="recovery",
+            tool="aci_recover_invalid_action",
+            fn=lambda: AciExecution(
+                result=AciResult(
+                    tool="aci_recover_invalid_action",
+                    success=False,
+                    output=message,
+                    error=message,
+                    recovery_kind=recovery_kind,
+                    review_notes=(
+                        f"attempted_tool={attempted_tool}" if attempted_tool else ""
+                    ),
+                )
+            ),
+            payload={
+                "recovery_kind": recovery_kind,
+                "message": message,
+                "attempted_tool": attempted_tool,
+            },
+        )
+
+    def aci_submit_patch(
+        self,
+        path: str = "repo",
+        no_command_verification_rationale: str = "",
+    ) -> AciResult:
         return self._record_aci(
             state=RunState.WORKSPACE_CHECKED,
             event="aci.submit_patch",
             phase="submission",
             tool="aci_submit_patch",
-            fn=lambda: aci_submit_patch(self.workspace, path),
-            payload={"path": path},
+            fn=lambda: self._submit_patch_execution(
+                path, no_command_verification_rationale
+            ),
+            payload={
+                "path": path,
+                "no_command_verification_rationale": _summary(
+                    {"rationale": no_command_verification_rationale}
+                ),
+            },
         )
 
     def _undo_execution(self) -> AciExecution:
@@ -241,6 +282,39 @@ class ToolRegistry:
                 )
             )
         return aci_undo(self.workspace, self.capture.undo_stack[-1])
+
+    def _submit_patch_execution(
+        self,
+        path: str,
+        no_command_verification_rationale: str = "",
+    ) -> AciExecution:
+        execution = aci_submit_patch(self.workspace, path)
+        review_notes = _review_submission(
+            self.capture,
+            execution.result,
+            no_command_verification_rationale,
+        )
+        if review_notes:
+            execution.result = execution.result.model_copy(
+                update={
+                    "success": False,
+                    "error": review_notes,
+                    "review_notes": review_notes,
+                    "recovery_kind": "submit_review_failed",
+                    "terminal_status": "blocked",
+                }
+            )
+        else:
+            notes = "submit-time review passed"
+            if no_command_verification_rationale.strip():
+                notes += (
+                    "; no-command verification rationale accepted: "
+                    + no_command_verification_rationale.strip()
+                )
+            execution.result = execution.result.model_copy(
+                update={"review_notes": notes}
+            )
+        return execution
 
     def _record(
         self,
@@ -320,23 +394,32 @@ class ToolRegistry:
             self.capture.record_command(command)
         for patch in execution.patches:
             self.capture.record_patch(patch)
-        self.capture.record_aci_result(execution.result)
+        result = _annotate_recovery_retry(
+            self.capture,
+            _annotate_aci_result(tool, execution.result),
+        )
+        self.capture.record_aci_result(result)
         if execution.undo_diff:
             self.capture.record_undo_diff(execution.undo_diff)
-        self.trace.write(state, f"{event}.finished", {"result": _safe_result(execution.result)})
+        self.trace.write(state, f"{event}.finished", {"result": _safe_result(result)})
         self.capture.record_step(
             AgentStep(
                 step=len(self.capture.steps) + 1,
                 phase=phase,
                 tool=tool,
                 input_summary=_summary(payload),
-                result_summary=_result_summary(execution.result),
+                result_summary=_result_summary(result),
                 state=str(state),
                 duration_seconds=duration,
-                error=execution.result.error,
+                error=result.error,
+                accepted=_step_accepted(result),
+                recovery_kind=result.recovery_kind,
+                terminal_status=result.terminal_status,
+                retry_count=result.retry_count,
+                terminal_after_retries=result.terminal_after_retries,
             )
         )
-        return execution.result
+        return result
 
 
 def _safe_result(result: object) -> object:
@@ -378,3 +461,170 @@ def _result_summary(result: object, max_chars: int = 300) -> str:
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + "...[truncated]"
+
+
+def _annotate_aci_result(tool: str, result: AciResult) -> AciResult:
+    if result.success or result.recovery_kind or result.terminal_status:
+        return result
+    recovery_kind = _classify_recovery(result.error or result.output)
+    terminal_status = _terminal_status_for_recovery(recovery_kind)
+    return result.model_copy(
+        update={"recovery_kind": recovery_kind, "terminal_status": terminal_status}
+    )
+
+
+def _annotate_recovery_retry(capture: ArtifactCapture, result: AciResult) -> AciResult:
+    if result.success or not result.recovery_kind:
+        return result
+    retry_count = (
+        sum(1 for item in capture.aci_results if item.recovery_kind == result.recovery_kind)
+        + 1
+    )
+    terminal_after_retries = retry_count >= 3
+    terminal_status = result.terminal_status
+    if terminal_after_retries and terminal_status is None:
+        terminal_status = (
+            "format_exhausted"
+            if result.recovery_kind
+            in {"invalid_tool_arguments", "malformed_action", "multi_tool_action", "unknown_tool"}
+            else "blocked"
+        )
+    return result.model_copy(
+        update={
+            "retry_count": retry_count,
+            "terminal_after_retries": terminal_after_retries,
+            "terminal_status": terminal_status,
+        }
+    )
+
+
+def _classify_recovery(text: str) -> str:
+    lowered = text.lower()
+    if "timed out" in lowered or "timeout" in lowered:
+        return "command_timeout"
+    if "output truncated" in lowered or "result limit reached" in lowered:
+        return "too_large_output"
+    if "must match exactly once" in lowered or "patch failed" in lowered:
+        return "patch_failure"
+    if "command not found" in lowered or "no such file or directory" in lowered:
+        return "missing_dependency"
+    if "path must" in lowered or "missing" in lowered or "unexpected" in lowered:
+        return "invalid_tool_arguments"
+    if "syntax error" in lowered:
+        return "bash_syntax_error"
+    return "tool_failure"
+
+
+def _terminal_status_for_recovery(recovery_kind: str) -> str | None:
+    if recovery_kind in {"command_timeout", "missing_dependency"}:
+        return "blocked"
+    return None
+
+
+def _step_accepted(result: AciResult) -> bool:
+    return result.recovery_kind not in {
+        "invalid_tool_arguments",
+        "malformed_action",
+        "multi_tool_action",
+        "submit_review_failed",
+        "unknown_tool",
+    }
+
+
+def _review_submission(
+    capture: ArtifactCapture,
+    result: AciResult,
+    no_command_verification_rationale: str = "",
+) -> str:
+    blockers: list[str] = []
+    patch = result.output or ""
+    if not result.success:
+        blockers.append(result.error or "submit command failed")
+    if not _has_patch_diff(patch):
+        blockers.append("submit-time review rejected an empty or non-git diff")
+    if _edited_after_last_successful_verification(capture):
+        if not _valid_no_command_rationale(no_command_verification_rationale):
+            blockers.append(
+                "submit-time review requires successful focused verification after the last "
+                "edit or a specific no-command verification rationale"
+            )
+    suspicious = _suspicious_patch_paths(_patch_paths(patch))
+    if suspicious:
+        blockers.append(
+            "submit-time review rejected suspicious generated or temporary files: "
+            + ", ".join(suspicious)
+        )
+    return "; ".join(blockers)
+
+
+def _has_patch_diff(patch: str) -> bool:
+    return patch.strip().startswith("diff --git ") or "\ndiff --git " in patch
+
+
+def _valid_no_command_rationale(text: str) -> bool:
+    stripped = text.strip().lower()
+    if len(stripped) < 40:
+        return False
+    return any(
+        marker in stripped
+        for marker in (
+            "unavailable",
+            "not available",
+            "not feasible",
+            "no command",
+            "no verifier",
+            "directly inspectable",
+            "reviewed the exact diff",
+        )
+    )
+
+
+def _edited_after_last_successful_verification(capture: ArtifactCapture) -> bool:
+    last_edit_index = -1
+    last_verify_index = -1
+    for index, item in enumerate(capture.aci_results):
+        if item.tool in {"aci_replace", "aci_insert", "aci_create", "aci_undo"} and item.success:
+            last_edit_index = index
+        if item.tool == "aci_verify" and item.success:
+            last_verify_index = index
+    return last_edit_index >= 0 and last_verify_index < last_edit_index
+
+
+def _patch_paths(patch: str) -> list[str]:
+    paths: list[str] = []
+    for line in patch.splitlines():
+        if not line.startswith("diff --git "):
+            continue
+        parts = line.split()
+        if len(parts) >= 4:
+            path = parts[3].removeprefix("b/")
+            paths.append(path)
+    return paths
+
+
+def _suspicious_patch_paths(paths: list[str]) -> list[str]:
+    suspicious_markers = (
+        "__pycache__/",
+        ".pytest_cache/",
+        "node_modules/",
+        ".mypy_cache/",
+        ".ruff_cache/",
+        ".tox/",
+        ".nox/",
+        "dist/",
+        "build/",
+        ".egg-info/",
+    )
+    suspicious_suffixes = (".pyc", ".pyo", ".tmp", ".temp", ".log")
+    rejected: list[str] = []
+    for path in paths:
+        lowered = path.lower()
+        if lowered.startswith(("tmp/", "temp/")):
+            rejected.append(path)
+            continue
+        if any(marker in lowered for marker in suspicious_markers):
+            rejected.append(path)
+            continue
+        if lowered.endswith(suspicious_suffixes):
+            rejected.append(path)
+    return rejected

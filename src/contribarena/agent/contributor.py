@@ -4,6 +4,8 @@ import json
 
 from agents.models.interface import ModelProvider
 
+from contribarena.agent.model_view import to_model_json
+from contribarena.agent.tool_contract import ContributorTools
 from contribarena.config.schema import RepoCandidate, RunConfig
 from contribarena.errors import AgentError
 from contribarena.models import (
@@ -13,14 +15,17 @@ from contribarena.models import (
     SelectedTask,
 )
 from contribarena.models.agent_result import WorkspaceSummary
-from contribarena.tools.registry import ToolRegistry
+from contribarena.providers.action_guard import (
+    RECOVERY_TOOL_NAME,
+    ActionGuardingModelProvider,
+)
 
 
 class ContributorAgent:
     def run(
         self,
         config: RunConfig,
-        tools: ToolRegistry,
+        tools: ContributorTools,
         prompt: str,
         model_provider: ModelProvider | None = None,
     ) -> AgentFinalResult:
@@ -33,7 +38,7 @@ class ContributorAgent:
     def _run_agents_sdk(
         self,
         config: RunConfig,
-        tools: ToolRegistry,
+        tools: ContributorTools,
         prompt: str,
         model_provider: ModelProvider,
     ) -> AgentFinalResult:
@@ -131,29 +136,30 @@ class ContributorAgent:
             """Suggest likely lightweight verification commands from repository files."""
             return _to_json(tools.aci_suggest_verification(path))
 
+        @function_tool(name_override=RECOVERY_TOOL_NAME)
+        def aci_recover_invalid_action(
+            recovery_kind: str,
+            message: str,
+            attempted_tool: str = "",
+        ) -> str:
+            """Record a rejected malformed, unknown, or multi-tool model action."""
+            return _to_json(
+                tools.aci_recover_invalid_action(recovery_kind, message, attempted_tool)
+            )
+
         @function_tool
-        def aci_submit_patch(path: str = "repo") -> str:
+        def aci_submit_patch(
+            path: str = "repo",
+            no_command_verification_rationale: str = "",
+        ) -> str:
             """Return the current workspace git diff as the shadow submission patch."""
-            return _to_json(tools.aci_submit_patch(path))
+            return _to_json(
+                tools.aci_submit_patch(path, no_command_verification_rationale)
+            )
 
         agent = Agent(
             name="contribarena-contributor",
-            instructions=(
-                "You are an autonomous open-source contributor running inside ContribArena. "
-                "Use the provided GitHub tools to discover and select exactly one low-risk task. "
-                "Shadow mode means no GitHub writes. Repository code interaction must go "
-                "through workspace or ACI tools. Use workspace_run for setup, cloning, and "
-                "unusual shell operations; prefer ACI tools for navigation, search, edits, "
-                "verification, undo, and final patch submission. Use one tool call at a time. "
-                "If output is too broad, narrow the search instead of repeating it. If an edit "
-                "or verification fails, inspect the smallest relevant context, fix once, or use "
-                "aci_undo before trying a safer edit. Make the smallest useful reviewable "
-                "change, ask aci_suggest_verification when unsure how to test, verify it "
-                "locally with aci_verify or workspace_run, call "
-                "aci_submit_patch, then finish with the structured ContribArena result. Do not "
-                "continue exploring after the expected shadow patch and verification summary "
-                "are complete."
-            ),
+            instructions=build_agent_instructions(config),
             tools=[
                 repo_search,
                 repo_check_eligibility,
@@ -170,6 +176,7 @@ class ContributorAgent:
                 aci_undo,
                 aci_verify,
                 aci_suggest_verification,
+                aci_recover_invalid_action,
                 aci_submit_patch,
             ],
             model=config.run.model,
@@ -181,8 +188,8 @@ class ContributorAgent:
         )
         try:
             run_config = AgentsRunConfig(
-                model_provider=model_provider,
-                workflow_name="ContribArena M0.2.1",
+                model_provider=ActionGuardingModelProvider(model_provider),
+                workflow_name="ContribArena M0.2.2" if config.issue else "ContribArena M0.2.1",
                 # trace.jsonl is the M0 source of truth; SDK spans can be enabled later.
                 tracing_disabled=True,
             )
@@ -199,7 +206,7 @@ class ContributorAgent:
     def _run_local_stub(
         self,
         config: RunConfig,
-        tools: ToolRegistry,
+        tools: ContributorTools,
         reason: str,
     ) -> AgentFinalResult:
         candidate = tools.repo_search()[0]
@@ -249,6 +256,38 @@ def _candidate_ref(config: RunConfig, owner: str, repo: str) -> RepoCandidate:
     return RepoCandidate(owner=owner, repo=repo, url=f"https://github.com/{owner}/{repo}")
 
 
+def build_agent_instructions(config: RunConfig) -> str:
+    base = (
+        "You are an autonomous open-source contributor running inside ContribArena. "
+        "Shadow mode means no GitHub writes. Repository code interaction must go "
+        "through workspace or ACI tools. Use workspace_run for setup, cloning, and "
+        "unusual shell operations; prefer ACI tools for navigation, search, edits, "
+        "verification, undo, and final patch submission. Use exactly one tool call at "
+        "a time. If output is too broad, narrow the search instead of repeating it. "
+        "If an edit or verification fails, inspect the smallest relevant context, fix "
+        "once, or use aci_undo before trying a safer edit. Ask aci_suggest_verification "
+        "when unsure how to test, verify locally with aci_verify or workspace_run, call "
+        "aci_submit_patch, then finish with the structured ContribArena result. Do not "
+        "continue exploring after the expected shadow patch and verification summary "
+        "are complete."
+    )
+    if config.issue is None:
+        return (
+            base
+            + " Use the provided GitHub tools to discover and select exactly one low-risk task. "
+            "Make the smallest useful reviewable change."
+        )
+    return (
+        base
+        + " This run has an explicit issue/problem statement. Do not self-select a typo, "
+        "docs cleanup, or unrelated low-risk task. Address only the configured problem. "
+        "A completed result must include a submitted diff, successful focused local "
+        "verification, problem_statement_summary, reproduction_notes, and "
+        "verification_summary. If any of those are blocked, return blocked or failed "
+        "with explicit blockers."
+    )
+
+
 def _first_config_candidate(config: RunConfig) -> RepoCandidate:
     if not config.discovery.candidates:
         raise AgentError("local-stub requires at least one configured discovery candidate")
@@ -256,17 +295,7 @@ def _first_config_candidate(config: RunConfig) -> RepoCandidate:
 
 
 def _to_json(value: object) -> str:
-    return json.dumps(_jsonable(value), ensure_ascii=True)
-
-
-def _jsonable(value: object) -> object:
-    if hasattr(value, "model_dump"):
-        return value.model_dump(mode="json")  # type: ignore[no-any-return]
-    if isinstance(value, list):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, dict):
-        return value
-    return value
+    return to_model_json(value)
 
 
 def _issue_source(issue: object) -> str:

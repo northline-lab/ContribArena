@@ -13,4 +13,10 @@ Validate a search-based M0.1 config with:
 contribarena validate --config examples/github-search.yaml
 ```
 
+Validate the M0.2.2 issue-solving config with:
+
+```bash
+contribarena validate --config examples/issue-solving.yaml
+```
+
 The run writes artifacts under `runs/`.

@@ -1,16 +1,8 @@
 run:
   mode: shadow
-  # Immediate runnable options:
-  # - compatible/example-gpt
-  # - responses/example-responses
-  # - compatible/local-openai-compatible
-  #
-  # Deferred until provider adapters exist:
-  # - anthropic/example-claude
-  # - gemini/example-gemini
   model: compatible/example-gpt
   budget:
-    max_steps: 25
+    max_steps: 30
     max_tokens:
     max_wall_time_seconds: 900
 
@@ -20,7 +12,20 @@ discovery:
       repo: openai-agents-python
       url: https://github.com/openai/openai-agents-python
       branch: main
-      notes: Example M0.0 candidate.
+      notes: M0.2.2 issue-solving fixture.
+
+issue:
+  title: Fix grammar in research bot example instructions
+  clone_url: https://github.com/openai/openai-agents-python.git
+  problem_statement: |
+    In examples/research_bot/agents/search_agent.py, the instruction string says
+    "so its vital you capture the essence". This should use the contraction
+    "it's" because the sentence means "it is vital".
+
+    Make the smallest change that fixes this grammar issue and verify the
+    repository still passes a lightweight Python syntax/import-independent check.
+  reproduction_hint: Inspect examples/research_bot/agents/search_agent.py.
+  verification_hint: Run python3 -m compileall examples/research_bot/agents/search_agent.py from the cloned repository.
 
 workspace:
   backend: docker
@@ -39,7 +44,6 @@ models:
   providers:
     compatible:
       example-gpt:
-        # Accepts either a /v1 base URL or a full /chat/completions endpoint.
         base_url_env: CONTRIBARENA_CHAT_BASE_URL
         api_key_env: CONTRIBARENA_EXAMPLE_API_KEY
         model: your-model-name
@@ -57,7 +61,6 @@ models:
 
     anthropic:
       example-claude:
-        # Accepts either an Anthropic API base URL or a full /messages endpoint.
         base_url_env: CONTRIBARENA_ANTHROPIC_BASE_URL
         api_key_env: CONTRIBARENA_EXAMPLE_ANTHROPIC_API_KEY
         model: your-claude-model-name

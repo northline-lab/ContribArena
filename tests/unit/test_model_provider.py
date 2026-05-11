@@ -12,6 +12,7 @@ from contribarena.config.schema import (
     GeminiModelConfig,
     ModelProvidersConfig,
     ModelsConfig,
+    ResponsesModelConfig,
 )
 from contribarena.providers.adapters import AnthropicMessagesModel, GeminiGenerateContentModel
 from contribarena.providers import ContribArenaModelProvider
@@ -48,6 +49,60 @@ class ContribArenaModelProviderTest(unittest.TestCase):
 
         self.assertIsInstance(model, OpenAIChatCompletionsModel)
 
+    def test_compatible_base_url_env_accepts_full_chat_completions_endpoint(self) -> None:
+        provider = ContribArenaModelProvider(
+            ModelsConfig(
+                providers=ModelProvidersConfig(
+                    compatible={
+                        "chat": CompatibleModelConfig(
+                            base_url_env="TEST_CHAT_ENDPOINT",
+                            model="gpt-5",
+                            api_key_env="TEST_CHAT_KEY",
+                        )
+                    }
+                )
+            )
+        )
+
+        with patch.dict(
+            "os.environ",
+            {
+                "TEST_CHAT_ENDPOINT": "https://example.com/api/v1/chat/completions",
+                "TEST_CHAT_KEY": "test-key",
+            },
+        ):
+            model = provider.get_model("compatible/chat")
+
+        self.assertIsInstance(model, OpenAIChatCompletionsModel)
+        self.assertEqual("https://example.com/api/v1/", str(model._client.base_url))
+
+    def test_resolves_responses_prefix_to_responses_model(self) -> None:
+        provider = ContribArenaModelProvider(
+            ModelsConfig(
+                providers=ModelProvidersConfig(
+                    responses={
+                        "responses-provider": ResponsesModelConfig(
+                            base_url_env="TEST_RESPONSES_BASE_URL",
+                            model="gpt-5.4",
+                            api_key_env="TEST_RESPONSES_KEY",
+                        )
+                    }
+                )
+            )
+        )
+
+        with patch.dict(
+            "os.environ",
+            {
+                "TEST_RESPONSES_BASE_URL": "https://example.com/v1",
+                "TEST_RESPONSES_KEY": "test-key",
+            },
+        ):
+            model = provider.get_model("responses/responses-provider")
+
+        self.assertIsInstance(model, OpenAIResponsesModel)
+        self.assertEqual("https://example.com/v1/", str(model._client.base_url))
+
     def test_resolves_anthropic_prefix_to_messages_adapter(self) -> None:
         provider = ContribArenaModelProvider(
             ModelsConfig(
@@ -68,6 +123,33 @@ class ContribArenaModelProviderTest(unittest.TestCase):
 
         self.assertIsInstance(model, AnthropicMessagesModel)
 
+    def test_anthropic_base_url_env_is_supported(self) -> None:
+        provider = ContribArenaModelProvider(
+            ModelsConfig(
+                providers=ModelProvidersConfig(
+                    anthropic={
+                        "claude": AnthropicModelConfig(
+                            base_url_env="TEST_ANTHROPIC_ENDPOINT",
+                            model="claude-sonnet",
+                            api_key_env="TEST_ANTHROPIC_KEY",
+                        )
+                    }
+                )
+            )
+        )
+
+        with patch.dict(
+            "os.environ",
+            {
+                "TEST_ANTHROPIC_ENDPOINT": "https://example.com/anthropic/v1/messages",
+                "TEST_ANTHROPIC_KEY": "test-key",
+            },
+        ):
+            model = provider.get_model("anthropic/claude")
+
+        self.assertIsInstance(model, AnthropicMessagesModel)
+        self.assertEqual("https://example.com/anthropic/v1/messages", model.config.base_url)
+
     def test_resolves_gemini_prefix_to_generate_content_adapter(self) -> None:
         provider = ContribArenaModelProvider(
             ModelsConfig(
@@ -87,6 +169,33 @@ class ContribArenaModelProviderTest(unittest.TestCase):
             model = provider.get_model("gemini/flash")
 
         self.assertIsInstance(model, GeminiGenerateContentModel)
+
+    def test_gemini_endpoint_env_is_supported(self) -> None:
+        provider = ContribArenaModelProvider(
+            ModelsConfig(
+                providers=ModelProvidersConfig(
+                    gemini={
+                        "flash": GeminiModelConfig(
+                            endpoint_env="TEST_GEMINI_ENDPOINT",
+                            model="gemini-flash",
+                            api_key_env="TEST_GEMINI_KEY",
+                        )
+                    }
+                )
+            )
+        )
+
+        with patch.dict(
+            "os.environ",
+            {
+                "TEST_GEMINI_ENDPOINT": "https://example.com/v1beta/models/flash:generateContent",
+                "TEST_GEMINI_KEY": "test-key",
+            },
+        ):
+            model = provider.get_model("gemini/flash")
+
+        self.assertIsInstance(model, GeminiGenerateContentModel)
+        self.assertEqual("https://example.com/v1beta/models/flash:generateContent", model.config.endpoint)
 
     def test_anthropic_prefix_requires_config(self) -> None:
         with self.assertRaisesRegex(ValueError, "missing anthropic model config"):

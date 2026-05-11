@@ -140,6 +140,43 @@ class AciToolsTest(unittest.TestCase):
             self.assertTrue(undo_create.success, undo_create.error)
             self.assertFalse((root / "repo" / "new.py").exists())
 
+    def test_submit_patch_includes_untracked_created_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "app.py").write_text("print('old')\n", encoding="utf-8")
+            subprocess.run(["git", "init"], cwd=repo, capture_output=True, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "contribarena@example.com"],
+                cwd=repo,
+                capture_output=True,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "ContribArena Test"],
+                cwd=repo,
+                capture_output=True,
+                check=True,
+            )
+            subprocess.run(["git", "add", "app.py"], cwd=repo, capture_output=True, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "initial"],
+                cwd=repo,
+                capture_output=True,
+                check=True,
+            )
+            workspace = LocalWorkspace(root)
+
+            create = aci_create(workspace, "repo/new.py", "value = 1\n").result  # type: ignore[arg-type]
+            submit = aci_submit_patch(workspace, "repo").result  # type: ignore[arg-type]
+
+            self.assertTrue(create.success, create.error)
+            self.assertTrue(submit.success, submit.error)
+            self.assertIn("diff --git a/new.py b/new.py", submit.output)
+            self.assertIn("new file mode 100644", submit.output)
+            self.assertIn("+value = 1", submit.output)
+
     def test_find_insert_undo_and_verify(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

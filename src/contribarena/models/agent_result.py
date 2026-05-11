@@ -41,3 +41,6 @@ class AgentFinalResult(BaseModel):
     selected_task: SelectedTask
     workspace_summary: WorkspaceSummary = Field(default_factory=WorkspaceSummary)
     blockers: list[str] = Field(default_factory=list)
+    problem_statement_summary: str = ""
+    reproduction_notes: str = ""
+    verification_summary: str = ""

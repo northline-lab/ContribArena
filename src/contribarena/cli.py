@@ -18,7 +18,7 @@ app = typer.Typer(help="ContribArena control plane commands.")
 
 @app.command()
 def init(output: Path = typer.Option(Path("run_config.yaml"), "--output", "-o")) -> None:
-    """Generate a starter M0.0 run config."""
+    """Generate a starter shadow run config."""
     try:
         write_starter_config(output)
     except ContribArenaError as exc:
@@ -44,7 +44,7 @@ def run(
     output_dir: Path | None = typer.Option(None, "--output-dir", "-o"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Execute an M0.0 agent run."""
+    """Execute a ContribArena agent run."""
     try:
         run_config = load_run_config(config)
         result = Runner().run(run_config, output_dir=output_dir, verbose=verbose)

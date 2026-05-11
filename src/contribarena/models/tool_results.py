@@ -24,6 +24,11 @@ class AciResult(BaseModel):
     output: str = ""
     files_modified: list[str] = Field(default_factory=list)
     error: str | None = None
+    recovery_kind: str | None = None
+    terminal_status: str | None = None
+    review_notes: str = ""
+    retry_count: int = 0
+    terminal_after_retries: bool = False
 
 
 class AgentStep(BaseModel):
@@ -36,6 +41,11 @@ class AgentStep(BaseModel):
     state: str
     duration_seconds: float
     error: str | None = None
+    accepted: bool = True
+    recovery_kind: str | None = None
+    terminal_status: str | None = None
+    retry_count: int = 0
+    terminal_after_retries: bool = False
 
 
 class RepoMetadata(BaseModel):
