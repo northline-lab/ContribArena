@@ -90,8 +90,20 @@ class Runner:
             workspace_command = {
                 "commands": [command.model_dump(mode="json") for command in capture.commands],
                 "patches": [patch.model_dump(mode="json") for patch in capture.patches],
+                "aci_results": [result.model_dump(mode="json") for result in capture.aci_results],
             }
             artifacts.write_json("workspace_command.json", workspace_command)
+            artifacts.write_json(
+                "trajectory.json",
+                [step.model_dump(mode="json") for step in capture.steps],
+            )
+            artifacts.write_text("patch.diff", _submitted_patch(capture), kind="diff")
+            artifacts.write_text("test_log.txt", _command_log(capture.commands), required=False)
+            artifacts.write_markdown(
+                "quality_report.md",
+                _quality_report(result, capture),
+                required=False,
+            )
             trace.write(
                 RunState.ARTIFACTS_WRITTEN,
                 "artifacts.written",
@@ -140,3 +152,61 @@ class Runner:
                 ]
             ),
         )
+
+
+def _submitted_patch(capture: ArtifactCapture) -> str:
+    for result in reversed(capture.aci_results):
+        if result.tool == "aci_submit_patch":
+            return result.output or ""
+    return ""
+
+
+def _command_log(commands: list[object]) -> str:
+    sections: list[str] = ["# Test and Command Log", ""]
+    for index, command in enumerate(commands, start=1):
+        if not hasattr(command, "command"):
+            continue
+        sections.extend(
+            [
+                f"## Command {index}",
+                "",
+                f"```bash\n{command.command}\n```",
+                "",
+                f"- Exit code: {command.exit_code}",
+                f"- Timed out: {command.timed_out}",
+                "",
+                "### stdout",
+                "",
+                f"```text\n{_cap(command.stdout)}\n```",
+                "",
+                "### stderr",
+                "",
+                f"```text\n{_cap(command.stderr)}\n```",
+                "",
+            ]
+        )
+    return "\n".join(sections)
+
+
+def _quality_report(result: AgentFinalResult, capture: ArtifactCapture) -> str:
+    submitted = any(item.tool == "aci_submit_patch" and item.success for item in capture.aci_results)
+    failed_commands = [command for command in capture.commands if command.exit_code != 0]
+    return "\n".join(
+        [
+            "# Quality Report",
+            "",
+            f"- Agent status: {result.status}",
+            f"- Patch submitted in shadow mode: {submitted}",
+            f"- Commands run: {len(capture.commands)}",
+            f"- Failed commands: {len(failed_commands)}",
+            f"- Patch applications: {len(capture.patches)}",
+            "",
+            result.workspace_summary.notes or "No additional workspace notes.",
+        ]
+    )
+
+
+def _cap(text: str, max_chars: int = 8000) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "\n[output truncated]"

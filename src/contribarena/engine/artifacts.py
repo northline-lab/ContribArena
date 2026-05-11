@@ -34,6 +34,19 @@ class ArtifactWriter:
         self.entries.append(ArtifactEntry(name=name, kind="markdown", required=required, path=name))
         return path
 
+    def write_text(
+        self,
+        name: str,
+        body: str,
+        *,
+        kind: str = "text",
+        required: bool = True,
+    ) -> Path:
+        path = self.run_dir / name
+        path.write_text(body.rstrip() + "\n", encoding="utf-8")
+        self.entries.append(ArtifactEntry(name=name, kind=kind, required=required, path=name))  # type: ignore[arg-type]
+        return path
+
     def finalize_manifest(self) -> Path:
         entries = [
             *self.entries,

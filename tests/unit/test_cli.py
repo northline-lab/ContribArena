@@ -66,6 +66,10 @@ class CliTest(unittest.TestCase):
                     "opportunity_rank.md",
                     "selected_task.md",
                     "workspace_command.json",
+                    "trajectory.json",
+                    "patch.diff",
+                    "test_log.txt",
+                    "quality_report.md",
                 }.issubset(names)
             )
             manifest = json.loads(

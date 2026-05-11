@@ -67,7 +67,7 @@ class DockerWorkspaceManager:
                     self.container_name,
                     "bash",
                     "-c",
-                    f"cd {shlex.quote(self.config.workdir)} && {cmd}",
+                    _logged_shell_command(self.config.workdir, cmd),
                 ],
                 capture_output=True,
                 text=True,
@@ -107,7 +107,7 @@ class DockerWorkspaceManager:
                     self.container_name,
                     "bash",
                     "-c",
-                    f"cd {shlex.quote(self.config.workdir)} && git apply -",
+                    _logged_shell_command(self.config.workdir, "git apply -"),
                 ],
                 input=diff,
                 capture_output=True,
@@ -142,3 +142,12 @@ def _files_from_patch(diff: str) -> list[str]:
         elif line.startswith("+++ b/"):
             files.append(line.removeprefix("+++ b/"))
     return sorted(set(files))
+
+
+def _logged_shell_command(workdir: str, cmd: str) -> str:
+    command_label = shlex.quote(cmd[:300])
+    return (
+        f"printf '[contribarena] workspace command: %s\\n' {command_label} > /proc/1/fd/1; "
+        f"cd {shlex.quote(workdir)} && "
+        f"{{ {cmd}; }} > >(tee /proc/1/fd/1) 2> >(tee /proc/1/fd/2 >&2)"
+    )

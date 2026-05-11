@@ -1,14 +1,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import Any, Callable, TypeVar, cast
 
 from contribarena.config.schema import RunConfig
 from contribarena.engine.middleware.artifact import ArtifactCapture
 from contribarena.engine.middleware.budget import BudgetTracker
 from contribarena.engine.workspace import DockerWorkspaceManager
-from contribarena.models import CommandResult, PatchResult, RunState
+from contribarena.models import AciResult, AgentStep, CommandResult, PatchResult, RunState
 from contribarena.trace import TraceWriter
+from contribarena.tools.aci import (
+    AciExecution,
+    aci_create,
+    aci_replace,
+    aci_search,
+    aci_submit_patch,
+    aci_view,
+)
 from contribarena.tools.repo_eligibility import repo_check_eligibility
 from contribarena.tools.repo_issues import repo_get_issues
 from contribarena.tools.repo_metadata import repo_get_metadata
@@ -85,6 +94,70 @@ class ToolRegistry:
         self.capture.record_patch(result)
         return result
 
+    def aci_view(
+        self,
+        path: str,
+        start_line: int = 1,
+        max_lines: int = 200,
+    ) -> AciResult:
+        return self._record_aci(
+            state=RunState.WORKSPACE_CHECKED,
+            event="aci.view",
+            phase="exploration",
+            tool="aci_view",
+            fn=lambda: aci_view(self.workspace, path, start_line, max_lines),
+            payload={"path": path, "start_line": start_line, "max_lines": max_lines},
+        )
+
+    def aci_search(
+        self,
+        pattern: str,
+        path: str = ".",
+        max_results: int = 80,
+    ) -> AciResult:
+        return self._record_aci(
+            state=RunState.WORKSPACE_CHECKED,
+            event="aci.search",
+            phase="exploration",
+            tool="aci_search",
+            fn=lambda: aci_search(self.workspace, pattern, path, max_results),
+            payload={"pattern": pattern, "path": path, "max_results": max_results},
+        )
+
+    def aci_replace(self, path: str, old_str: str, new_str: str) -> AciResult:
+        return self._record_aci(
+            state=RunState.WORKSPACE_CHECKED,
+            event="aci.replace",
+            phase="implementation",
+            tool="aci_replace",
+            fn=lambda: aci_replace(self.workspace, path, old_str, new_str),
+            payload={
+                "path": path,
+                "old_bytes": len(old_str.encode("utf-8")),
+                "new_bytes": len(new_str.encode("utf-8")),
+            },
+        )
+
+    def aci_create(self, path: str, content: str) -> AciResult:
+        return self._record_aci(
+            state=RunState.WORKSPACE_CHECKED,
+            event="aci.create",
+            phase="implementation",
+            tool="aci_create",
+            fn=lambda: aci_create(self.workspace, path, content),
+            payload={"path": path, "content_bytes": len(content.encode("utf-8"))},
+        )
+
+    def aci_submit_patch(self, path: str = "repo") -> AciResult:
+        return self._record_aci(
+            state=RunState.WORKSPACE_CHECKED,
+            event="aci.submit_patch",
+            phase="submission",
+            tool="aci_submit_patch",
+            fn=lambda: aci_submit_patch(self.workspace, path),
+            payload={"path": path},
+        )
+
     def _record(
         self,
         state: str,
@@ -93,14 +166,91 @@ class ToolRegistry:
         payload: dict[str, Any],
     ) -> T:
         self.budget.record_step()
+        start = time.monotonic()
         self.trace.write(state, f"{event}.started", payload)
         try:
             result = fn()
         except Exception as exc:
+            duration = time.monotonic() - start
             self.trace.write(state, f"{event}.failed", {"error": str(exc)})
+            self.capture.record_step(
+                AgentStep(
+                    step=len(self.capture.steps) + 1,
+                    phase=_phase_for_event(event),
+                    tool=event,
+                    input_summary=_summary(payload),
+                    result_summary="failed",
+                    state=str(state),
+                    duration_seconds=duration,
+                    error=str(exc),
+                )
+            )
             raise
+        duration = time.monotonic() - start
         self.trace.write(state, f"{event}.finished", {"result": _safe_result(result)})
+        self.capture.record_step(
+            AgentStep(
+                step=len(self.capture.steps) + 1,
+                phase=_phase_for_event(event),
+                tool=event,
+                input_summary=_summary(payload),
+                result_summary=_result_summary(result),
+                state=str(state),
+                duration_seconds=duration,
+            )
+        )
         return result
+
+    def _record_aci(
+        self,
+        state: str,
+        event: str,
+        phase: str,
+        tool: str,
+        fn: Callable[[], AciExecution],
+        payload: dict[str, Any],
+    ) -> AciResult:
+        self.budget.record_step()
+        start = time.monotonic()
+        self.trace.write(state, f"{event}.started", payload)
+        try:
+            execution = fn()
+        except Exception as exc:
+            duration = time.monotonic() - start
+            self.trace.write(state, f"{event}.failed", {"error": str(exc)})
+            self.capture.record_step(
+                AgentStep(
+                    step=len(self.capture.steps) + 1,
+                    phase=phase,
+                    tool=tool,
+                    input_summary=_summary(payload),
+                    result_summary="failed",
+                    state=str(state),
+                    duration_seconds=duration,
+                    error=str(exc),
+                )
+            )
+            raise
+        duration = time.monotonic() - start
+        for command in execution.commands:
+            self.capture.record_command(command)
+        for patch in execution.patches:
+            self.capture.record_patch(patch)
+        self.capture.record_aci_result(execution.result)
+        self.trace.write(state, f"{event}.finished", {"result": _safe_result(execution.result)})
+        self.capture.record_step(
+            AgentStep(
+                step=len(self.capture.steps) + 1,
+                phase=phase,
+                tool=tool,
+                input_summary=_summary(payload),
+                result_summary=_result_summary(execution.result),
+                state=str(state),
+                duration_seconds=duration,
+                error=execution.result.error,
+            )
+        )
+        return execution.result
 
 
 def _safe_result(result: object) -> object:
@@ -111,3 +261,34 @@ def _safe_result(result: object) -> object:
     if isinstance(result, dict):
         return result
     return str(result)
+
+
+def _phase_for_event(event: str) -> str:
+    if event.startswith("repo."):
+        return "discovery"
+    if event.startswith("workspace."):
+        return "workspace"
+    return "agent"
+
+
+def _summary(payload: dict[str, Any], max_chars: int = 300) -> str:
+    text = str(payload)
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "...[truncated]"
+
+
+def _result_summary(result: object, max_chars: int = 300) -> str:
+    if isinstance(result, AciResult):
+        text = result.output or result.error or ("ok" if result.success else "failed")
+    elif isinstance(result, CommandResult):
+        text = f"exit_code={result.exit_code}"
+    elif isinstance(result, PatchResult):
+        text = "patch applied" if result.success else result.error or "patch failed"
+    elif isinstance(result, list):
+        text = f"{len(result)} result(s)"
+    else:
+        text = str(result)
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "...[truncated]"

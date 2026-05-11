@@ -43,6 +43,7 @@ class WorkspaceTest(unittest.TestCase):
             self.assertIn("run -d", log)
             self.assertIn("exec", log)
             self.assertIn("exec -i", log)
+            self.assertIn("/proc/1/fd/1", log)
             self.assertIn("rm -f", log)
 
 

@@ -13,13 +13,16 @@ def build_goal_prompt(config: RunConfig) -> str:
             f"Target repository: {candidate.owner}/{candidate.repo}\n"
             f"Clone URL: {clone_url}\n\n"
             "Required sequence:\n"
-            "1. Call repo_search() to load the configured candidates.\n"
+            "1. Call repo_search() with no arguments to load the configured candidates.\n"
             f"2. Call repo_check_eligibility(owner='{candidate.owner}', repo='{candidate.repo}').\n"
             f"3. Call repo_get_metadata(owner='{candidate.owner}', repo='{candidate.repo}').\n"
             f"4. Call repo_get_issues(owner='{candidate.owner}', repo='{candidate.repo}').\n"
-            "5. Call workspace_run once to clone and inspect the repo, using this command exactly:\n"
-            f"   git clone {clone_url} repo && cd repo && git status --short && ls -la\n"
-            "6. Return the final structured completion result. Do not keep exploring after the clone command succeeds.\n"
+            "5. Call workspace_run to clone the repo, using this command exactly:\n"
+            f"   git -c http.version=HTTP/1.1 clone --depth 1 {clone_url} repo && cd repo && git status --short && ls -la\n"
+            "6. Use ACI tools against paths under repo/ to inspect, search, and make the smallest useful change.\n"
+            "7. Run the most relevant lightweight verification command with workspace_run.\n"
+            "8. Call aci_submit_patch(path='repo') to capture the shadow patch.\n"
+            "9. Return the final structured completion result.\n"
         )
     else:
         query = config.discovery.query or ""
@@ -32,14 +35,20 @@ def build_goal_prompt(config: RunConfig) -> str:
             "3. If the repository is not eligible, choose another repository from the search results.\n"
             "4. Call repo_get_metadata(owner=<chosen_owner>, repo=<chosen_repo>).\n"
             "5. Call repo_get_issues(owner=<chosen_owner>, repo=<chosen_repo>).\n"
-            "6. Call workspace_run once to clone and inspect the repo. Use a GitHub HTTPS clone URL.\n"
-            "7. Return the final structured completion result. Do not keep exploring after the clone command succeeds.\n"
+            "6. Call workspace_run to clone the repo into repo/. Use a GitHub HTTPS clone URL and prefer "
+            "`git -c http.version=HTTP/1.1 clone --depth 1 <url> repo`.\n"
+            "7. Use ACI tools against paths under repo/ to inspect, search, and make the smallest useful change.\n"
+            "8. Run the most relevant lightweight verification command with workspace_run.\n"
+            "9. Call aci_submit_patch(path='repo') to capture the shadow patch.\n"
+            "10. Return the final structured completion result.\n"
         )
     return (
-        "Complete this M0.1 shadow run with the shortest valid tool sequence.\n\n"
+        "Complete this M0.2 end-to-end shadow run with the shortest valid tool sequence.\n\n"
         f"{target}\n"
         "The selected task may be a low-risk follow-up identified from metadata, issues, or repository layout. "
-        "Do not open a PR, write GitHub comments, or perform live GitHub writes."
+        "Do not open a PR, write GitHub comments, or perform live GitHub writes. "
+        "Prefer aci_view, aci_search, aci_replace, and aci_create over raw shell editing; "
+        "use workspace_run for clone, git status, and verification commands."
     )
 
 

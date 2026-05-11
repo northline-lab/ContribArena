@@ -18,6 +18,26 @@ class PatchResult(BaseModel):
     error: str | None = None
 
 
+class AciResult(BaseModel):
+    tool: str
+    success: bool
+    output: str = ""
+    files_modified: list[str] = Field(default_factory=list)
+    error: str | None = None
+
+
+class AgentStep(BaseModel):
+    step: int
+    agent: str = "builtin"
+    phase: str
+    tool: str
+    input_summary: str = ""
+    result_summary: str = ""
+    state: str
+    duration_seconds: float
+    error: str | None = None
+
+
 class RepoMetadata(BaseModel):
     owner: str
     repo: str

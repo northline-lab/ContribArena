@@ -2,6 +2,8 @@ from .agent_result import AgentFinalResult, OpportunitySummary, RepoSummary, Sel
 from .artifacts import ArtifactEntry, ArtifactManifest
 from .run_state import RunState
 from .tool_results import (
+    AciResult,
+    AgentStep,
     CommandResult,
     EligibilityResult,
     IssueCandidate,
@@ -11,6 +13,8 @@ from .tool_results import (
 
 __all__ = [
     "AgentFinalResult",
+    "AciResult",
+    "AgentStep",
     "ArtifactEntry",
     "ArtifactManifest",
     "CommandResult",
