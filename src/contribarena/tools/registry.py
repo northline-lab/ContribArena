@@ -13,9 +13,13 @@ from contribarena.trace import TraceWriter
 from contribarena.tools.aci import (
     AciExecution,
     aci_create,
+    aci_find_files,
+    aci_insert,
     aci_replace,
     aci_search,
     aci_submit_patch,
+    aci_undo,
+    aci_verify,
     aci_view,
 )
 from contribarena.tools.repo_eligibility import repo_check_eligibility
@@ -124,6 +128,21 @@ class ToolRegistry:
             payload={"pattern": pattern, "path": path, "max_results": max_results},
         )
 
+    def aci_find_files(
+        self,
+        pattern: str,
+        path: str = ".",
+        max_results: int = 80,
+    ) -> AciResult:
+        return self._record_aci(
+            state=RunState.WORKSPACE_CHECKED,
+            event="aci.find_files",
+            phase="exploration",
+            tool="aci_find_files",
+            fn=lambda: aci_find_files(self.workspace, pattern, path, max_results),
+            payload={"pattern": pattern, "path": path, "max_results": max_results},
+        )
+
     def aci_replace(self, path: str, old_str: str, new_str: str) -> AciResult:
         return self._record_aci(
             state=RunState.WORKSPACE_CHECKED,
@@ -138,6 +157,20 @@ class ToolRegistry:
             },
         )
 
+    def aci_insert(self, path: str, insert_after_line: int, text: str) -> AciResult:
+        return self._record_aci(
+            state=RunState.WORKSPACE_CHECKED,
+            event="aci.insert",
+            phase="implementation",
+            tool="aci_insert",
+            fn=lambda: aci_insert(self.workspace, path, insert_after_line, text),
+            payload={
+                "path": path,
+                "insert_after_line": insert_after_line,
+                "text_bytes": len(text.encode("utf-8")),
+            },
+        )
+
     def aci_create(self, path: str, content: str) -> AciResult:
         return self._record_aci(
             state=RunState.WORKSPACE_CHECKED,
@@ -146,6 +179,34 @@ class ToolRegistry:
             tool="aci_create",
             fn=lambda: aci_create(self.workspace, path, content),
             payload={"path": path, "content_bytes": len(content.encode("utf-8"))},
+        )
+
+    def aci_undo(self) -> AciResult:
+        result = self._record_aci(
+            state=RunState.WORKSPACE_CHECKED,
+            event="aci.undo",
+            phase="implementation",
+            tool="aci_undo",
+            fn=self._undo_execution,
+            payload={"available_undos": len(self.capture.undo_stack)},
+        )
+        if result.success and self.capture.undo_stack:
+            self.capture.undo_stack.pop()
+        return result
+
+    def aci_verify(
+        self,
+        command: str,
+        path: str = "repo",
+        timeout_seconds: int | None = None,
+    ) -> AciResult:
+        return self._record_aci(
+            state=RunState.WORKSPACE_CHECKED,
+            event="aci.verify",
+            phase="verification",
+            tool="aci_verify",
+            fn=lambda: aci_verify(self.workspace, command, path, timeout_seconds),
+            payload={"command": command, "path": path, "timeout_seconds": timeout_seconds},
         )
 
     def aci_submit_patch(self, path: str = "repo") -> AciResult:
@@ -157,6 +218,18 @@ class ToolRegistry:
             fn=lambda: aci_submit_patch(self.workspace, path),
             payload={"path": path},
         )
+
+    def _undo_execution(self) -> AciExecution:
+        if not self.capture.undo_stack:
+            return AciExecution(
+                result=AciResult(
+                    tool="aci_undo",
+                    success=False,
+                    output="No ACI edit is available to undo.",
+                    error="No ACI edit is available to undo.",
+                )
+            )
+        return aci_undo(self.workspace, self.capture.undo_stack[-1])
 
     def _record(
         self,
@@ -237,6 +310,8 @@ class ToolRegistry:
         for patch in execution.patches:
             self.capture.record_patch(patch)
         self.capture.record_aci_result(execution.result)
+        if execution.undo_diff:
+            self.capture.record_undo_diff(execution.undo_diff)
         self.trace.write(state, f"{event}.finished", {"result": _safe_result(execution.result)})
         self.capture.record_step(
             AgentStep(

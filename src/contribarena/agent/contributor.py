@@ -93,14 +93,38 @@ class ContributorAgent:
             return _to_json(tools.aci_search(pattern, path=path, max_results=max_results))
 
         @function_tool
+        def aci_find_files(pattern: str, path: str = ".", max_results: int = 80) -> str:
+            """Find workspace files by glob-like filename pattern with bounded output."""
+            return _to_json(tools.aci_find_files(pattern, path=path, max_results=max_results))
+
+        @function_tool
         def aci_replace(path: str, old_str: str, new_str: str) -> str:
             """Replace exactly one matching string in a workspace file."""
             return _to_json(tools.aci_replace(path, old_str, new_str))
 
         @function_tool
+        def aci_insert(path: str, insert_after_line: int, text: str) -> str:
+            """Insert text after a specific 1-indexed line; use 0 to insert at file start."""
+            return _to_json(tools.aci_insert(path, insert_after_line, text))
+
+        @function_tool
         def aci_create(path: str, content: str) -> str:
             """Create a new workspace file without overwriting existing files."""
             return _to_json(tools.aci_create(path, content))
+
+        @function_tool
+        def aci_undo() -> str:
+            """Undo the latest successful ACI edit when a patch or verification step fails."""
+            return _to_json(tools.aci_undo())
+
+        @function_tool
+        def aci_verify(
+            command: str,
+            path: str = "repo",
+            timeout_seconds: int | None = None,
+        ) -> str:
+            """Run a verification command inside the repository and return bounded output."""
+            return _to_json(tools.aci_verify(command, path=path, timeout_seconds=timeout_seconds))
 
         @function_tool
         def aci_submit_patch(path: str = "repo") -> str:
@@ -114,11 +138,15 @@ class ContributorAgent:
                 "Use the provided GitHub tools to discover and select exactly one low-risk task. "
                 "Shadow mode means no GitHub writes. Repository code interaction must go "
                 "through workspace or ACI tools. Use workspace_run for setup, cloning, and "
-                "tests; prefer ACI tools for code inspection, search, edits, and final patch "
-                "submission. Make the smallest useful reviewable change, verify it locally, "
-                "call aci_submit_patch, then finish with the structured ContribArena result. "
-                "Do not continue exploring after the expected shadow patch and verification "
-                "summary are complete."
+                "unusual shell operations; prefer ACI tools for navigation, search, edits, "
+                "verification, undo, and final patch submission. Use one tool call at a time. "
+                "If output is too broad, narrow the search instead of repeating it. If an edit "
+                "or verification fails, inspect the smallest relevant context, fix once, or use "
+                "aci_undo before trying a safer edit. Make the smallest useful reviewable "
+                "change, verify it locally with aci_verify or workspace_run, call "
+                "aci_submit_patch, then finish with the structured ContribArena result. Do not "
+                "continue exploring after the expected shadow patch and verification summary "
+                "are complete."
             ),
             tools=[
                 repo_search,
@@ -129,8 +157,12 @@ class ContributorAgent:
                 workspace_apply_patch,
                 aci_view,
                 aci_search,
+                aci_find_files,
                 aci_replace,
+                aci_insert,
                 aci_create,
+                aci_undo,
+                aci_verify,
                 aci_submit_patch,
             ],
             model=config.run.model,
@@ -143,7 +175,7 @@ class ContributorAgent:
         try:
             run_config = AgentsRunConfig(
                 model_provider=model_provider,
-                workflow_name="ContribArena M0.2",
+                workflow_name="ContribArena M0.2.1",
                 # trace.jsonl is the M0 source of truth; SDK spans can be enabled later.
                 tracing_disabled=True,
             )

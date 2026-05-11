@@ -6,7 +6,17 @@ import unittest
 from pathlib import Path
 
 from contribarena.models import CommandResult, PatchResult
-from contribarena.tools.aci import aci_create, aci_replace, aci_search, aci_submit_patch, aci_view
+from contribarena.tools.aci import (
+    aci_create,
+    aci_find_files,
+    aci_insert,
+    aci_replace,
+    aci_search,
+    aci_submit_patch,
+    aci_undo,
+    aci_verify,
+    aci_view,
+)
 
 
 class FakeWorkspace:
@@ -114,12 +124,42 @@ class AciToolsTest(unittest.TestCase):
             workspace = LocalWorkspace(root)
 
             replace = aci_replace(workspace, "repo/app.py", "old", "new").result  # type: ignore[arg-type]
-            create = aci_create(workspace, "repo/new.py", "value = 1\n").result  # type: ignore[arg-type]
+            create_execution = aci_create(workspace, "repo/new.py", "value = 1\n")  # type: ignore[arg-type]
+            create = create_execution.result
 
             self.assertTrue(replace.success, replace.error)
             self.assertTrue(create.success, create.error)
             self.assertEqual("print('new')\n", (root / "repo" / "app.py").read_text())
             self.assertEqual("value = 1\n", (root / "repo" / "new.py").read_text())
+
+            undo_create = aci_undo(workspace, create_execution.undo_diff or "").result  # type: ignore[arg-type]
+
+            self.assertTrue(undo_create.success, undo_create.error)
+            self.assertFalse((root / "repo" / "new.py").exists())
+
+    def test_find_insert_undo_and_verify(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "repo").mkdir()
+            (root / "repo" / "app.py").write_text("print('a')\nprint('c')\n", encoding="utf-8")
+            subprocess.run(["git", "init"], cwd=root, capture_output=True, check=True)
+            workspace = LocalWorkspace(root)
+
+            found = aci_find_files(workspace, "*.py", "repo").result  # type: ignore[arg-type]
+            insert = aci_insert(workspace, "repo/app.py", 1, "print('b')").result  # type: ignore[arg-type]
+            verify = aci_verify(workspace, "python -m compileall .", "repo").result  # type: ignore[arg-type]
+
+            self.assertTrue(found.success, found.error)
+            self.assertIn("repo/app.py", found.output)
+            self.assertTrue(insert.success, insert.error)
+            self.assertTrue(verify.success, verify.error)
+
+            undo_diff = aci_insert(workspace, "repo/app.py", 2, "print('temp')").undo_diff  # type: ignore[arg-type]
+            self.assertIsNotNone(undo_diff)
+            undo = aci_undo(workspace, undo_diff or "").result  # type: ignore[arg-type]
+
+            self.assertTrue(undo.success, undo.error)
+            self.assertNotIn("temp", (root / "repo" / "app.py").read_text())
 
 
 def _cmd(command: str, stdout: str = "", stderr: str = "", exit_code: int = 0) -> CommandResult:

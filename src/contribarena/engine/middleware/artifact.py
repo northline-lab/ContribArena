@@ -9,6 +9,7 @@ class ArtifactCapture:
         self.patches: list[PatchResult] = []
         self.aci_results: list[AciResult] = []
         self.steps: list[AgentStep] = []
+        self.undo_stack: list[str] = []
 
     def record_command(self, result: CommandResult) -> None:
         self.commands.append(result)
@@ -21,3 +22,6 @@ class ArtifactCapture:
 
     def record_step(self, step: AgentStep) -> None:
         self.steps.append(step)
+
+    def record_undo_diff(self, diff: str) -> None:
+        self.undo_stack.append(diff)

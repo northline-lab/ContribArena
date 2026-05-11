@@ -30,10 +30,13 @@ class FakeM02Agent:
         command = tools.workspace_run(  # type: ignore[attr-defined]
             "git clone https://github.com/example/repo.git repo && cd repo && git status --short"
         )
+        tools.aci_find_files("*.py", "repo")  # type: ignore[attr-defined]
         tools.aci_view("repo/app.py")  # type: ignore[attr-defined]
         tools.aci_search("old", "repo")  # type: ignore[attr-defined]
+        tools.aci_insert("repo/app.py", 1, "temporary")  # type: ignore[attr-defined]
+        tools.aci_undo()  # type: ignore[attr-defined]
         tools.aci_replace("repo/app.py", "old", "new")  # type: ignore[attr-defined]
-        verify = tools.workspace_run("cd repo && python -m compileall .")  # type: ignore[attr-defined]
+        tools.aci_verify("python -m compileall .", "repo")  # type: ignore[attr-defined]
         tools.aci_submit_patch()  # type: ignore[attr-defined]
 
         return AgentFinalResult(
@@ -55,7 +58,7 @@ class FakeM02Agent:
                 risk="low",
             ),
             workspace_summary=WorkspaceSummary(
-                commands_run=[command, verify],
+                commands_run=[command],
                 patch_applied=True,
                 notes="M0.2 shadow patch submitted.",
             ),
@@ -76,9 +79,11 @@ class RunnerM02Test(unittest.TestCase):
                 'if [ "$1" = "rm" ]; then exit 0; fi\n'
                 'if [ "$1" = "exec" ]; then\n'
                 '  case "$args" in\n'
+                '    *"find repo"*) printf "repo/app.py\\n"; exit 0 ;;\n'
                 '    *"cat -- repo/app.py"*) printf "old\\n"; exit 0 ;;\n'
                 '    *"nl -ba repo/app.py"*) printf "     1\\told\\n"; exit 0 ;;\n'
                 '    *"rg --line-number"*) printf "repo/app.py:1:old\\n"; exit 0 ;;\n'
+                '    *"python -m compileall ."*) printf "compile ok\\n"; exit 0 ;;\n'
                 '    *"git diff --binary -- ."*) '
                 'printf "diff --git a/repo/app.py b/repo/app.py\\n"; exit 0 ;;\n'
                 '    *"git apply -"*) exit 0 ;;\n'
@@ -111,7 +116,11 @@ class RunnerM02Test(unittest.TestCase):
                 }.issubset(names)
             )
             trajectory = json.loads((result.run_dir / "trajectory.json").read_text())
+            self.assertIn("aci_find_files", {step["tool"] for step in trajectory})
+            self.assertIn("aci_insert", {step["tool"] for step in trajectory})
+            self.assertIn("aci_undo", {step["tool"] for step in trajectory})
             self.assertIn("aci_replace", {step["tool"] for step in trajectory})
+            self.assertIn("aci_verify", {step["tool"] for step in trajectory})
             self.assertIn("aci_submit_patch", {step["tool"] for step in trajectory})
             workspace_command = json.loads(
                 (result.run_dir / "workspace_command.json").read_text()

@@ -27,6 +27,7 @@ class AciExecution:
     result: AciResult
     commands: list[CommandResult] = field(default_factory=list)
     patches: list[PatchResult] = field(default_factory=list)
+    undo_diff: str | None = None
 
 
 def aci_view(
@@ -80,6 +81,37 @@ def aci_search(
     )
 
 
+def aci_find_files(
+    workspace: "DockerWorkspaceManager",
+    pattern: str,
+    path: str = ".",
+    max_results: int = 80,
+) -> AciExecution:
+    safe_path = _safe_path(path)
+    limit = min(max(1, max_results), 200)
+    prune_entries = [f"*/{entry.removeprefix('!')}" for entry in DEFAULT_SEARCH_GLOBS]
+    prune = " -o ".join(
+        f"-path {shlex.quote(entry)}" for entry in prune_entries
+    )
+    command = (
+        f"find {shlex.quote(safe_path)} \\( {prune} \\) -prune -o "
+        f"-type f -iname {shlex.quote(pattern)} -print | head -n {limit}"
+    )
+    cmd = workspace.run(command)
+    output = _cap_output(cmd.stdout or cmd.stderr)
+    if cmd.exit_code == 0 and not output.strip():
+        output = f"No files matching {pattern!r} under {safe_path}."
+    return AciExecution(
+        result=AciResult(
+            tool="aci_find_files",
+            success=cmd.exit_code == 0,
+            output=output,
+            error=None if cmd.exit_code == 0 else output,
+        ),
+        commands=[cmd],
+    )
+
+
 def aci_replace(
     workspace: "DockerWorkspaceManager",
     path: str,
@@ -108,6 +140,7 @@ def aci_replace(
         )
     updated = read.stdout.replace(old_str, new_str, 1)
     diff = _unified_diff(safe_path, read.stdout, updated)
+    undo_diff = _unified_diff(safe_path, updated, read.stdout)
     patch = workspace.apply_patch(diff)
     output = (
         f"Replaced text in {safe_path}."
@@ -124,6 +157,60 @@ def aci_replace(
         ),
         commands=[read],
         patches=[patch],
+        undo_diff=undo_diff if patch.success else None,
+    )
+
+
+def aci_insert(
+    workspace: "DockerWorkspaceManager",
+    path: str,
+    insert_after_line: int,
+    text: str,
+) -> AciExecution:
+    safe_path = _safe_path(path)
+    read = workspace.run(f"cat -- {shlex.quote(safe_path)}")
+    if read.exit_code != 0:
+        output = _cap_output(read.stderr or read.stdout)
+        return AciExecution(
+            result=AciResult(
+                tool="aci_insert",
+                success=False,
+                output=output,
+                error=output or f"could not read {safe_path}",
+            ),
+            commands=[read],
+        )
+    lines = read.stdout.splitlines(keepends=True)
+    if insert_after_line < 0 or insert_after_line > len(lines):
+        message = (
+            f"insert_after_line must be between 0 and {len(lines)} for {safe_path}; "
+            f"got {insert_after_line}"
+        )
+        return AciExecution(
+            result=AciResult(tool="aci_insert", success=False, output=message, error=message),
+            commands=[read],
+        )
+    inserted = text if text.endswith("\n") else f"{text}\n"
+    updated = "".join([*lines[:insert_after_line], inserted, *lines[insert_after_line:]])
+    diff = _unified_diff(safe_path, read.stdout, updated)
+    undo_diff = _unified_diff(safe_path, updated, read.stdout)
+    patch = workspace.apply_patch(diff)
+    output = (
+        f"Inserted text into {safe_path} after line {insert_after_line}."
+        if patch.success
+        else patch.error or f"patch failed for {safe_path}"
+    )
+    return AciExecution(
+        result=AciResult(
+            tool="aci_insert",
+            success=patch.success,
+            output=_cap_output(output),
+            files_modified=patch.files_modified,
+            error=None if patch.success else output,
+        ),
+        commands=[read],
+        patches=[patch],
+        undo_diff=undo_diff if patch.success else None,
     )
 
 
@@ -137,6 +224,7 @@ def aci_create(workspace: "DockerWorkspaceManager", path: str, content: str) -> 
             commands=[exists],
         )
     diff = _create_file_diff(safe_path, content)
+    undo_diff = _delete_file_diff(safe_path, content)
     patch = workspace.apply_patch(diff)
     output = (
         f"Created {safe_path}."
@@ -153,6 +241,58 @@ def aci_create(workspace: "DockerWorkspaceManager", path: str, content: str) -> 
         ),
         commands=[exists],
         patches=[patch],
+        undo_diff=undo_diff if patch.success else None,
+    )
+
+
+def aci_undo(workspace: "DockerWorkspaceManager", diff: str) -> AciExecution:
+    patch = workspace.apply_patch(diff)
+    output = "Reverted the last ACI edit." if patch.success else patch.error or "undo failed"
+    return AciExecution(
+        result=AciResult(
+            tool="aci_undo",
+            success=patch.success,
+            output=_cap_output(output),
+            files_modified=patch.files_modified,
+            error=None if patch.success else output,
+        ),
+        patches=[patch],
+    )
+
+
+def aci_verify(
+    workspace: "DockerWorkspaceManager",
+    command: str,
+    path: str = "repo",
+    timeout_seconds: int | None = None,
+) -> AciExecution:
+    safe_path = _safe_path(path)
+    cmd = workspace.run(
+        f"cd {shlex.quote(safe_path)} && {command}",
+        timeout_seconds=timeout_seconds,
+    )
+    output = _cap_output(
+        "\n".join(
+            part
+            for part in [
+                f"$ {command}",
+                f"exit_code={cmd.exit_code}",
+                "stdout:",
+                cmd.stdout,
+                "stderr:",
+                cmd.stderr,
+            ]
+            if part is not None
+        )
+    )
+    return AciExecution(
+        result=AciResult(
+            tool="aci_verify",
+            success=cmd.exit_code == 0,
+            output=output,
+            error=None if cmd.exit_code == 0 else output,
+        ),
+        commands=[cmd],
     )
 
 
@@ -201,6 +341,16 @@ def _create_file_diff(path: str, content: str) -> str:
         difflib.unified_diff([], lines, fromfile="/dev/null", tofile=f"b/{path}")
     )
     return f"diff --git a/{path} b/{path}\nnew file mode 100644\n{body}"
+
+
+def _delete_file_diff(path: str, content: str) -> str:
+    lines = content.splitlines(keepends=True)
+    if content and not content.endswith("\n"):
+        lines.append("\n")
+    body = "".join(
+        difflib.unified_diff(lines, [], fromfile=f"a/{path}", tofile="/dev/null")
+    )
+    return f"diff --git a/{path} b/{path}\ndeleted file mode 100644\n{body}"
 
 
 def _cap_output(text: str, max_chars: int = 12000) -> str:
