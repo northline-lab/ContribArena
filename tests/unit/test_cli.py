@@ -69,6 +69,7 @@ class CliTest(unittest.TestCase):
                     "trajectory.json",
                     "patch.diff",
                     "test_log.txt",
+                    "terminal_state.json",
                     "quality_report.md",
                 }.issubset(names)
             )
@@ -93,6 +94,7 @@ class CliTest(unittest.TestCase):
                     "task_selected",
                     "workspace_checked",
                     "artifacts_written",
+                    "run_terminal",
                     "run_completed",
                 }.issubset(trace_states)
             )

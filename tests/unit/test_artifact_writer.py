@@ -21,6 +21,18 @@ class ArtifactWriterTest(unittest.TestCase):
             self.assertIn("config.json", names)
             self.assertIn("repo_profile.md", names)
 
+    def test_manifest_finalize_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            writer = ArtifactWriter(Path(tmp), "run-1", "owner/repo", "model")
+            writer.write_json("config.json", {"ok": True})
+            first = writer.finalize_manifest()
+            second = writer.finalize_manifest()
+
+            self.assertEqual(first, second)
+            manifest = json.loads(first.read_text(encoding="utf-8"))
+            names = [entry["name"] for entry in manifest["artifacts"]]
+            self.assertEqual(1, names.count("artifact_manifest.json"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -15,6 +15,7 @@ class RunState(StrEnum):
     WORKSPACE_CHECKED = "workspace_checked"
     ARTIFACTS_WRITTEN = "artifacts_written"
     RUN_COMPLETED = "run_completed"
+    RUN_TERMINAL = "run_terminal"
     WORKSPACE_FAILED = "workspace_failed"
     GOVERNANCE_BLOCKED = "governance_blocked"
     BUDGET_EXHAUSTED = "budget_exhausted"

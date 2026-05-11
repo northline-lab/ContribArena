@@ -1,5 +1,6 @@
 from .agent_result import AgentFinalResult, OpportunitySummary, RepoSummary, SelectedTask
 from .artifacts import ArtifactEntry, ArtifactManifest
+from .lifecycle import TerminalState
 from .run_state import RunState
 from .tool_results import (
     AciResult,
@@ -26,4 +27,5 @@ __all__ = [
     "RepoSummary",
     "RunState",
     "SelectedTask",
+    "TerminalState",
 ]

@@ -12,7 +12,8 @@ from contribarena.engine.context import ContextBuilder
 from contribarena.engine.middleware.artifact import ArtifactCapture
 from contribarena.engine.middleware.budget import BudgetTracker
 from contribarena.engine.workspace import DockerWorkspaceManager
-from contribarena.models import AgentFinalResult, RunState
+from contribarena.errors import AgentError, BudgetExhausted, InfrastructureError
+from contribarena.models import AgentFinalResult, RunState, TerminalState
 from contribarena.providers import ContribArenaModelProvider
 from contribarena.trace import TraceWriter
 from contribarena.tools.registry import ToolRegistry
@@ -24,6 +25,8 @@ class RunResult:
     run_dir: Path
     status: str
     tool_calls: int
+    terminal_reason: str = ""
+    terminal_layer: str = ""
 
 
 class Runner:
@@ -73,7 +76,9 @@ class Runner:
                 prompt,
                 model_provider=ContribArenaModelProvider(config.models),
             )
+            agent_status = result.status
             _enforce_issue_completion(config, result, capture)
+            terminal = _terminal_state_for_result(result, capture, agent_status)
             self._write_issue_artifacts(config, artifacts, result, capture)
             self._write_agent_artifacts(artifacts, result)
             trace.write(
@@ -89,21 +94,13 @@ class Runner:
                 "task.selected.write",
                 {"artifact": "selected_task.md", "title": result.selected_task.title},
             )
-            workspace_command = {
-                "commands": [command.model_dump(mode="json") for command in capture.commands],
-                "patches": [patch.model_dump(mode="json") for patch in capture.patches],
-                "aci_results": [result.model_dump(mode="json") for result in capture.aci_results],
-            }
-            artifacts.write_json("workspace_command.json", workspace_command)
-            artifacts.write_json(
-                "trajectory.json",
-                [step.model_dump(mode="json") for step in capture.steps],
-            )
+            _write_capture_artifacts(artifacts, capture)
             artifacts.write_text("patch.diff", _submitted_patch(capture), kind="diff")
             artifacts.write_text("test_log.txt", _command_log(capture.commands), required=False)
+            artifacts.write_json("terminal_state.json", terminal.model_dump(mode="json"))
             artifacts.write_markdown(
                 "quality_report.md",
-                _quality_report(result, capture),
+                _quality_report(result, capture, terminal),
                 required=False,
             )
             trace.write(
@@ -111,16 +108,61 @@ class Runner:
                 "artifacts.written",
                 {"count": len(artifacts.entries) + 1},
             )
-            trace.write(RunState.RUN_COMPLETED, "run.completed", {"status": result.status})
+            trace.write(
+                RunState.RUN_TERMINAL,
+                "run.terminal",
+                terminal.model_dump(mode="json"),
+            )
+            trace.write(
+                RunState.RUN_COMPLETED,
+                "run.completed",
+                {
+                    "status": terminal.status,
+                    "terminal_reason": terminal.reason,
+                    "terminal_layer": terminal.layer,
+                },
+            )
             artifacts.finalize_manifest()
             return RunResult(
                 run_id=run_id,
                 run_dir=artifacts.run_dir,
-                status=result.status,
+                status=terminal.status,
                 tool_calls=budget.steps,
+                terminal_reason=terminal.reason,
+                terminal_layer=terminal.layer,
             )
         except Exception as exc:
-            trace.write(RunState.AGENT_ERROR, "run.failed", {"error": str(exc)})
+            terminal = _terminal_state_for_exception(exc)
+            failure_state = (
+                RunState.WORKSPACE_FAILED
+                if terminal.layer == "workspace"
+                else RunState.BUDGET_EXHAUSTED
+                if terminal.layer == "budget"
+                else RunState.AGENT_ERROR
+            )
+            trace.write(
+                failure_state,
+                "run.failed",
+                {
+                    "error": str(exc),
+                    "terminal_reason": terminal.reason,
+                    "terminal_layer": terminal.layer,
+                },
+            )
+            _write_capture_artifacts(artifacts, capture)
+            artifacts.write_text("patch.diff", _submitted_patch(capture), kind="diff")
+            artifacts.write_text("test_log.txt", _command_log(capture.commands), required=False)
+            artifacts.write_json("terminal_state.json", terminal.model_dump(mode="json"))
+            artifacts.write_markdown(
+                "quality_report.md",
+                _failure_quality_report(terminal, capture),
+                required=False,
+            )
+            trace.write(
+                RunState.RUN_TERMINAL,
+                "run.terminal",
+                terminal.model_dump(mode="json"),
+            )
             artifacts.finalize_manifest()
             raise
         finally:
@@ -192,6 +234,98 @@ def _submitted_patch(capture: ArtifactCapture) -> str:
         if result.tool == "aci_submit_patch" and result.success:
             return result.output or ""
     return ""
+
+
+def _write_capture_artifacts(artifacts: ArtifactWriter, capture: ArtifactCapture) -> None:
+    workspace_command = {
+        "commands": [command.model_dump(mode="json") for command in capture.commands],
+        "patches": [patch.model_dump(mode="json") for patch in capture.patches],
+        "aci_results": [result.model_dump(mode="json") for result in capture.aci_results],
+    }
+    artifacts.write_json("workspace_command.json", workspace_command)
+    artifacts.write_json(
+        "trajectory.json",
+        [step.model_dump(mode="json") for step in capture.steps],
+    )
+
+
+def _terminal_state_for_result(
+    result: AgentFinalResult,
+    capture: ArtifactCapture,
+    agent_status: str,
+) -> TerminalState:
+    if result.status != agent_status:
+        return TerminalState(
+            status=result.status,  # type: ignore[arg-type]
+            reason="harness_review_blocked",
+            layer="run",
+            message="Harness completion enforcement changed the agent final status.",
+            agent_status=agent_status,
+            harness_status=result.status,
+        )
+    terminal_recovery = next(
+        (
+            item
+            for item in reversed(capture.aci_results)
+            if item.terminal_status or item.terminal_after_retries
+        ),
+        None,
+    )
+    if terminal_recovery is not None and result.status != "completed":
+        return TerminalState(
+            status=result.status,  # type: ignore[arg-type]
+            reason=terminal_recovery.recovery_kind
+            or terminal_recovery.terminal_status
+            or "tool_terminal",
+            layer="agent",
+            message=terminal_recovery.error or terminal_recovery.output or "",
+            agent_status=agent_status,
+            harness_status=result.status,
+        )
+    if result.status == "completed":
+        reason = "run_completed"
+    elif result.status == "blocked":
+        reason = "agent_blocked"
+    else:
+        reason = "agent_failed"
+    return TerminalState(
+        status=result.status,
+        reason=reason,
+        layer="run" if result.status == "completed" else "agent",
+        message="; ".join(result.blockers),
+        agent_status=agent_status,
+        harness_status=result.status,
+    )
+
+
+def _terminal_state_for_exception(exc: Exception) -> TerminalState:
+    if isinstance(exc, InfrastructureError):
+        return TerminalState(
+            status="failed",
+            reason="workspace_failed",
+            layer="workspace",
+            message=str(exc),
+        )
+    if isinstance(exc, BudgetExhausted):
+        return TerminalState(
+            status="blocked",
+            reason="budget_exhausted",
+            layer="budget",
+            message=str(exc),
+        )
+    if isinstance(exc, AgentError):
+        return TerminalState(
+            status="failed",
+            reason="agent_error",
+            layer="agent",
+            message=str(exc),
+        )
+    return TerminalState(
+        status="failed",
+        reason="unhandled_exception",
+        layer="unknown",
+        message=str(exc),
+    )
 
 
 def _enforce_issue_completion(
@@ -295,7 +429,11 @@ def _command_log(commands: list[object]) -> str:
     return "\n".join(sections)
 
 
-def _quality_report(result: AgentFinalResult, capture: ArtifactCapture) -> str:
+def _quality_report(
+    result: AgentFinalResult,
+    capture: ArtifactCapture,
+    terminal: TerminalState,
+) -> str:
     submitted = _has_submitted_patch(capture)
     failed_commands = [command for command in capture.commands if command.exit_code != 0]
     review_results = [
@@ -310,6 +448,9 @@ def _quality_report(result: AgentFinalResult, capture: ArtifactCapture) -> str:
         "# Quality Report",
         "",
         f"- Agent status: {result.status}",
+        f"- Terminal status: {terminal.status}",
+        f"- Terminal reason: {terminal.reason}",
+        f"- Terminal layer: {terminal.layer}",
         f"- Patch submitted in shadow mode: {submitted}",
         f"- Commands run: {len(capture.commands)}",
         f"- Failed commands: {len(failed_commands)}",
@@ -352,6 +493,26 @@ def _quality_report(result: AgentFinalResult, capture: ArtifactCapture) -> str:
         )
     if result.blockers:
         sections.extend(["", "## Blockers", "", *[f"- {blocker}" for blocker in result.blockers]])
+    return "\n".join(sections)
+
+
+def _failure_quality_report(terminal: TerminalState, capture: ArtifactCapture) -> str:
+    failed_commands = [command for command in capture.commands if command.exit_code != 0]
+    sections = [
+        "# Quality Report",
+        "",
+        "- Agent status: unavailable",
+        f"- Terminal status: {terminal.status}",
+        f"- Terminal reason: {terminal.reason}",
+        f"- Terminal layer: {terminal.layer}",
+        f"- Commands run: {len(capture.commands)}",
+        f"- Failed commands: {len(failed_commands)}",
+        f"- Patch applications: {len(capture.patches)}",
+        "",
+        "Run ended before a structured agent result was available.",
+    ]
+    if terminal.message:
+        sections.extend(["", "## Terminal Message", "", terminal.message])
     return "\n".join(sections)
 
 

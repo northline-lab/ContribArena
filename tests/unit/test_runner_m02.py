@@ -17,6 +17,7 @@ from contribarena.config.schema import (
 )
 from contribarena.agent.contributor import build_agent_instructions
 from contribarena.engine.runner import Runner
+from contribarena.errors import AgentError
 from contribarena.models import AgentFinalResult, OpportunitySummary, RepoSummary, SelectedTask
 from contribarena.models.agent_result import WorkspaceSummary
 
@@ -66,6 +67,17 @@ class FakeM02Agent:
                 notes="M0.2 shadow patch submitted.",
             ),
         )
+
+
+class FakeFailingAgent:
+    def run(
+        self,
+        config: RunConfig,
+        tools: object,
+        prompt: str,
+        model_provider: object = None,
+    ) -> AgentFinalResult:
+        raise AgentError("synthetic agent failure")
 
 
 class FakeIssueAgent:
@@ -245,12 +257,15 @@ class RunnerM02Test(unittest.TestCase):
                 os.environ["PATH"] = old_path
 
             self.assertEqual("completed", result.status)
+            self.assertEqual("run_completed", result.terminal_reason)
+            self.assertEqual("run", result.terminal_layer)
             names = {path.name for path in result.run_dir.iterdir()}
             self.assertTrue(
                 {
                     "trajectory.json",
                     "patch.diff",
                     "test_log.txt",
+                    "terminal_state.json",
                     "quality_report.md",
                     "workspace_command.json",
                 }.issubset(names)
@@ -277,6 +292,11 @@ class RunnerM02Test(unittest.TestCase):
                 "diff --git a/repo/app.py b/repo/app.py",
                 (result.run_dir / "patch.diff").read_text(),
             )
+            terminal = json.loads((result.run_dir / "terminal_state.json").read_text())
+            self.assertEqual("completed", terminal["status"])
+            self.assertEqual("run_completed", terminal["reason"])
+            report = (result.run_dir / "quality_report.md").read_text()
+            self.assertIn("Terminal reason: run_completed", report)
 
     def test_runner_writes_issue_solving_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -346,9 +366,15 @@ class RunnerM02Test(unittest.TestCase):
             )
 
             self.assertEqual("blocked", result.status)
+            self.assertEqual("harness_review_blocked", result.terminal_reason)
+            self.assertEqual("run", result.terminal_layer)
             report = (result.run_dir / "quality_report.md").read_text()
             self.assertIn("Submit-Time Review", report)
             self.assertIn("requires successful focused verification after the last edit", report)
+            self.assertIn("Terminal reason: harness_review_blocked", report)
+            terminal = json.loads((result.run_dir / "terminal_state.json").read_text())
+            self.assertEqual("completed", terminal["agent_status"])
+            self.assertEqual("blocked", terminal["harness_status"])
             trajectory = json.loads((result.run_dir / "trajectory.json").read_text())
             submit_step = [step for step in trajectory if step["tool"] == "aci_submit_patch"][-1]
             self.assertFalse(submit_step["accepted"])
@@ -467,6 +493,25 @@ class RunnerM02Test(unittest.TestCase):
                 "without an explicit blocker",
                 (result.run_dir / "quality_report.md").read_text(),
             )
+
+    def test_agent_exception_writes_terminal_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _config(tmp_path / "runs")
+
+            with self.assertRaises(AgentError):
+                _run_with_fake_docker(FakeFailingAgent(), config, tmp_path)
+
+            run_dirs = list(config.artifacts.output_root.iterdir())
+            self.assertEqual(1, len(run_dirs))
+            terminal = json.loads((run_dirs[0] / "terminal_state.json").read_text())
+            self.assertEqual("failed", terminal["status"])
+            self.assertEqual("agent_error", terminal["reason"])
+            self.assertEqual("agent", terminal["layer"])
+            manifest = json.loads((run_dirs[0] / "artifact_manifest.json").read_text())
+            manifest_names = {entry["name"] for entry in manifest["artifacts"]}
+            self.assertIn("terminal_state.json", manifest_names)
+            self.assertIn("quality_report.md", manifest_names)
 
 
 def _config(output_root: Path) -> RunConfig:

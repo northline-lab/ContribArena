@@ -21,17 +21,18 @@ class ArtifactWriter:
         self.run_dir.mkdir(parents=True, exist_ok=False)
         self.run_id = run_id
         self.entries: list[ArtifactEntry] = []
+        self._manifest_path: Path | None = None
 
     def write_json(self, name: str, payload: Any, required: bool = True) -> Path:
         path = self.run_dir / name
         path.write_text(json.dumps(payload, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
-        self.entries.append(ArtifactEntry(name=name, kind="json", required=required, path=name))
+        self._record_entry(ArtifactEntry(name=name, kind="json", required=required, path=name))
         return path
 
     def write_markdown(self, name: str, body: str, required: bool = True) -> Path:
         path = self.run_dir / name
         path.write_text(body.rstrip() + "\n", encoding="utf-8")
-        self.entries.append(ArtifactEntry(name=name, kind="markdown", required=required, path=name))
+        self._record_entry(ArtifactEntry(name=name, kind="markdown", required=required, path=name))
         return path
 
     def write_text(
@@ -44,10 +45,12 @@ class ArtifactWriter:
     ) -> Path:
         path = self.run_dir / name
         path.write_text(body.rstrip() + "\n", encoding="utf-8")
-        self.entries.append(ArtifactEntry(name=name, kind=kind, required=required, path=name))  # type: ignore[arg-type]
+        self._record_entry(ArtifactEntry(name=name, kind=kind, required=required, path=name))  # type: ignore[arg-type]
         return path
 
     def finalize_manifest(self) -> Path:
+        if self._manifest_path is not None:
+            return self._manifest_path
         entries = [
             *self.entries,
             ArtifactEntry(
@@ -63,4 +66,9 @@ class ArtifactWriter:
             json.dumps(manifest.model_dump(mode="json"), indent=2, ensure_ascii=True) + "\n",
             encoding="utf-8",
         )
+        self._manifest_path = path
         return path
+
+    def _record_entry(self, entry: ArtifactEntry) -> None:
+        self.entries = [item for item in self.entries if item.name != entry.name]
+        self.entries.append(entry)
