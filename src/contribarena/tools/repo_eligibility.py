@@ -130,6 +130,7 @@ def _prohibits_ai_or_bots(text: str) -> bool:
     phrases = [
         "no ai generated",
         "ai-generated contributions are not accepted",
+        "ai-authored contributions are not accepted",
         "do not submit ai",
         "no bot contributions",
         "bot contributions are not accepted",

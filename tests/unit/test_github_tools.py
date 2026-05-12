@@ -372,6 +372,49 @@ class GithubToolsTest(unittest.TestCase):
         self.assertEqual("BOT_TOKEN", fake.token_env)
 
 
+    def test_ai_authored_phrase_is_detected(self) -> None:
+        class FakeClient:
+            def gh_json(self, args: list[str]) -> GitHubResponse:
+                # Ensure contribution_acceptance passes by simulating a recent merged external PR
+                return GitHubResponse(
+                    ok=True,
+                    source="gh",
+                    data=[{"author": {"login": "contrib"}, "mergedAt": "2026-05-01T00:00:00Z"}],
+                )
+
+            def rest_json(
+                self, method: str, path: str, params: dict | None = None
+            ) -> GitHubResponse:
+                if path.endswith("/languages"):
+                    return GitHubResponse(ok=True, source="httpx", data={"Python": 100_000})
+                return GitHubResponse(ok=False, source="httpx", error="unexpected path")
+
+            def rest_text(self, path: str) -> GitHubResponse:
+                return GitHubResponse(
+                    ok=True,
+                    source="httpx",
+                    data="README\n\nAI-authored contributions are not accepted.",
+                )
+
+        metadata = RepoMetadata(
+            owner="owner",
+            repo="project",
+            full_name="owner/project",
+            url="https://github.com/owner/project",
+            last_push="2026-05-01T00:00:00Z",
+        )
+        with (
+            patch("contribarena.tools.repo_eligibility.GitHubClient", FakeClient),
+            patch("contribarena.tools.repo_eligibility.repo_get_metadata", return_value=metadata),
+        ):
+            result = repo_check_eligibility(_candidate())
+
+        self.assertFalse(result.eligible)
+        self.assertIn("bot_policy", result.checks_performed)
+        self.assertIn(
+            "repository policy appears to prohibit bot or AI contributions",
+            result.reasons,
+        )
 def _candidate() -> RepoCandidate:
     return RepoCandidate(
         owner="owner",
