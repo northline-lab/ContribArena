@@ -78,8 +78,8 @@ def load_run_config(path: Path) -> RunConfig:
     if not path.exists():
         raise ConfigError(f"config file does not exist: {path}")
     try:
-        _load_dotenv(Path.cwd() / ".env")
         _load_dotenv(path.parent / ".env")
+        _load_dotenv(Path.cwd() / ".env")
         raw = _load_yaml_like(path.read_text(encoding="utf-8"))
         return RunConfig.model_validate(raw)
     except (OSError, ValueError, ValidationError) as exc:

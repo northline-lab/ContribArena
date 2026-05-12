@@ -40,6 +40,9 @@ governance:
     - owner: YOUR_GITHUB_OWNER
       repo: YOUR_OWNED_REPO
       default_branch: main
+      pr_submission:
+        strategy: fork
+        fork_owner: YOUR_BOT_ACTOR
   bot_identity:
     kind: pat
     actor: YOUR_BOT_ACTOR

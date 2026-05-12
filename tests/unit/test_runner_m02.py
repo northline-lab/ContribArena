@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Literal
 
 from contribarena.config.schema import (
     ArtifactConfig,
@@ -13,6 +14,7 @@ from contribarena.config.schema import (
     GovernanceConfig,
     IssueConfig,
     OwnedRepositoryPolicy,
+    PrSubmissionConfig,
     RepoCandidate,
     RunConfig,
     RunSection,
@@ -24,7 +26,7 @@ from contribarena.errors import AgentError
 from contribarena.models import AgentFinalResult, OpportunitySummary, RepoSummary, SelectedTask
 from contribarena.models.lifecycle import CiCheck, CiStatus
 from contribarena.models.agent_result import WorkspaceSummary
-from contribarena.tools.github_pr import PullRequestCreateResult
+from contribarena.tools.github_pr import ForkEnsureResult, PullRequestCreateResult
 
 
 class FakeM02Agent:
@@ -570,7 +572,7 @@ class RunnerM02Test(unittest.TestCase):
             self.assertEqual("completed", terminal["agent_status"])
             self.assertEqual("blocked", terminal["harness_status"])
 
-    def test_owned_live_run_pushes_branch_and_records_opened_pr(self) -> None:
+    def test_owned_live_run_pushes_fork_branch_and_records_opened_pr(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             config = _owned_live_config(tmp_path / "runs", live_enabled=True)
@@ -588,27 +590,93 @@ class RunnerM02Test(unittest.TestCase):
 
             self.assertEqual("completed", result.status)
             self.assertEqual(1, pr_client.calls)
+            self.assertEqual(1, pr_client.ensure_fork_calls)
             self.assertEqual("Fix old marker", pr_client.last_title)
+            self.assertEqual(
+                "contribarena-bot:contribarena/fix-configured-problem",
+                pr_client.last_head,
+            )
             live_action_log = (result.run_dir / "live_action_log.jsonl").read_text()
             live_action_entries = [
                 json.loads(line) for line in live_action_log.splitlines() if line.strip()
             ]
             self.assertEqual(
-                ["github.push_branch", "github.open_pr"],
+                [
+                    "github.ensure_fork",
+                    "github.push_fork_branch",
+                    "github.open_pr",
+                    "github.observe_checks",
+                ],
                 [entry["action"] for entry in live_action_entries],
             )
-            self.assertEqual("pushed", live_action_entries[0]["status"])
-            self.assertEqual("opened", live_action_entries[1]["status"])
+            self.assertEqual("ready", live_action_entries[0]["status"])
+            self.assertEqual("pushed", live_action_entries[1]["status"])
+            self.assertEqual("opened", live_action_entries[2]["status"])
+            self.assertEqual("success", live_action_entries[3]["status"])
+            self.assertEqual("github", live_action_entries[3]["ci_source"])
+            self.assertEqual("contribarena-bot/repo", live_action_entries[0]["fork_repo"])
+            self.assertEqual(
+                "contribarena-bot:contribarena/fix-configured-problem",
+                live_action_entries[2]["head"],
+            )
             self.assertIn('"status": "opened"', live_action_log)
             self.assertIn('"external_write": true', live_action_log)
             self.assertIn('"pr_url": "https://github.com/example/repo/pull/42"', live_action_log)
             self.assertNotIn("test-token", live_action_log)
             command_log = (result.run_dir / "test_log.txt").read_text()
             self.assertIn("${GITHUB_TOKEN}", command_log)
+            self.assertIn(
+                "x-access-token:${GITHUB_TOKEN}@github.com/contribarena-bot/repo.git",
+                command_log,
+            )
+            self.assertNotIn(
+                "x-access-token:${GITHUB_TOKEN}@github.com/example/repo.git",
+                command_log,
+            )
             self.assertNotIn("test-token", command_log)
             ci_status = json.loads((result.run_dir / "ci_status.json").read_text())
             self.assertEqual("github", ci_status["source"])
             self.assertEqual("success", ci_status["status"])
+
+    def test_owned_live_upstream_branch_strategy_remains_explicit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _owned_live_config(
+                tmp_path / "runs",
+                live_enabled=True,
+                strategy="upstream_branch",
+            )
+            pr_client = FakePrClient(actor="contribarena-bot")
+            os.environ["GITHUB_TOKEN"] = "test-token"
+            try:
+                result = _run_with_fake_docker(
+                    FakeIssueAgent(),
+                    config,
+                    tmp_path,
+                    pr_client=pr_client,
+                )
+            finally:
+                os.environ.pop("GITHUB_TOKEN", None)
+
+            self.assertEqual("completed", result.status)
+            self.assertEqual(0, pr_client.ensure_fork_calls)
+            self.assertEqual("contribarena/fix-configured-problem", pr_client.last_head)
+            live_action_entries = [
+                json.loads(line)
+                for line in (result.run_dir / "live_action_log.jsonl")
+                .read_text()
+                .splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(
+                ["github.push_upstream_branch", "github.open_pr", "github.observe_checks"],
+                [entry["action"] for entry in live_action_entries],
+            )
+            command_log = (result.run_dir / "test_log.txt").read_text()
+            self.assertIn(
+                "x-access-token:${GITHUB_TOKEN}@github.com/example/repo.git",
+                command_log,
+            )
 
     def test_owned_live_run_blocks_when_authenticated_actor_mismatches(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -688,13 +756,25 @@ def _issue_config(output_root: Path) -> RunConfig:
     return config
 
 
-def _owned_live_config(output_root: Path, live_enabled: bool) -> RunConfig:
+def _owned_live_config(
+    output_root: Path,
+    live_enabled: bool,
+    strategy: Literal["fork", "upstream_branch"] = "fork",
+) -> RunConfig:
     config = _issue_config(output_root)
     config.run.mode = "owned_live"
     config.governance = GovernanceConfig(
         live_enabled=live_enabled,
         owned_repositories=[
-            OwnedRepositoryPolicy(owner="example", repo="repo", default_branch="main")
+            OwnedRepositoryPolicy(
+                owner="example",
+                repo="repo",
+                default_branch="main",
+                pr_submission=PrSubmissionConfig(
+                    strategy=strategy,
+                    fork_owner="contribarena-bot",
+                ),
+            )
         ],
         bot_identity=BotIdentityConfig(kind="pat", actor="contribarena-bot"),
     )
@@ -704,11 +784,25 @@ def _owned_live_config(output_root: Path, live_enabled: bool) -> RunConfig:
 class FakePrClient:
     def __init__(self, actor: str = "") -> None:
         self.calls = 0
+        self.ensure_fork_calls = 0
         self.last_title = ""
+        self.last_head = ""
         self.actor = actor
 
     def authenticated_actor(self) -> str:
         return self.actor
+
+    def ensure_fork(self, *, owner: str, repo: str, fork_owner: str) -> ForkEnsureResult:
+        self.ensure_fork_calls += 1
+        return ForkEnsureResult(
+            ok=True,
+            owner=fork_owner,
+            repo=repo,
+            full_name=f"{fork_owner}/{repo}",
+            url=f"https://github.com/{fork_owner}/{repo}",
+            created=False,
+            source="fake",
+        )
 
     def open_pr(
         self,
@@ -722,6 +816,7 @@ class FakePrClient:
     ) -> PullRequestCreateResult:
         self.calls += 1
         self.last_title = title
+        self.last_head = head
         return PullRequestCreateResult(
             ok=True,
             number=42,

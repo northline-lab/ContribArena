@@ -231,6 +231,107 @@ class GithubToolsTest(unittest.TestCase):
         self.assertEqual("contribarena/improve-docs", fake.json_body["head"])
         self.assertEqual("main", fake.json_body["base"])
 
+    def test_github_pr_client_ensures_existing_fork(self) -> None:
+        class FakeClient:
+            def rest_json(
+                self,
+                method: str,
+                path: str,
+                params: dict | None = None,
+                json_body: dict | None = None,
+                token_env: str | None = None,
+            ) -> GitHubResponse:
+                self.method = method
+                self.path = path
+                self.token_env = token_env
+                return GitHubResponse(
+                    ok=True,
+                    source="fake",
+                    data={
+                        "name": "project",
+                        "full_name": "bot/project",
+                        "html_url": "https://github.com/bot/project",
+                        "owner": {"login": "bot"},
+                    },
+                )
+
+        fake = FakeClient()
+        client = GitHubPullRequestClient(client=fake, token_env="BOT_TOKEN")  # type: ignore[arg-type]
+
+        result = client.ensure_fork(owner="owner", repo="project", fork_owner="bot")
+
+        self.assertTrue(result.ok)
+        self.assertFalse(result.created)
+        self.assertEqual("bot/project", result.full_name)
+        self.assertEqual("GET", fake.method)
+        self.assertEqual("/repos/bot/project", fake.path)
+        self.assertEqual("BOT_TOKEN", fake.token_env)
+
+    def test_github_pr_client_creates_missing_fork(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str]] = []
+
+            def rest_json(
+                self,
+                method: str,
+                path: str,
+                params: dict | None = None,
+                json_body: dict | None = None,
+                token_env: str | None = None,
+            ) -> GitHubResponse:
+                self.calls.append((method, path))
+                if method == "GET":
+                    return GitHubResponse(ok=False, error="repo not found", source="fake")
+                return GitHubResponse(
+                    ok=True,
+                    source="fake",
+                    data={
+                        "name": "project",
+                        "full_name": "bot/project",
+                        "html_url": "https://github.com/bot/project",
+                        "owner": {"login": "bot"},
+                    },
+                )
+
+        fake = FakeClient()
+        client = GitHubPullRequestClient(client=fake, token_env="BOT_TOKEN")  # type: ignore[arg-type]
+
+        result = client.ensure_fork(owner="owner", repo="project", fork_owner="bot")
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.created)
+        self.assertEqual("bot", result.owner)
+        self.assertEqual(
+            [("GET", "/repos/bot/project"), ("POST", "/repos/owner/project/forks")],
+            fake.calls,
+        )
+
+    def test_github_pr_client_does_not_create_fork_after_auth_lookup_error(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str]] = []
+
+            def rest_json(
+                self,
+                method: str,
+                path: str,
+                params: dict | None = None,
+                json_body: dict | None = None,
+                token_env: str | None = None,
+            ) -> GitHubResponse:
+                self.calls.append((method, path))
+                return GitHubResponse(ok=False, error="authentication missing", source="fake")
+
+        fake = FakeClient()
+        client = GitHubPullRequestClient(client=fake, token_env="BOT_TOKEN")  # type: ignore[arg-type]
+
+        result = client.ensure_fork(owner="owner", repo="project", fork_owner="bot")
+
+        self.assertFalse(result.ok)
+        self.assertEqual("authentication missing", result.error)
+        self.assertEqual([("GET", "/repos/bot/project")], fake.calls)
+
     def test_github_pr_client_normalizes_check_runs(self) -> None:
         class FakeClient:
             def rest_json(

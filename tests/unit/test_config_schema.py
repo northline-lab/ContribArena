@@ -13,6 +13,7 @@ from contribarena.config.schema import (
     GovernanceConfig,
     IssueConfig,
     OwnedRepositoryPolicy,
+    PrSubmissionConfig,
     RepoCandidate,
     RunConfig,
     RunSection,
@@ -150,6 +151,16 @@ class ConfigSchemaTest(unittest.TestCase):
         )
         self.assertEqual("owned_live", config.run.mode)
         self.assertEqual("example/repo", config.governance.owned_repositories[0].full_name)
+        self.assertEqual("fork", config.governance.owned_repositories[0].pr_submission.strategy)
+
+    def test_owned_repository_can_select_upstream_branch_strategy(self) -> None:
+        policy = OwnedRepositoryPolicy(
+            owner="example",
+            repo="repo",
+            pr_submission=PrSubmissionConfig(strategy="upstream_branch"),
+        )
+
+        self.assertEqual("upstream_branch", policy.pr_submission.strategy)
 
 
 if __name__ == "__main__":

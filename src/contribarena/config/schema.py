@@ -88,10 +88,16 @@ class ArtifactConfig(BaseModel):
     output_root: Path = Path("runs")
 
 
+class PrSubmissionConfig(BaseModel):
+    strategy: Literal["fork", "upstream_branch"] = "fork"
+    fork_owner: str | None = None
+
+
 class OwnedRepositoryPolicy(BaseModel):
     owner: str
     repo: str
     default_branch: str = "main"
+    pr_submission: PrSubmissionConfig = Field(default_factory=PrSubmissionConfig)
 
     @property
     def full_name(self) -> str:

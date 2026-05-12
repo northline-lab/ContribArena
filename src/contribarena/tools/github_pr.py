@@ -16,6 +16,18 @@ class PullRequestCreateResult:
     source: str = ""
 
 
+@dataclass(frozen=True)
+class ForkEnsureResult:
+    ok: bool
+    owner: str = ""
+    repo: str = ""
+    full_name: str = ""
+    url: str = ""
+    created: bool = False
+    error: str = ""
+    source: str = ""
+
+
 class GitHubPullRequestClient:
     def __init__(self, client: GitHubClient | None = None, token_env: str = "GITHUB_TOKEN") -> None:
         self.client = client or GitHubClient()
@@ -26,6 +38,39 @@ class GitHubPullRequestClient:
         if not response.ok or not isinstance(response.data, dict):
             return ""
         return str(response.data.get("login") or "")
+
+    def ensure_fork(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        fork_owner: str,
+    ) -> ForkEnsureResult:
+        existing = self.client.rest_json(
+            "GET",
+            repo_api_path(fork_owner, repo),
+            token_env=self.token_env,
+        )
+        if existing.ok:
+            return _fork_result(existing.data, created=False, source=existing.source)
+        if "repo not found" not in existing.error:
+            return ForkEnsureResult(ok=False, error=existing.error, source=existing.source)
+
+        created = self.client.rest_json(
+            "POST",
+            repo_api_path(owner, repo, "forks"),
+            token_env=self.token_env,
+        )
+        if not created.ok:
+            return ForkEnsureResult(ok=False, error=created.error, source=created.source)
+        result = _fork_result(created.data, created=True, source=created.source)
+        if fork_owner and result.owner and result.owner != fork_owner:
+            return ForkEnsureResult(
+                ok=False,
+                error=f"created fork owner {result.owner} does not match expected {fork_owner}",
+                source=result.source,
+            )
+        return result
 
     def open_pr(
         self,
@@ -135,3 +180,26 @@ def _normalize_check_run(item: dict[str, object]) -> CiCheck:
         normalized = "skipped"
     details = item.get("details_url") or item.get("html_url") or conclusion or status
     return CiCheck(name=name, status=normalized, details=str(details or ""))
+
+
+def _fork_result(data: object, *, created: bool, source: str) -> ForkEnsureResult:
+    if not isinstance(data, dict):
+        return ForkEnsureResult(
+            ok=False,
+            error="GitHub fork response was not a JSON object",
+            source=source,
+        )
+    owner = data.get("owner")
+    owner_login = owner.get("login") if isinstance(owner, dict) else ""
+    name = data.get("name") or ""
+    full_name = data.get("full_name") or ""
+    url = data.get("html_url") or data.get("url") or ""
+    return ForkEnsureResult(
+        ok=True,
+        owner=str(owner_login or ""),
+        repo=str(name or ""),
+        full_name=str(full_name or ""),
+        url=str(url or ""),
+        created=created,
+        source=source,
+    )
