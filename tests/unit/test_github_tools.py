@@ -14,6 +14,7 @@ from contribarena.config.schema import (
 )
 from contribarena.models import RepoMetadata
 from contribarena.tools.github_client import GitHubResponse
+from contribarena.tools.github_pr import GitHubPullRequestClient
 from contribarena.tools.repo_eligibility import repo_check_eligibility
 from contribarena.tools.repo_issues import repo_get_issues
 from contribarena.tools.repo_metadata import repo_get_metadata
@@ -183,6 +184,91 @@ class GithubToolsTest(unittest.TestCase):
         self.assertTrue(result.eligible)
         self.assertIn("activity", result.checks_performed)
         self.assertIn("code_size", result.checks_performed)
+
+    def test_github_pr_client_posts_pull_request_payload(self) -> None:
+        class FakeClient:
+            def rest_json(
+                self,
+                method: str,
+                path: str,
+                params: dict | None = None,
+                json_body: dict | None = None,
+                token_env: str | None = None,
+            ) -> GitHubResponse:
+                self.method = method
+                self.path = path
+                self.json_body = json_body
+                self.token_env = token_env
+                return GitHubResponse(
+                    ok=True,
+                    source="fake",
+                    data={
+                        "number": 42,
+                        "html_url": "https://github.com/owner/project/pull/42",
+                        "head": {"sha": "abc123"},
+                    },
+                )
+
+        fake = FakeClient()
+        client = GitHubPullRequestClient(client=fake, token_env="BOT_TOKEN")  # type: ignore[arg-type]
+
+        result = client.open_pr(
+            owner="owner",
+            repo="project",
+            title="Improve docs",
+            body="Body",
+            head="contribarena/improve-docs",
+            base="main",
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(42, result.number)
+        self.assertEqual("abc123", result.head_sha)
+        self.assertEqual("POST", fake.method)
+        self.assertEqual("/repos/owner/project/pulls", fake.path)
+        self.assertEqual("BOT_TOKEN", fake.token_env)
+        self.assertEqual("Improve docs", fake.json_body["title"])
+        self.assertEqual("contribarena/improve-docs", fake.json_body["head"])
+        self.assertEqual("main", fake.json_body["base"])
+
+    def test_github_pr_client_normalizes_check_runs(self) -> None:
+        class FakeClient:
+            def rest_json(
+                self,
+                method: str,
+                path: str,
+                params: dict | None = None,
+                json_body: dict | None = None,
+                token_env: str | None = None,
+            ) -> GitHubResponse:
+                self.method = method
+                self.path = path
+                self.token_env = token_env
+                return GitHubResponse(
+                    ok=True,
+                    source="fake",
+                    data={
+                        "check_runs": [
+                            {
+                                "name": "unit",
+                                "status": "completed",
+                                "conclusion": "success",
+                                "details_url": "https://example.test/check",
+                            }
+                        ]
+                    },
+                )
+
+        fake = FakeClient()
+        client = GitHubPullRequestClient(client=fake, token_env="BOT_TOKEN")  # type: ignore[arg-type]
+
+        status = client.get_check_runs(owner="owner", repo="project", ref="abc123")
+
+        self.assertEqual("success", status.status)
+        self.assertEqual("github", status.source)
+        self.assertEqual("unit", status.checks[0].name)
+        self.assertEqual("/repos/owner/project/commits/abc123/check-runs", fake.path)
+        self.assertEqual("BOT_TOKEN", fake.token_env)
 
 
 def _candidate() -> RepoCandidate:

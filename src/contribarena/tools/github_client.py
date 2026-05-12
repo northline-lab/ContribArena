@@ -46,19 +46,30 @@ class GitHubClient:
             return GitHubResponse(ok=False, error=f"invalid gh JSON: {exc}", source="gh")
 
     def rest_json(
-        self, method: str, path: str, params: dict[str, Any] | None = None
+        self,
+        method: str,
+        path: str,
+        params: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | None = None,
+        token_env: str | None = None,
     ) -> GitHubResponse:
         headers = {
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         }
-        token = github_token()
+        token = os.environ.get(token_env) if token_env else github_token()
         if token:
             headers["Authorization"] = f"Bearer {token}"
         url = path if path.startswith("http") else f"https://api.github.com{path}"
         try:
             with httpx.Client(timeout=30, follow_redirects=True) as client:
-                response = client.request(method, url, params=params, headers=headers)
+                response = client.request(
+                    method,
+                    url,
+                    params=params,
+                    json=json_body,
+                    headers=headers,
+                )
         except httpx.HTTPError as exc:
             return GitHubResponse(ok=False, error=f"httpx request failed: {exc}", source="httpx")
 

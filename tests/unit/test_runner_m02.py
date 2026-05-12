@@ -8,8 +8,11 @@ from pathlib import Path
 
 from contribarena.config.schema import (
     ArtifactConfig,
+    BotIdentityConfig,
     DiscoveryConfig,
+    GovernanceConfig,
     IssueConfig,
+    OwnedRepositoryPolicy,
     RepoCandidate,
     RunConfig,
     RunSection,
@@ -19,7 +22,9 @@ from contribarena.agent.contributor import build_agent_instructions
 from contribarena.engine.runner import Runner
 from contribarena.errors import AgentError
 from contribarena.models import AgentFinalResult, OpportunitySummary, RepoSummary, SelectedTask
+from contribarena.models.lifecycle import CiCheck, CiStatus
 from contribarena.models.agent_result import WorkspaceSummary
+from contribarena.tools.github_pr import PullRequestCreateResult
 
 
 class FakeM02Agent:
@@ -216,6 +221,14 @@ class RunnerM02Test(unittest.TestCase):
         instructions = build_agent_instructions(_config(Path("runs")))
 
         self.assertIn("discover and select exactly one low-risk task", instructions)
+
+    def test_owned_live_agent_instructions_keep_writes_harness_owned(self) -> None:
+        instructions = build_agent_instructions(
+            _owned_live_config(Path("runs"), live_enabled=True)
+        )
+
+        self.assertIn("Owned-live mode", instructions)
+        self.assertIn("harness will handle governed branch push and PR creation", instructions)
 
     def test_runner_captures_aci_trajectory_and_shadow_patch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -534,6 +547,92 @@ class RunnerM02Test(unittest.TestCase):
                 (result.run_dir / "quality_report.md").read_text(),
             )
 
+    def test_owned_live_run_blocks_at_governance_when_live_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            result = _run_with_fake_docker(
+                FakeIssueAgent(),
+                _owned_live_config(tmp_path / "runs", live_enabled=False),
+                tmp_path,
+            )
+
+            self.assertEqual("blocked", result.status)
+            self.assertEqual("governance_blocked", result.terminal_reason)
+            self.assertEqual("governance", result.terminal_layer)
+            decision = json.loads((result.run_dir / "governance_decision.json").read_text())
+            self.assertEqual("block", decision["status"])
+            self.assertIn("governance live_enabled is false", decision["reasons"])
+            live_action_log = (result.run_dir / "live_action_log.jsonl").read_text()
+            self.assertIn('"mode": "owned_live"', live_action_log)
+            self.assertIn('"status": "blocked"', live_action_log)
+            self.assertIn('"external_write": false', live_action_log)
+            terminal = json.loads((result.run_dir / "terminal_state.json").read_text())
+            self.assertEqual("completed", terminal["agent_status"])
+            self.assertEqual("blocked", terminal["harness_status"])
+
+    def test_owned_live_run_pushes_branch_and_records_opened_pr(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _owned_live_config(tmp_path / "runs", live_enabled=True)
+            pr_client = FakePrClient(actor="contribarena-bot")
+            os.environ["GITHUB_TOKEN"] = "test-token"
+            try:
+                result = _run_with_fake_docker(
+                    FakeIssueAgent(),
+                    config,
+                    tmp_path,
+                    pr_client=pr_client,
+                )
+            finally:
+                os.environ.pop("GITHUB_TOKEN", None)
+
+            self.assertEqual("completed", result.status)
+            self.assertEqual(1, pr_client.calls)
+            self.assertEqual("Fix old marker", pr_client.last_title)
+            live_action_log = (result.run_dir / "live_action_log.jsonl").read_text()
+            live_action_entries = [
+                json.loads(line) for line in live_action_log.splitlines() if line.strip()
+            ]
+            self.assertEqual(
+                ["github.push_branch", "github.open_pr"],
+                [entry["action"] for entry in live_action_entries],
+            )
+            self.assertEqual("pushed", live_action_entries[0]["status"])
+            self.assertEqual("opened", live_action_entries[1]["status"])
+            self.assertIn('"status": "opened"', live_action_log)
+            self.assertIn('"external_write": true', live_action_log)
+            self.assertIn('"pr_url": "https://github.com/example/repo/pull/42"', live_action_log)
+            self.assertNotIn("test-token", live_action_log)
+            command_log = (result.run_dir / "test_log.txt").read_text()
+            self.assertIn("${GITHUB_TOKEN}", command_log)
+            self.assertNotIn("test-token", command_log)
+            ci_status = json.loads((result.run_dir / "ci_status.json").read_text())
+            self.assertEqual("github", ci_status["source"])
+            self.assertEqual("success", ci_status["status"])
+
+    def test_owned_live_run_blocks_when_authenticated_actor_mismatches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _owned_live_config(tmp_path / "runs", live_enabled=True)
+            os.environ["GITHUB_TOKEN"] = "test-token"
+            try:
+                result = _run_with_fake_docker(
+                    FakeIssueAgent(),
+                    config,
+                    tmp_path,
+                    pr_client=FakePrClient(actor="wrong-bot"),
+                )
+            finally:
+                os.environ.pop("GITHUB_TOKEN", None)
+
+            self.assertEqual("blocked", result.status)
+            decision = json.loads((result.run_dir / "governance_decision.json").read_text())
+            self.assertEqual("block", decision["status"])
+            self.assertIn(
+                "authenticated actor wrong-bot does not match expected contribarena-bot",
+                decision["reasons"],
+            )
+
     def test_agent_exception_writes_terminal_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -589,11 +688,68 @@ def _issue_config(output_root: Path) -> RunConfig:
     return config
 
 
+def _owned_live_config(output_root: Path, live_enabled: bool) -> RunConfig:
+    config = _issue_config(output_root)
+    config.run.mode = "owned_live"
+    config.governance = GovernanceConfig(
+        live_enabled=live_enabled,
+        owned_repositories=[
+            OwnedRepositoryPolicy(owner="example", repo="repo", default_branch="main")
+        ],
+        bot_identity=BotIdentityConfig(kind="pat", actor="contribarena-bot"),
+    )
+    return config
+
+
+class FakePrClient:
+    def __init__(self, actor: str = "") -> None:
+        self.calls = 0
+        self.last_title = ""
+        self.actor = actor
+
+    def authenticated_actor(self) -> str:
+        return self.actor
+
+    def open_pr(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        title: str,
+        body: str,
+        head: str,
+        base: str,
+    ) -> PullRequestCreateResult:
+        self.calls += 1
+        self.last_title = title
+        return PullRequestCreateResult(
+            ok=True,
+            number=42,
+            url=f"https://github.com/{owner}/{repo}/pull/42",
+            head_sha="abc123",
+            source="fake",
+        )
+
+    def get_check_runs(self, *, owner: str, repo: str, ref: str) -> CiStatus:
+        return CiStatus(
+            status="success",
+            source="github",
+            checks=[
+                CiCheck(
+                    name=f"{owner}/{repo}:{ref}",
+                    status="success",
+                    details="fake check passed",
+                )
+            ],
+        )
+
+
 def _run_with_fake_docker(
     agent: object,
     config: RunConfig,
     tmp_path: Path,
     diff_path: str = "repo/app.py",
+    pr_client: object | None = None,
 ):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
@@ -621,7 +777,10 @@ def _run_with_fake_docker(
     old_path = os.environ.get("PATH", "")
     os.environ["PATH"] = f"{bin_dir}:{old_path}"
     try:
-        return Runner(agent=agent).run(config, output_dir=config.artifacts.output_root)
+        return Runner(agent=agent, pr_client=pr_client).run(
+            config,
+            output_dir=config.artifacts.output_root,
+        )
     finally:
         os.environ["PATH"] = old_path
 

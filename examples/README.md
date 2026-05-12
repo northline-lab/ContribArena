@@ -19,4 +19,14 @@ Validate the M0.2.2 issue-solving config with:
 contribarena validate --config examples/issue-solving.yaml
 ```
 
+Validate the M0.4 owned-live controller template with:
+
+```bash
+contribarena validate --config examples/owned-live.yaml
+```
+
+Before running owned-live mode, copy the template locally, replace the owner,
+repository, bot actor, and model provider values, set `GITHUB_TOKEN` for a
+dedicated bot account, and flip `governance.live_enabled` to `true`.
+
 The run writes artifacts under `runs/`.

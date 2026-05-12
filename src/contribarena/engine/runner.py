@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,17 +24,29 @@ from contribarena.engine.lifecycle import (
 )
 from contribarena.engine.middleware.artifact import ArtifactCapture
 from contribarena.engine.middleware.budget import BudgetTracker
+from contribarena.engine.middleware.governance import (
+    GovernanceMiddleware,
+    load_governance_state,
+    record_governance_attempt,
+    record_governance_pr,
+    save_governance_state,
+)
+from contribarena.engine.runtime_config import apply_output_dir
 from contribarena.engine.workspace import DockerWorkspaceManager
 from contribarena.errors import AgentError, BudgetExhausted, InfrastructureError
 from contribarena.models import (
     AgentFinalResult,
+    CommandResult,
+    GovernanceDecision,
     PullRequestDraft,
     QualityGateResult,
+    CiStatus,
     RunState,
     TerminalState,
 )
 from contribarena.providers import ContribArenaModelProvider
 from contribarena.trace import TraceWriter
+from contribarena.tools.github_pr import GitHubPullRequestClient, PullRequestCreateResult
 from contribarena.tools.registry import ToolRegistry
 
 
@@ -47,20 +61,30 @@ class RunResult:
 
 
 class Runner:
-    def __init__(self, agent: ContributorAgent | None = None) -> None:
+    def __init__(
+        self,
+        agent: ContributorAgent | None = None,
+        pr_client: object | None = None,
+    ) -> None:
         self.agent = agent or ContributorAgent()
+        self.pr_client = pr_client
 
     def run(
         self, config: RunConfig, output_dir: Path | None = None, verbose: bool = False
     ) -> RunResult:
+        config = apply_output_dir(config, output_dir)
         repo_slug = (
             config.discovery.candidates[0].full_name
             if config.discovery.candidates
             else config.discovery.query or "github-discovery"
         )
         run_id = config.run.id or uuid.uuid4().hex[:12]
-        output_root = output_dir or config.artifacts.output_root
-        artifacts = ArtifactWriter(output_root, run_id, repo_slug, config.run.model)
+        artifacts = ArtifactWriter(
+            config.artifacts.output_root,
+            run_id,
+            repo_slug,
+            config.run.model,
+        )
         trace = TraceWriter(artifacts.run_dir / "trace.jsonl", run_id)
         trace.write(RunState.RUN_STARTED, "run.started", {"verbose": verbose})
         trace.write(RunState.CONFIG_LOADED, "config.loaded", {"model": config.run.model})
@@ -145,25 +169,27 @@ class Runner:
                 "task.selected.write",
                 {"artifact": "selected_task.md", "title": result.selected_task.title},
             )
-            _write_capture_artifacts(artifacts, capture)
             artifacts.write_text("patch.diff", patch, kind="diff")
-            artifacts.write_text("test_log.txt", _command_log(capture.commands), required=False)
             artifacts.write_json("quality_gate.json", quality_gate.model_dump(mode="json"))
             trace.write(
                 RunState.CONTRIBUTION_REVIEWED,
                 "contribution.quality_gate",
                 quality_gate.model_dump(mode="json"),
             )
-            pr_draft = _write_pr_dry_run_artifacts(
+            pr_draft, terminal = _write_pr_lifecycle_artifacts(
                 config=config,
                 artifacts=artifacts,
                 trace=trace,
                 result=result,
+                workspace=workspace,
                 capture=capture,
                 quality_gate=quality_gate,
                 terminal=terminal,
                 patch=patch,
+                pr_client=self.pr_client,
             )
+            _write_capture_artifacts(artifacts, capture)
+            artifacts.write_text("test_log.txt", _command_log(capture.commands), required=False)
             artifacts.write_json("terminal_state.json", terminal.model_dump(mode="json"))
             artifacts.write_markdown(
                 "quality_report.md",
@@ -317,17 +343,23 @@ def _write_capture_artifacts(artifacts: ArtifactWriter, capture: ArtifactCapture
     )
 
 
-def _write_pr_dry_run_artifacts(
+def _write_pr_lifecycle_artifacts(
     config: RunConfig,
     artifacts: ArtifactWriter,
     trace: TraceWriter,
     result: AgentFinalResult,
+    workspace: DockerWorkspaceManager,
     capture: ArtifactCapture,
     quality_gate: QualityGateResult,
     terminal: TerminalState,
     patch: str,
-) -> PullRequestDraft | None:
+    pr_client: object | None = None,
+) -> tuple[PullRequestDraft | None, TerminalState]:
     pr_draft: PullRequestDraft | None = None
+    governance_decision: GovernanceDecision | None = None
+    pr_create_result: PullRequestCreateResult | None = None
+    pr_push_result: CommandResult | None = None
+    live_ci_status: CiStatus | None = None
     if quality_gate.status == "pass":
         trace.write(
             RunState.PR_DRY_RUN_STARTED,
@@ -341,15 +373,87 @@ def _write_pr_dry_run_artifacts(
             "pr_dry_run.draft_created",
             {"title": pr_draft.title, "branch": pr_draft.branch, "labels": pr_draft.labels},
         )
+        if config.run.mode == "owned_live":
+            governance_decision = _evaluate_owned_live_pr(
+                config=config,
+                trace=trace,
+                result=result,
+                quality_gate=quality_gate,
+                draft=pr_draft,
+                pr_client=pr_client,
+            )
+            artifacts.write_json(
+                "governance_decision.json",
+                governance_decision.model_dump(mode="json"),
+                required=False,
+            )
+            if not governance_decision.passed:
+                result.status = "blocked"
+                result.blockers.extend(
+                    [
+                        f"governance blocked live PR: {reason}"
+                        for reason in governance_decision.reasons
+                    ]
+                )
+                terminal = TerminalState(
+                    status="blocked",
+                    reason="governance_blocked",
+                    layer="governance",
+                    message="; ".join(governance_decision.reasons),
+                    agent_status=terminal.agent_status,
+                    harness_status="blocked",
+                )
+            else:
+                pr_push_result, pr_create_result = _execute_owned_live_pr(
+                    config=config,
+                    workspace=workspace,
+                    capture=capture,
+                    draft=pr_draft,
+                    pr_client=pr_client,
+                )
+                if pr_push_result.exit_code != 0:
+                    result.status = "failed"
+                    result.blockers.append("owned_live branch push failed")
+                    terminal = TerminalState(
+                        status="failed",
+                        reason="pr_branch_push_failed",
+                        layer="pr",
+                        message=pr_push_result.stderr or pr_push_result.stdout,
+                        agent_status=terminal.agent_status,
+                        harness_status="failed",
+                    )
+                elif pr_create_result is None or not pr_create_result.ok:
+                    result.status = "failed"
+                    result.blockers.append("owned_live PR creation failed")
+                    terminal = TerminalState(
+                        status="failed",
+                        reason="pr_open_failed",
+                        layer="pr",
+                        message=pr_create_result.error if pr_create_result else "",
+                        agent_status=terminal.agent_status,
+                        harness_status="failed",
+                    )
+                else:
+                    _record_opened_live_pr(config, governance_decision, pr_draft, pr_create_result)
+                    live_ci_status = _observe_live_ci(
+                        config=config,
+                        pr_client=pr_client,
+                        pr_result=pr_create_result,
+                    )
 
-    ci_status = build_ci_status(capture, quality_gate)
+    ci_status = live_ci_status or build_ci_status(capture, quality_gate)
     artifacts.write_json("ci_status.json", ci_status.model_dump(mode="json"))
     trace.write(RunState.CI_OBSERVED, "ci.observed", ci_status.model_dump(mode="json"))
     artifacts.write_text(
         "live_action_log.jsonl",
         "\n".join(
             json.dumps(entry, ensure_ascii=True)
-            for entry in live_action_log_entries(pr_draft)
+            for entry in _live_action_log_entries(
+                pr_draft,
+                governance_decision,
+                pr_push_result,
+                pr_create_result,
+            )
         ),
         kind="jsonl",
         required=False,
@@ -363,7 +467,250 @@ def _write_pr_dry_run_artifacts(
         "postmortem.written",
         {"artifact": "postmortem.md"},
     )
-    return pr_draft
+    return pr_draft, terminal
+
+
+def _execute_owned_live_pr(
+    *,
+    config: RunConfig,
+    workspace: DockerWorkspaceManager,
+    capture: ArtifactCapture,
+    draft: PullRequestDraft,
+    pr_client: object | None,
+) -> tuple[CommandResult, PullRequestCreateResult | None]:
+    if not config.discovery.candidates:
+        raise ValueError("owned_live PR execution requires a configured repository")
+    candidate = config.discovery.candidates[0]
+    actor = config.governance.bot_identity.actor or "contribarena-bot"
+    token_env = config.governance.bot_identity.token_env
+    token = os.environ.get(token_env, "")
+    command = _owned_live_push_command(
+        owner=candidate.owner,
+        repo=candidate.repo,
+        branch=draft.branch,
+        title=draft.title,
+        actor=actor,
+        token_env=token_env,
+    )
+    push_result = workspace.run_with_env(command, {token_env: token})
+    capture.record_command(push_result)
+    if push_result.exit_code != 0:
+        return push_result, None
+
+    client = pr_client or GitHubPullRequestClient(token_env=token_env)
+    open_pr = getattr(client, "open_pr")
+    pr_result = open_pr(
+        owner=candidate.owner,
+        repo=candidate.repo,
+        title=draft.title,
+        body=draft.body,
+        head=draft.branch,
+        base=candidate.branch or _owned_default_branch(config),
+    )
+    return push_result, pr_result
+
+
+def _observe_live_ci(
+    *,
+    config: RunConfig,
+    pr_client: object | None,
+    pr_result: PullRequestCreateResult,
+) -> CiStatus:
+    if not config.discovery.candidates:
+        return CiStatus(status="not_run", source="github")
+    candidate = config.discovery.candidates[0]
+    client = pr_client or GitHubPullRequestClient(token_env=config.governance.bot_identity.token_env)
+    get_check_runs = getattr(client, "get_check_runs", None)
+    if get_check_runs is None:
+        return CiStatus(status="not_run", source="github")
+    ref = pr_result.head_sha or ""
+    if not ref:
+        return CiStatus(status="not_run", source="github")
+    return get_check_runs(owner=candidate.owner, repo=candidate.repo, ref=ref)
+
+
+def _owned_live_push_command(
+    *,
+    owner: str,
+    repo: str,
+    branch: str,
+    title: str,
+    actor: str,
+    token_env: str,
+) -> str:
+    remote_url = f'"https://x-access-token:${{{token_env}}}@github.com/{owner}/{repo}.git"'
+    email = f"{actor}@users.noreply.github.com"
+    return " && ".join(
+        [
+            f"git -C repo checkout -B {shlex.quote(branch)}",
+            f"git -C repo config user.name {shlex.quote(actor)}",
+            f"git -C repo config user.email {shlex.quote(email)}",
+            "git -C repo add -A",
+            f"git -C repo commit -m {shlex.quote(title)}",
+            "git -C repo status --short",
+            "git -C repo push "
+            f"{remote_url} "
+            f"{shlex.quote('HEAD:refs/heads/' + branch)} --force-with-lease",
+        ]
+    )
+
+
+def _record_opened_live_pr(
+    config: RunConfig,
+    decision: GovernanceDecision,
+    draft: PullRequestDraft,
+    pr_result: PullRequestCreateResult,
+) -> None:
+    state = load_governance_state(config)
+    record_governance_attempt(
+        state,
+        repository=decision.target_repository,
+        status="opened",
+        decision_id=decision.id,
+        action=decision.action,
+    )
+    if pr_result.number is not None:
+        record_governance_pr(
+            state,
+            repository=decision.target_repository,
+            number=pr_result.number,
+            url=pr_result.url,
+            branch=draft.branch,
+        )
+    save_governance_state(config, state)
+
+
+def _evaluate_owned_live_pr(
+    *,
+    config: RunConfig,
+    trace: TraceWriter,
+    result: AgentFinalResult,
+    quality_gate: QualityGateResult,
+    draft: PullRequestDraft,
+    pr_client: object | None = None,
+) -> GovernanceDecision:
+    candidate = config.discovery.candidates[0]
+    state = load_governance_state(config)
+    actor = _authenticated_actor(config, pr_client)
+    decision = GovernanceMiddleware().evaluate_pr_open(
+        config=config,
+        quality_gate=quality_gate,
+        target_owner=candidate.owner,
+        target_repo=candidate.repo,
+        base_branch=candidate.branch or _owned_default_branch(config),
+        contribution_class=_contribution_class(result),
+        state=state,
+        actor=actor,
+    )
+    record_governance_attempt(
+        state,
+        repository=decision.target_repository,
+        status="blocked" if not decision.passed else "prepared",
+        decision_id=decision.id,
+        action=decision.action,
+    )
+    save_governance_state(config, state)
+    trace.write(
+        RunState.GOVERNANCE_BLOCKED if not decision.passed else RunState.CONTRIBUTION_REVIEWED,
+        "governance.blocked" if not decision.passed else "governance.passed",
+        decision.model_dump(mode="json"),
+    )
+    return decision
+
+
+def _authenticated_actor(config: RunConfig, pr_client: object | None) -> str:
+    if not os.environ.get(config.governance.bot_identity.token_env):
+        return ""
+    client = pr_client or GitHubPullRequestClient(
+        token_env=config.governance.bot_identity.token_env
+    )
+    authenticated_actor = getattr(client, "authenticated_actor", None)
+    if authenticated_actor is None:
+        return ""
+    return str(authenticated_actor() or "")
+
+
+def _owned_default_branch(config: RunConfig) -> str:
+    if not config.discovery.candidates:
+        return "main"
+    candidate = config.discovery.candidates[0]
+    for policy in config.governance.owned_repositories:
+        if policy.owner == candidate.owner and policy.repo == candidate.repo:
+            return policy.default_branch
+    return "main"
+
+
+def _contribution_class(result: AgentFinalResult) -> str:
+    if result.selected_task.risk == "low":
+        return "low_risk_code"
+    return result.selected_task.risk or "low_risk_code"
+
+
+def _live_action_log_entries(
+    draft: PullRequestDraft | None,
+    governance_decision: GovernanceDecision | None,
+    pr_push_result: CommandResult | None = None,
+    pr_create_result: PullRequestCreateResult | None = None,
+) -> list[dict[str, object]]:
+    if governance_decision is None:
+        return live_action_log_entries(draft)
+
+    base_entry: dict[str, object] = {
+        "ts": governance_decision.created_at,
+        "mode": "owned_live",
+        "target_repository": governance_decision.target_repository,
+        "governance_decision_id": governance_decision.id,
+        "governance_reasons": governance_decision.reasons,
+        "requested_by_agent": True,
+        "executed_by_harness": governance_decision.passed,
+        "github_actor": governance_decision.actor,
+    }
+    if draft is not None:
+        base_entry.update({"title": draft.title, "branch": draft.branch, "labels": draft.labels})
+
+    if not governance_decision.passed:
+        return [
+            {
+                **base_entry,
+                "action": governance_decision.action,
+                "status": "blocked",
+                "external_write": False,
+            }
+        ]
+
+    entries: list[dict[str, object]] = []
+    if pr_push_result is not None:
+        entries.append(
+            {
+                **base_entry,
+                "action": "github.push_branch",
+                "status": "pushed" if pr_push_result.exit_code == 0 else "failed",
+                "external_write": True,
+                "push_exit_code": pr_push_result.exit_code,
+            }
+        )
+    if pr_create_result is not None:
+        entries.append(
+            {
+                **base_entry,
+                "action": "github.open_pr",
+                "status": "opened" if pr_create_result.ok else "failed",
+                "external_write": True,
+                "pr_number": pr_create_result.number,
+                "pr_url": pr_create_result.url,
+                "pr_error": pr_create_result.error,
+            }
+        )
+    if entries:
+        return entries
+    return [
+        {
+            **base_entry,
+            "action": governance_decision.action,
+            "status": "prepared",
+            "external_write": False,
+        }
+    ]
 
 
 def _terminal_state_for_result(

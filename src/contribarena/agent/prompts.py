@@ -75,11 +75,28 @@ def build_goal_prompt(config: RunConfig) -> str:
             "9. Call aci_submit_patch(path='repo') to capture the shadow patch; it includes new files, so do not run git add or git commit for submission. Only set no_command_verification_rationale when command verification is genuinely unavailable.\n"
             "10. Return the final structured completion result.\n"
         )
+    run_label = (
+        "M0.4 owned-live autonomous contributor run"
+        if config.run.mode == "owned_live"
+        else "M0.2.1 end-to-end shadow run"
+    )
+    task_source = (
+        "The selected task must be autonomously discovered inside the configured owned "
+        "repository from issues, docs, code, tests, TODOs, or project plans. "
+        if config.run.mode == "owned_live"
+        else "The selected task may be a low-risk follow-up identified from metadata, issues, or repository layout. "
+    )
+    live_boundary = (
+        "Do not directly open a PR, push branches, or write GitHub comments; the harness "
+        "will perform governed live writes after your submitted patch passes review. "
+        if config.run.mode == "owned_live"
+        else "Do not open a PR, write GitHub comments, or perform live GitHub writes. "
+    )
     return (
-        "Complete this M0.2.1 end-to-end shadow run with the shortest valid tool sequence.\n\n"
+        f"Complete this {run_label} with the shortest valid tool sequence.\n\n"
         f"{target}\n"
-        "The selected task may be a low-risk follow-up identified from metadata, issues, or repository layout. "
-        "Do not open a PR, write GitHub comments, or perform live GitHub writes. "
+        f"{task_source}"
+        f"{live_boundary}"
         "Prefer ACI tools over raw shell editing: aci_find_files for file discovery, aci_view for bounded reading, "
         "aci_search for bounded text search, aci_replace or aci_insert for edits, aci_create for new files, "
         "aci_undo when an edit needs to be reverted, aci_suggest_verification when test commands are unclear, "

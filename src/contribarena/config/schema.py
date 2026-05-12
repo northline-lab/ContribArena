@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, HttpUrl, model_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
 
 class BudgetConfig(BaseModel):
@@ -14,7 +14,7 @@ class BudgetConfig(BaseModel):
 
 class RunSection(BaseModel):
     id: str | None = None
-    mode: Literal["shadow"] = "shadow"
+    mode: Literal["shadow", "dry_run", "owned_live"] = "shadow"
     model: str = "local-stub"
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
 
@@ -86,6 +86,60 @@ class WorkspaceConfig(BaseModel):
 
 class ArtifactConfig(BaseModel):
     output_root: Path = Path("runs")
+
+
+class OwnedRepositoryPolicy(BaseModel):
+    owner: str
+    repo: str
+    default_branch: str = "main"
+
+    @property
+    def full_name(self) -> str:
+        return f"{self.owner}/{self.repo}"
+
+
+class BotIdentityConfig(BaseModel):
+    kind: Literal["pat"] = "pat"
+    actor: str = ""
+    token_env: str = "GITHUB_TOKEN"
+
+
+class GovernanceRateLimits(BaseModel):
+    max_open_prs_per_repo: int = Field(default=1, ge=0)
+    max_prs_per_repo_per_day: int = Field(default=3, ge=0)
+    min_minutes_between_prs_per_repo: int = Field(default=30, ge=0)
+
+
+class ContributionClassesConfig(BaseModel):
+    allowed: list[Literal["docs", "tests", "low_risk_code"]] = Field(
+        default_factory=lambda: ["docs", "tests", "low_risk_code"]
+    )
+
+
+class KillSwitchesConfig(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    global_switch: bool = Field(default=False, alias="global")
+    repositories: list[str] = Field(default_factory=list)
+    agents: list[str] = Field(default_factory=list)
+
+
+class GovernanceConfig(BaseModel):
+    live_enabled: bool = False
+    owned_repositories: list[OwnedRepositoryPolicy] = Field(default_factory=list)
+    bot_identity: BotIdentityConfig = Field(default_factory=BotIdentityConfig)
+    rate_limits: GovernanceRateLimits = Field(default_factory=GovernanceRateLimits)
+    contribution_classes: ContributionClassesConfig = Field(
+        default_factory=ContributionClassesConfig
+    )
+    kill_switches: KillSwitchesConfig = Field(default_factory=KillSwitchesConfig)
+    state_path: Path | None = None
+
+
+class ControllerConfig(BaseModel):
+    enabled: bool = False
+    interval_seconds: int = Field(default=300, ge=1)
+    max_ticks: int | None = Field(default=1, ge=1)
 
 
 class CompatibleModelConfig(BaseModel):
@@ -162,13 +216,38 @@ class RunConfig(BaseModel):
     workspace: WorkspaceConfig
     artifacts: ArtifactConfig = Field(default_factory=ArtifactConfig)
     models: ModelsConfig = Field(default_factory=ModelsConfig)
+    governance: GovernanceConfig = Field(default_factory=GovernanceConfig)
+    controller: ControllerConfig = Field(default_factory=ControllerConfig)
 
     @model_validator(mode="after")
     def validate_issue_solving_target(self) -> RunConfig:
         if self.issue is None:
-            return self
+            return self._validate_owned_live_target()
         if len(self.discovery.candidates) != 1:
             raise ValueError("issue-solving mode requires exactly one fixed discovery candidate")
         if self.issue.clone_url is None:
             raise ValueError("issue-solving mode requires issue.clone_url")
+        return self._validate_owned_live_target()
+
+    def _validate_owned_live_target(self) -> RunConfig:
+        if self.run.mode != "owned_live":
+            return self
+        if len(self.discovery.candidates) != 1:
+            raise ValueError("owned_live mode requires exactly one configured repository")
+        candidate = self.discovery.candidates[0]
+        if not _owned_repo_policy(self.governance, candidate.owner, candidate.repo):
+            raise ValueError(
+                "owned_live mode requires the configured repository in governance.owned_repositories"
+            )
         return self
+
+
+def _owned_repo_policy(
+    governance: GovernanceConfig,
+    owner: str,
+    repo: str,
+) -> OwnedRepositoryPolicy | None:
+    for policy in governance.owned_repositories:
+        if policy.owner == owner and policy.repo == repo:
+            return policy
+    return None

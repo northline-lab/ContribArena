@@ -10,7 +10,7 @@ import typer
 
 from contribarena import __version__
 from contribarena.config import load_run_config, write_starter_config
-from contribarena.engine import Runner
+from contribarena.engine import LocalController, Runner
 from contribarena.errors import ContribArenaError
 
 app = typer.Typer(help="ContribArena control plane commands.")
@@ -54,6 +54,32 @@ def run(
     typer.echo(f"Run completed: {result.run_dir}")
     typer.echo(f"  Status:      {result.status}")
     typer.echo(f"  Tool calls:  {result.tool_calls}")
+
+
+@app.command()
+def controller(
+    config: Path = typer.Option(..., "--config", "-c"),
+    output_dir: Path | None = typer.Option(None, "--output-dir", "-o"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Run the local ContribArena controller loop."""
+    try:
+        run_config = load_run_config(config)
+        result = LocalController().run(run_config, output_dir=output_dir, verbose=verbose)
+    except ContribArenaError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(exc.exit_code) from exc
+    typer.echo(f"Controller completed: {result.status}")
+    typer.echo(f"  Ticks: {len(result.ticks)}")
+    for index, tick in enumerate(result.ticks, start=1):
+        detail = tick.decision.status if tick.decision else "n/a"
+        typer.echo(f"  Tick {index}: {tick.status} ({detail})")
+        if tick.decision and tick.decision.reasons:
+            for reason in tick.decision.reasons:
+                typer.echo(f"    - {reason}")
+        if tick.run_result:
+            typer.echo(f"    Run: {tick.run_result.run_dir}")
+            typer.echo(f"    Status: {tick.run_result.status}")
 
 
 @app.command()

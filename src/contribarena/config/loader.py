@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,32 @@ workspace:
 artifacts:
   output_root: runs
 
+governance:
+  live_enabled: false
+  owned_repositories: []
+  bot_identity:
+    kind: pat
+    actor: ""
+    token_env: GITHUB_TOKEN
+  rate_limits:
+    max_open_prs_per_repo: 1
+    max_prs_per_repo_per_day: 3
+    min_minutes_between_prs_per_repo: 30
+  contribution_classes:
+    allowed:
+      - docs
+      - tests
+      - low_risk_code
+  kill_switches:
+    global: false
+    repositories: []
+    agents: []
+
+controller:
+  enabled: false
+  interval_seconds: 300
+  max_ticks: 1
+
 models:
   providers:
     compatible: {}
@@ -51,6 +78,8 @@ def load_run_config(path: Path) -> RunConfig:
     if not path.exists():
         raise ConfigError(f"config file does not exist: {path}")
     try:
+        _load_dotenv(Path.cwd() / ".env")
+        _load_dotenv(path.parent / ".env")
         raw = _load_yaml_like(path.read_text(encoding="utf-8"))
         return RunConfig.model_validate(raw)
     except (OSError, ValueError, ValidationError) as exc:
@@ -70,3 +99,25 @@ def _load_yaml_like(text: str) -> dict[str, Any]:
     if not isinstance(loaded, dict):
         raise ValueError("config root must be a mapping")
     return loaded
+
+
+def _load_dotenv(path: Path) -> None:
+    if not path.exists() or not path.is_file():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key or key.startswith("export "):
+            key = key.removeprefix("export ").strip()
+        if not key:
+            continue
+        os.environ.setdefault(key, _clean_env_value(value.strip()))
+
+
+def _clean_env_value(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value

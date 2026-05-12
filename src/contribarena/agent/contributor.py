@@ -257,10 +257,16 @@ def _candidate_ref(config: RunConfig, owner: str, repo: str) -> RepoCandidate:
 
 
 def build_agent_instructions(config: RunConfig) -> str:
+    boundary = (
+        "Owned-live mode still does not give you direct GitHub write authority; submit a "
+        "minimal verified patch and the harness will handle governed branch push and PR creation. "
+        if config.run.mode == "owned_live"
+        else "Shadow mode means no GitHub writes. "
+    )
     base = (
         "You are an autonomous open-source contributor running inside ContribArena. "
-        "Shadow mode means no GitHub writes. Repository code interaction must go "
-        "through workspace or ACI tools. Use workspace_run for setup, cloning, and "
+        f"{boundary}Repository code interaction must go through workspace or ACI tools. "
+        "Use workspace_run for setup, cloning, and "
         "unusual shell operations; prefer ACI tools for navigation, search, edits, "
         "verification, undo, and final patch submission. Use exactly one tool call at "
         "a time. If output is too broad, narrow the search instead of repeating it. "

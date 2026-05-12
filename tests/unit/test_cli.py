@@ -37,6 +37,7 @@ class CliTest(unittest.TestCase):
                 "exit 0\n",
                 encoding="utf-8",
             )
+
             docker.chmod(0o755)
             old_path = os.environ.get("PATH", "")
             os.environ["PATH"] = f"{bin_dir}:{old_path}"
@@ -111,6 +112,21 @@ class CliTest(unittest.TestCase):
                     "workspace_stopped",
                 }.issubset(trace_states)
             )
+
+    def test_controller_reports_disabled_starter_config(self) -> None:
+        runner = CliRunner()
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.yaml"
+            self.assertEqual(
+                0,
+                runner.invoke(app, ["init", "--output", str(config_path)]).exit_code,
+            )
+
+            result = runner.invoke(app, ["controller", "--config", str(config_path)])
+
+            self.assertEqual(0, result.exit_code, result.output)
+            self.assertIn("Controller completed: disabled", result.output)
+            self.assertIn("Tick 1: disabled", result.output)
 
 
 if __name__ == "__main__":

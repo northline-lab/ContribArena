@@ -70,13 +70,33 @@ class DockerWorkspaceManager:
         )
 
     def run(self, cmd: str, timeout_seconds: int | None = None) -> CommandResult:
+        return self._run(cmd, timeout_seconds=timeout_seconds)
+
+    def run_with_env(
+        self,
+        cmd: str,
+        env: dict[str, str],
+        timeout_seconds: int | None = None,
+    ) -> CommandResult:
+        return self._run(cmd, timeout_seconds=timeout_seconds, env=env)
+
+    def _run(
+        self,
+        cmd: str,
+        timeout_seconds: int | None = None,
+        env: dict[str, str] | None = None,
+    ) -> CommandResult:
         timeout = timeout_seconds or self.config.command_timeout_seconds
+        env_args: list[str] = []
+        for key, value in (env or {}).items():
+            env_args.extend(["--env", f"{key}={value}"])
         start = time.monotonic()
         try:
             completed = subprocess.run(
                 [
                     "docker",
                     "exec",
+                    *env_args,
                     self.container_name,
                     "bash",
                     "-c",
