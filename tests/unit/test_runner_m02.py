@@ -614,6 +614,7 @@ class RunnerM02Test(unittest.TestCase):
             self.assertEqual("opened", live_action_entries[2]["status"])
             self.assertEqual("success", live_action_entries[3]["status"])
             self.assertEqual("github", live_action_entries[3]["ci_source"])
+            self.assertEqual("contribarena-bot", live_action_entries[0]["requested_fork_owner"])
             self.assertEqual("contribarena-bot/repo", live_action_entries[0]["fork_repo"])
             self.assertEqual(
                 "contribarena-bot:contribarena/fix-configured-problem",
@@ -701,6 +702,39 @@ class RunnerM02Test(unittest.TestCase):
                 decision["reasons"],
             )
 
+    def test_owned_live_fork_failure_records_requested_fork_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _owned_live_config(tmp_path / "runs", live_enabled=True)
+            os.environ["GITHUB_TOKEN"] = "test-token"
+            try:
+                result = _run_with_fake_docker(
+                    FakeIssueAgent(),
+                    config,
+                    tmp_path,
+                    pr_client=FakePrClient(
+                        actor="contribarena-bot",
+                        fork_error="authentication missing or forbidden",
+                    ),
+                )
+            finally:
+                os.environ.pop("GITHUB_TOKEN", None)
+
+            self.assertEqual("failed", result.status)
+            self.assertEqual("pr_fork_prepare_failed", result.terminal_reason)
+            live_action_entries = [
+                json.loads(line)
+                for line in (result.run_dir / "live_action_log.jsonl")
+                .read_text()
+                .splitlines()
+                if line.strip()
+            ]
+            self.assertEqual("github.ensure_fork", live_action_entries[0]["action"])
+            self.assertEqual("failed", live_action_entries[0]["status"])
+            self.assertEqual("contribarena-bot", live_action_entries[0]["requested_fork_owner"])
+            self.assertEqual("", live_action_entries[0]["fork_owner"])
+            self.assertIn("authentication missing", live_action_entries[0]["fork_error"])
+
     def test_agent_exception_writes_terminal_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -782,18 +816,25 @@ def _owned_live_config(
 
 
 class FakePrClient:
-    def __init__(self, actor: str = "") -> None:
+    def __init__(self, actor: str = "", fork_error: str = "") -> None:
         self.calls = 0
         self.ensure_fork_calls = 0
         self.last_title = ""
         self.last_head = ""
         self.actor = actor
+        self.fork_error = fork_error
 
     def authenticated_actor(self) -> str:
         return self.actor
 
     def ensure_fork(self, *, owner: str, repo: str, fork_owner: str) -> ForkEnsureResult:
         self.ensure_fork_calls += 1
+        if self.fork_error:
+            return ForkEnsureResult(
+                ok=False,
+                error=self.fork_error,
+                source="fake",
+            )
         return ForkEnsureResult(
             ok=True,
             owner=fork_owner,

@@ -68,6 +68,7 @@ class RunResult:
 class OwnedLivePrExecutionResult:
     strategy: str
     head: str = ""
+    requested_fork_owner: str = ""
     fork_result: ForkEnsureResult | None = None
     push_result: CommandResult | None = None
     pr_result: PullRequestCreateResult | None = None
@@ -544,14 +545,22 @@ def _execute_owned_live_pr(
                 error="PR client does not support fork submission",
                 source="harness",
             )
-            return OwnedLivePrExecutionResult(strategy=strategy, fork_result=fork_result)
+            return OwnedLivePrExecutionResult(
+                strategy=strategy,
+                requested_fork_owner=fork_owner,
+                fork_result=fork_result,
+            )
         fork_result = ensure_fork(
             owner=candidate.owner,
             repo=candidate.repo,
             fork_owner=fork_owner,
         )
         if not fork_result.ok:
-            return OwnedLivePrExecutionResult(strategy=strategy, fork_result=fork_result)
+            return OwnedLivePrExecutionResult(
+                strategy=strategy,
+                requested_fork_owner=fork_owner,
+                fork_result=fork_result,
+            )
         push_owner = fork_result.owner or fork_owner
         head = f"{push_owner}:{draft.branch}"
     command = _owned_live_push_command(
@@ -568,6 +577,7 @@ def _execute_owned_live_pr(
         return OwnedLivePrExecutionResult(
             strategy=strategy,
             head=head,
+            requested_fork_owner=fork_owner if strategy == "fork" else "",
             fork_result=fork_result,
             push_result=push_result,
         )
@@ -584,6 +594,7 @@ def _execute_owned_live_pr(
     return OwnedLivePrExecutionResult(
         strategy=strategy,
         head=head,
+        requested_fork_owner=fork_owner if strategy == "fork" else "",
         fork_result=fork_result,
         push_result=push_result,
         pr_result=pr_result,
@@ -776,6 +787,7 @@ def _live_action_log_entries(
                 "action": fork_action,
                 "status": "ready" if live_pr_result.fork_result.ok else "failed",
                 "external_write": live_pr_result.fork_result.created,
+                "requested_fork_owner": live_pr_result.requested_fork_owner,
                 "fork_owner": live_pr_result.fork_result.owner,
                 "fork_repo": live_pr_result.fork_result.full_name,
                 "fork_url": live_pr_result.fork_result.url,
