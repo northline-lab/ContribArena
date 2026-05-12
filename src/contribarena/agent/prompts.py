@@ -101,6 +101,7 @@ def build_goal_prompt(config: RunConfig) -> str:
         "aci_search for bounded text search, aci_replace or aci_insert for edits, aci_create for new files, "
         "aci_undo when an edit needs to be reverted, aci_suggest_verification when test commands are unclear, "
         "aci_verify for focused checks, and aci_submit_patch to finish without staging or committing. "
+        "Before editing, briefly check for CONTRIBUTING.md, .github guidance, or PR templates when they are easy to inspect, and follow them when present. "
         "If a tool output is truncated or too broad, narrow the query. If a command is missing or the environment is blocked, "
         "record the blocker instead of making broad setup changes."
         "\n\nRecovery templates:\n"
@@ -150,7 +151,7 @@ def _build_issue_solving_prompt(config: RunConfig) -> str:
         "12. Return the final structured ContribArena result with problem_statement_summary, reproduction_notes, verification_summary, and blockers.\n\n"
         "Completion rule: status may be completed only if the submitted patch directly addresses "
         "the problem statement and at least one local verification command succeeded. Otherwise "
-        "return blocked or failed with explicit reasons. Shadow mode means no GitHub writes."
+        "return blocked or failed with explicit reasons. Briefly check and follow repository contribution guidance when it is easy to inspect. Shadow mode means no GitHub writes."
         "\n\nRecovery templates:\n"
         f"{_recovery_template_text()}"
     )

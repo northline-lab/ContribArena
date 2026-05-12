@@ -24,6 +24,7 @@ class ContextBuilder:
             "Use only the provided tools. Repository code interaction must happen through workspace tools.\n"
             "Follow the required sequence in the user prompt and stop once the final structured result can be returned.\n"
             "Do not repeatedly inspect an empty workspace. Clone the target repository before reading repository files.\n"
+            "Before editing, briefly check for repository contribution or PR guidance such as CONTRIBUTING.md or files under .github/, and follow it when present.\n"
             "Choose a low-risk task and return a structured completion result.\n\n"
             f"Discovery query: {config.discovery.query or 'n/a'}\n"
             f"Discovery filters: {config.discovery.filters.model_dump(exclude_none=True)}\n\n"

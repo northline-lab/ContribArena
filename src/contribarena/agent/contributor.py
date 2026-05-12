@@ -274,6 +274,8 @@ def build_agent_instructions(config: RunConfig) -> str:
         "once, or use aci_undo before trying a safer edit. Ask aci_suggest_verification "
         "when unsure how to test, verify locally with aci_verify or workspace_run, call "
         "aci_submit_patch, then finish with the structured ContribArena result. Do not "
+        "ignore repository contribution guidance; if CONTRIBUTING.md or .github guidance "
+        "is easy to find, follow it before proposing a PR-shaped patch. Do not "
         "continue exploring after the expected shadow patch and verification summary "
         "are complete."
     )
