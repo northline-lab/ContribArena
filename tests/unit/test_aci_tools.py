@@ -219,6 +219,46 @@ class AciToolsTest(unittest.TestCase):
             self.assertIn("python3 -m pytest", result.output)
             self.assertIn("npm test", result.output)
 
+    def test_suggest_verification_prefers_contributing_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "repo").mkdir()
+            # Presence of pyproject.toml triggers generic pytest suggestion
+            (root / "repo" / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
+            (root / "repo" / "CONTRIBUTING.md").write_text(
+                """
+Run the standard checks:
+
+```bash
+UV_CACHE_DIR=/tmp/uv-cache UV_PROJECT_ENVIRONMENT=/tmp/contribarena-uv-venv uv run --extra dev ruff check .
+UV_CACHE_DIR=/tmp/uv-cache UV_PROJECT_ENVIRONMENT=/tmp/contribarena-uv-venv uv run --extra dev pytest -q tests/unit
+```
+""".strip(),
+                encoding="utf-8",
+            )
+            workspace = LocalWorkspace(root)
+
+            result = aci_suggest_verification(workspace, "repo").result  # type: ignore[arg-type]
+
+            self.assertTrue(result.success, result.error)
+            out = result.output
+            self.assertIn(
+                "- UV_CACHE_DIR=/tmp/uv-cache UV_PROJECT_ENVIRONMENT=/tmp/contribarena-uv-venv uv run --extra dev ruff check .",
+                out,
+            )
+            self.assertIn(
+                "- UV_CACHE_DIR=/tmp/uv-cache UV_PROJECT_ENVIRONMENT=/tmp/contribarena-uv-venv uv run --extra dev pytest -q tests/unit",
+                out,
+            )
+            # If generic pytest suggestion is also present, the documented command should come first
+            generic = out.find("- python3 -m pytest")
+            documented = out.find(
+                "- UV_CACHE_DIR=/tmp/uv-cache UV_PROJECT_ENVIRONMENT=/tmp/contribarena-uv-venv uv run --extra dev pytest -q tests/unit"
+            )
+            if generic != -1:
+                self.assertNotEqual(documented, -1)
+                self.assertLess(documented, generic)
+
 
 def _cmd(command: str, stdout: str = "", stderr: str = "", exit_code: int = 0) -> CommandResult:
     return CommandResult(

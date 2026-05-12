@@ -331,14 +331,24 @@ def aci_suggest_verification(
             ),
             commands=[cmd],
         )
-    suggestions = _verification_suggestions(cmd.stdout.splitlines())
+    # Inspect CONTRIBUTING.md for documented verification commands and prefer them
+    doc_cmd = workspace.run(
+        f"cd {shlex.quote(safe_path)} && "
+        "if [ -f CONTRIBUTING.md ]; then sed -n '1,240p' CONTRIBUTING.md; fi"
+    )
+    documented: list[str] = []
+    if doc_cmd.exit_code == 0 and (doc_cmd.stdout or "").strip():
+        documented = _documented_verification_commands(doc_cmd.stdout)
+    suggestions = _merge_verification_suggestions(
+        documented, _verification_suggestions(cmd.stdout.splitlines())
+    )
     output = "\n".join(suggestions) if suggestions else (
         "No obvious verification files found. Use a narrow command such as "
         "`python3 -m compileall .` for Python files or inspect project docs."
     )
     return AciExecution(
         result=AciResult(tool="aci_suggest_verification", success=True, output=output),
-        commands=[cmd],
+        commands=[cmd, doc_cmd],
     )
 
 
@@ -478,6 +488,50 @@ def _verification_suggestions(files: list[str]) -> list[str]:
     return [f"- {command}" for command in dict.fromkeys(suggestions)]
 
 
+
+
+def _documented_verification_commands(text: str) -> list[str]:
+    """Extract verification commands from CONTRIBUTING.md-like content.
+
+    Minimal parser: scan fenced code blocks and collect lines that look like
+    verification commands. Prioritize lines invoking `uv run`, pytest, ruff,
+    or project validation commands.
+    """
+    in_block = False
+    commands: list[str] = []
+    for raw in text.splitlines():
+        line = raw.rstrip("\n")
+        if line.strip().startswith("```"):
+            in_block = not in_block
+            continue
+        if not in_block:
+            continue
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        low = stripped.lower()
+        if (
+            "uv run" in stripped
+            or "pytest" in low
+            or "ruff" in low
+            or " validate" in low
+            or low.startswith("make test")
+        ):
+            commands.append(f"- {stripped}")
+    # Deduplicate preserving order
+    return list(dict.fromkeys(commands))
+
+
+def _merge_verification_suggestions(doc_suggestions: list[str], file_suggestions: list[str]) -> list[str]:
+    if not doc_suggestions:
+        return file_suggestions
+    merged: list[str] = []
+    seen: set[str] = set()
+    for item in doc_suggestions + file_suggestions:
+        if item not in seen:
+            seen.add(item)
+            merged.append(item)
+    return merged
 def _verification_recovery_hint(cmd: CommandResult) -> str:
     combined = f"{cmd.stdout}\n{cmd.stderr}".lower()
     if cmd.timed_out or cmd.exit_code == 124:
