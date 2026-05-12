@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import difflib
 import shlex
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
-from contribarena.models import AciResult, CommandResult, PatchResult
+from contribarena.models import AciResult, CommandResult, PatchOperation, PatchResult
+from contribarena.tools.editor import aci_apply_patch as editor_apply_patch
 
 if TYPE_CHECKING:
     from contribarena.engine.workspace import DockerWorkspaceManager
@@ -93,9 +93,7 @@ def aci_find_files(
     find_pattern = _find_name_pattern(pattern)
     limit = min(max(1, max_results), 200)
     prune_entries = [f"*/{entry.removeprefix('!')}" for entry in DEFAULT_SEARCH_GLOBS]
-    prune = " -o ".join(
-        f"-path {shlex.quote(entry)}" for entry in prune_entries
-    )
+    prune = " -o ".join(f"-path {shlex.quote(entry)}" for entry in prune_entries)
     command = (
         f"find {shlex.quote(safe_path)} \\( {prune} \\) -prune -o "
         f"-type f -iname {shlex.quote(find_pattern)} -print | head -n {limit}"
@@ -144,26 +142,18 @@ def aci_replace(
             commands=[read],
         )
     updated = read.stdout.replace(old_str, new_str, 1)
-    diff = _unified_diff(safe_path, read.stdout, updated)
-    undo_diff = _unified_diff(safe_path, updated, read.stdout)
-    patch = workspace.apply_patch(diff)
-    output = (
-        f"Replaced text in {safe_path}.\n\n{_snippet_after_text(updated, new_str)}"
-        if patch.success
-        else patch.error or f"patch failed for {safe_path}"
+    execution = aci_apply_patch(
+        workspace,
+        [
+            PatchOperation(
+                type="update_file",
+                path=safe_path,
+                content=updated,
+            )
+        ],
+        rationale="legacy aci_replace wrapper",
     )
-    return AciExecution(
-        result=AciResult(
-            tool="aci_replace",
-            success=patch.success,
-            output=_cap_output(output),
-            files_modified=patch.files_modified,
-            error=None if patch.success else output,
-        ),
-        commands=[read],
-        patches=[patch],
-        undo_diff=undo_diff if patch.success else None,
-    )
+    return _retag_execution(execution, "aci_replace", commands=[read, *execution.commands])
 
 
 def aci_insert(
@@ -197,57 +187,42 @@ def aci_insert(
         )
     inserted = text if text.endswith("\n") else f"{text}\n"
     updated = "".join([*lines[:insert_after_line], inserted, *lines[insert_after_line:]])
-    diff = _unified_diff(safe_path, read.stdout, updated)
-    undo_diff = _unified_diff(safe_path, updated, read.stdout)
-    patch = workspace.apply_patch(diff)
-    output = (
-        f"Inserted text into {safe_path} after line {insert_after_line}.\n\n"
-        f"{_snippet_around_line(updated, max(1, insert_after_line + 1))}"
-        if patch.success
-        else patch.error or f"patch failed for {safe_path}"
+    execution = aci_apply_patch(
+        workspace,
+        [
+            PatchOperation(
+                type="update_file",
+                path=safe_path,
+                content=updated,
+            )
+        ],
+        rationale=f"legacy aci_insert wrapper after line {insert_after_line}",
     )
-    return AciExecution(
-        result=AciResult(
-            tool="aci_insert",
-            success=patch.success,
-            output=_cap_output(output),
-            files_modified=patch.files_modified,
-            error=None if patch.success else output,
-        ),
-        commands=[read],
-        patches=[patch],
-        undo_diff=undo_diff if patch.success else None,
-    )
+    return _retag_execution(execution, "aci_insert", commands=[read, *execution.commands])
 
 
 def aci_create(workspace: "DockerWorkspaceManager", path: str, content: str) -> AciExecution:
     safe_path = _safe_path(path)
-    exists = workspace.run(f"test ! -e {shlex.quote(safe_path)}")
-    if exists.exit_code != 0:
-        message = f"refusing to overwrite existing file: {safe_path}"
-        return AciExecution(
-            result=AciResult(tool="aci_create", success=False, output=message, error=message),
-            commands=[exists],
-        )
-    diff = _create_file_diff(safe_path, content)
-    undo_diff = _delete_file_diff(safe_path, content)
-    patch = workspace.apply_patch(diff)
-    output = (
-        f"Created {safe_path}.\n\n{_snippet_around_line(content, 1)}"
-        if patch.success
-        else patch.error or f"patch failed for {safe_path}"
+    execution = aci_apply_patch(
+        workspace,
+        [PatchOperation(type="create_file", path=safe_path, content=content)],
+        rationale="legacy aci_create wrapper",
     )
+    return _retag_execution(execution, "aci_create")
+
+
+def aci_apply_patch(
+    workspace: "DockerWorkspaceManager",
+    operations: list[PatchOperation | dict[str, object]],
+    rationale: str = "",
+    expected_files: list[str] | None = None,
+) -> AciExecution:
+    execution = editor_apply_patch(workspace, operations, rationale, expected_files)
     return AciExecution(
-        result=AciResult(
-            tool="aci_create",
-            success=patch.success,
-            output=_cap_output(output),
-            files_modified=patch.files_modified,
-            error=None if patch.success else output,
-        ),
-        commands=[exists],
-        patches=[patch],
-        undo_diff=undo_diff if patch.success else None,
+        result=execution.result,
+        commands=execution.commands,
+        patches=execution.patches,
+        undo_diff=execution.undo_diff,
     )
 
 
@@ -277,6 +252,7 @@ def aci_verify(
         f"cd {shlex.quote(safe_path)} && {command}",
         timeout_seconds=timeout_seconds,
     )
+    cleanup = _cleanup_verification_artifacts(workspace, safe_path)
     output = _cap_output(
         "\n".join(
             part
@@ -300,7 +276,7 @@ def aci_verify(
             output=output,
             error=None if cmd.exit_code == 0 else output,
         ),
-        commands=[cmd],
+        commands=[cmd, cleanup] if cleanup is not None else [cmd],
     )
 
 
@@ -332,13 +308,70 @@ def aci_suggest_verification(
             commands=[cmd],
         )
     suggestions = _verification_suggestions(cmd.stdout.splitlines())
-    output = "\n".join(suggestions) if suggestions else (
-        "No obvious verification files found. Use a narrow command such as "
-        "`python3 -m compileall .` for Python files or inspect project docs."
+    output = (
+        "\n".join(suggestions)
+        if suggestions
+        else (
+            "No obvious verification files found. Use a narrow command such as "
+            "`python3 -m compileall .` for Python files or inspect project docs."
+        )
     )
     return AciExecution(
         result=AciResult(tool="aci_suggest_verification", success=True, output=output),
         commands=[cmd],
+    )
+
+
+def aci_clean_generated(
+    workspace: "DockerWorkspaceManager",
+    path: str = "repo",
+) -> AciExecution:
+    safe_path = _safe_path(path)
+    cleanup = _cleanup_generated_artifacts(workspace, safe_path)
+    output = _cap_output(cleanup.stdout or cleanup.stderr or "Generated/cache cleanup completed.")
+    return AciExecution(
+        result=AciResult(
+            tool="aci_clean_generated",
+            success=cleanup.exit_code == 0,
+            output=output,
+            error=None if cleanup.exit_code == 0 else output,
+        ),
+        commands=[cleanup],
+    )
+
+
+def _retag_execution(
+    execution: AciExecution,
+    tool: str,
+    commands: list[CommandResult] | None = None,
+) -> AciExecution:
+    return AciExecution(
+        result=execution.result.model_copy(update={"tool": tool}),
+        commands=commands if commands is not None else execution.commands,
+        patches=execution.patches,
+        undo_diff=execution.undo_diff,
+    )
+
+
+def _cleanup_verification_artifacts(
+    workspace: "DockerWorkspaceManager",
+    path: str,
+) -> CommandResult | None:
+    cleanup = _cleanup_generated_artifacts(workspace, path)
+    return cleanup if cleanup.exit_code == 0 else None
+
+
+def _cleanup_generated_artifacts(
+    workspace: "DockerWorkspaceManager",
+    path: str,
+) -> CommandResult:
+    return workspace.run(
+        f"cd {shlex.quote(path)} || exit $?; "
+        "find . -type d \\( -name __pycache__ -o -name .pytest_cache "
+        "-o -name .mypy_cache -o -name .ruff_cache -o -name .tox -o -name .nox \\) "
+        "-prune -exec rm -rf {} + && "
+        "find . -type f \\( -name '*.pyc' -o -name '*.pyo' \\) -delete && "
+        "git clean -fdX -- . >/dev/null 2>&1 || true"
     )
 
 
@@ -354,20 +387,20 @@ def aci_submit_patch(workspace: "DockerWorkspaceManager", path: str = "repo") ->
         "base_ref=$upstream; "
         "elif git show-ref --verify --quiet refs/remotes/origin/HEAD; then "
         "base_ref=origin/HEAD; "
-        "elif branch=$(git branch --show-current) && [ -n \"$branch\" ] && "
-        "git show-ref --verify --quiet \"refs/remotes/origin/$branch\"; then "
-        "base_ref=\"origin/$branch\"; "
+        'elif branch=$(git branch --show-current) && [ -n "$branch" ] && '
+        'git show-ref --verify --quiet "refs/remotes/origin/$branch"; then '
+        'base_ref="origin/$branch"; '
         "elif ! git rev-parse --verify HEAD >/dev/null 2>&1; then "
         "base_ref=; "
         "fi; "
-        "if [ -n \"$base_ref\" ]; then "
-        "git diff --binary \"$base_ref\" -- .; "
+        'if [ -n "$base_ref" ]; then '
+        'git diff --binary "$base_ref" -- .; '
         "else "
         "git diff --binary -- .; "
         "fi; "
         "git ls-files --others --exclude-standard -z -- . | "
         "while IFS= read -r -d '' file; do "
-        "git diff --no-index --binary -- /dev/null \"$file\" || true; "
+        'git diff --no-index --binary -- /dev/null "$file" || true; '
         "done; "
         "else "
         "git diff --binary -- .; "
@@ -403,55 +436,6 @@ def _find_name_pattern(pattern: str) -> str:
     return cleaned
 
 
-def _unified_diff(path: str, old: str, new: str) -> str:
-    old_lines = old.splitlines(keepends=True)
-    new_lines = new.splitlines(keepends=True)
-    body = "".join(
-        difflib.unified_diff(old_lines, new_lines, fromfile=f"a/{path}", tofile=f"b/{path}")
-    )
-    return f"diff --git a/{path} b/{path}\n{body}"
-
-
-def _create_file_diff(path: str, content: str) -> str:
-    lines = content.splitlines(keepends=True)
-    if content and not content.endswith("\n"):
-        lines.append("\n")
-    body = "".join(
-        difflib.unified_diff([], lines, fromfile="/dev/null", tofile=f"b/{path}")
-    )
-    return f"diff --git a/{path} b/{path}\nnew file mode 100644\n{body}"
-
-
-def _delete_file_diff(path: str, content: str) -> str:
-    lines = content.splitlines(keepends=True)
-    if content and not content.endswith("\n"):
-        lines.append("\n")
-    body = "".join(
-        difflib.unified_diff(lines, [], fromfile=f"a/{path}", tofile="/dev/null")
-    )
-    return f"diff --git a/{path} b/{path}\ndeleted file mode 100644\n{body}"
-
-
-def _snippet_after_text(text: str, needle: str, radius: int = 3) -> str:
-    line_number = 1
-    if needle:
-        before = text.find(needle)
-        if before >= 0:
-            line_number = text[:before].count("\n") + 1
-    return _snippet_around_line(text, line_number, radius)
-
-
-def _snippet_around_line(text: str, line_number: int, radius: int = 3) -> str:
-    lines = text.splitlines()
-    if not lines:
-        return "Snippet: <empty file>"
-    center = min(max(1, line_number), len(lines))
-    start = max(1, center - radius)
-    end = min(len(lines), center + radius)
-    body = "\n".join(f"{index:>6}\t{lines[index - 1]}" for index in range(start, end + 1))
-    return f"Snippet {start}-{end}:\n{body}"
-
-
 def _verification_suggestions(files: list[str]) -> list[str]:
     names = {PurePosixPath(path.removeprefix("./")).name for path in files}
     suggestions: list[str] = []
@@ -485,7 +469,11 @@ def _verification_recovery_hint(cmd: CommandResult) -> str:
             "verification timed out; rerun a narrower focused command, inspect the "
             "smallest relevant test target, or record the timeout as a blocker"
         )
-    if "command not found" in combined or "not found" in combined or "no such file or directory" in combined:
+    if (
+        "command not found" in combined
+        or "not found" in combined
+        or "no such file or directory" in combined
+    ):
         return (
             "verification command is missing; call aci_suggest_verification, try the "
             "project-specific equivalent, or record the missing tool as a blocker"

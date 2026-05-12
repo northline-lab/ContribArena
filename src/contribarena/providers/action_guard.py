@@ -55,7 +55,7 @@ class ActionGuardedModel(Model):
             conversation_id=conversation_id,
             prompt=prompt,
         )
-        return guard_model_response(response, tools)
+        return guard_structured_model_response(response, tools, output_schema)
 
     def stream_response(
         self,
@@ -104,8 +104,32 @@ class ActionGuardingModelProvider(ModelProvider):
 
 
 def guard_model_response(response: ModelResponse, tools: list[Tool]) -> ModelResponse:
+    return _guard_model_response(response, tools, output_schema=None)
+
+
+def guard_structured_model_response(
+    response: ModelResponse,
+    tools: list[Tool],
+    output_schema: AgentOutputSchemaBase | None,
+) -> ModelResponse:
+    return _guard_model_response(response, tools, output_schema=output_schema)
+
+
+def _guard_model_response(
+    response: ModelResponse,
+    tools: list[Tool],
+    output_schema: AgentOutputSchemaBase | None,
+) -> ModelResponse:
     tool_calls = [item for item in response.output if isinstance(item, ResponseFunctionToolCall)]
     if not tool_calls:
+        violation = _non_tool_text_violation(response, tools, output_schema)
+        if violation is not None:
+            return ModelResponse(
+                output=[_recovery_call(violation)],
+                usage=response.usage,
+                response_id=response.response_id,
+                request_id=response.request_id,
+            )
         return response
     violation = _tool_action_violation(tool_calls, tools)
     if violation is None:
@@ -115,6 +139,28 @@ def guard_model_response(response: ModelResponse, tools: list[Tool]) -> ModelRes
         usage=response.usage,
         response_id=response.response_id,
         request_id=response.request_id,
+    )
+
+
+def _non_tool_text_violation(
+    response: ModelResponse,
+    tools: list[Tool],
+    output_schema: AgentOutputSchemaBase | None,
+) -> ToolActionViolation | None:
+    if output_schema is None or output_schema.is_plain_text():
+        return None
+    if RECOVERY_TOOL_NAME not in {tool.name for tool in tools if isinstance(tool, FunctionTool)}:
+        return None
+    text = _response_text(response).strip()
+    if not text or _looks_like_json(text):
+        return None
+    return ToolActionViolation(
+        recovery_kind="non_tool_text_response",
+        message=(
+            "Rejected plain assistant text while a structured final result or one tool call "
+            "was required. Use a tool call to continue, or return valid final JSON only when "
+            "the task is complete."
+        ),
     )
 
 
@@ -200,6 +246,27 @@ def _schema_violation(
                 attempted_tool=tool_name,
             )
     return None
+
+
+def _response_text(response: ModelResponse) -> str:
+    chunks: list[str] = []
+    for item in response.output:
+        for content in getattr(item, "content", []) or []:
+            text = getattr(content, "text", "")
+            if text:
+                chunks.append(str(text))
+    return "\n".join(chunks)
+
+
+def _looks_like_json(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped.startswith(("{", "[")):
+        return False
+    try:
+        json.loads(stripped)
+    except json.JSONDecodeError:
+        return False
+    return True
 
 
 def _recovery_call(violation: ToolActionViolation) -> ResponseFunctionToolCall:

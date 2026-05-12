@@ -31,16 +31,18 @@ from contribarena.engine.middleware.governance import (
     record_governance_pr,
     save_governance_state,
 )
+from contribarena.engine.operator_events import OperatorProgressWriter, truncate_for_operator
 from contribarena.engine.runtime_config import apply_output_dir
 from contribarena.engine.workspace import DockerWorkspaceManager
 from contribarena.errors import AgentError, BudgetExhausted, InfrastructureError
 from contribarena.models import (
     AgentFinalResult,
+    CiCheck,
+    CiStatus,
     CommandResult,
     GovernanceDecision,
     PullRequestDraft,
     QualityGateResult,
-    CiStatus,
     RunState,
     TerminalState,
 )
@@ -49,6 +51,7 @@ from contribarena.trace import TraceWriter
 from contribarena.tools.github_pr import (
     ForkEnsureResult,
     GitHubPullRequestClient,
+    LabelOperationResult,
     PullRequestCreateResult,
 )
 from contribarena.tools.registry import ToolRegistry
@@ -72,6 +75,8 @@ class OwnedLivePrExecutionResult:
     fork_result: ForkEnsureResult | None = None
     push_result: CommandResult | None = None
     pr_result: PullRequestCreateResult | None = None
+    label_ensure_result: LabelOperationResult | None = None
+    label_set_result: LabelOperationResult | None = None
 
 
 class Runner:
@@ -100,6 +105,18 @@ class Runner:
             config.run.model,
         )
         trace = TraceWriter(artifacts.run_dir / "trace.jsonl", run_id)
+        operator = OperatorProgressWriter(
+            artifacts.register("operator_events.jsonl", kind="jsonl"),
+            run_id,
+            stream=verbose,
+        )
+        operator.write(
+            "run",
+            "started",
+            "started ContribArena run",
+            evidence=["config.json", "trace.jsonl"],
+            payload={"mode": config.run.mode, "model": config.run.model, "repo": repo_slug},
+        )
         trace.write(RunState.RUN_STARTED, "run.started", {"verbose": verbose})
         trace.write(RunState.CONFIG_LOADED, "config.loaded", {"model": config.run.model})
 
@@ -126,14 +143,29 @@ class Runner:
                 "workspace.ready",
                 {"container": workspace.container_name},
             )
+            operator.write(
+                "workspace",
+                "ready",
+                "workspace container is ready",
+                evidence=["trace.jsonl"],
+                payload={"container": workspace.container_name},
+            )
             registry = ToolRegistry(
                 config=config,
                 workspace=workspace,
                 trace=trace,
                 budget=budget,
                 capture=capture,
+                operator=operator,
             )
             trace.write(RunState.AGENT_INITIALIZED, "agent.initialized", {"agent": "builtin"})
+            operator.write(
+                "agent",
+                "started",
+                "built-in contributor agent started",
+                evidence=["trace.jsonl"],
+                payload={"agent": "builtin"},
+            )
             prompt = (
                 ContextBuilder().build_system_prompt(config) + "\n\n" + build_goal_prompt(config)
             )
@@ -155,6 +187,13 @@ class Runner:
                 RunState.AGENT_FINAL_RESULT,
                 "agent.final_result",
                 {"status": result.status},
+            )
+            operator.write(
+                "agent",
+                result.status,
+                "agent returned structured final result",
+                evidence=["trace.jsonl"],
+                payload={"status": result.status},
             )
             agent_status = result.status
             _enforce_issue_completion(config, result, capture)
@@ -193,10 +232,21 @@ class Runner:
                 "contribution.quality_gate",
                 quality_gate.model_dump(mode="json"),
             )
+            operator.write(
+                "quality_gate",
+                quality_gate.status,
+                f"contribution quality gate {quality_gate.status}",
+                evidence=["quality_gate.json", "trace.jsonl"],
+                payload={
+                    "blockers": quality_gate.blockers,
+                    "warnings": quality_gate.warnings,
+                },
+            )
             pr_draft, terminal = _write_pr_lifecycle_artifacts(
                 config=config,
                 artifacts=artifacts,
                 trace=trace,
+                operator=operator,
                 result=result,
                 workspace=workspace,
                 capture=capture,
@@ -210,7 +260,7 @@ class Runner:
             artifacts.write_json("terminal_state.json", terminal.model_dump(mode="json"))
             artifacts.write_markdown(
                 "quality_report.md",
-                _quality_report(result, capture, terminal, quality_gate, pr_draft),
+                _quality_report(config, result, capture, terminal, quality_gate, pr_draft),
                 required=False,
             )
             trace.write(
@@ -222,6 +272,13 @@ class Runner:
                 RunState.RUN_TERMINAL,
                 "run.terminal",
                 terminal.model_dump(mode="json"),
+            )
+            operator.write(
+                "run",
+                terminal.status,
+                f"run reached terminal state: {terminal.reason}",
+                evidence=["terminal_state.json", "trace.jsonl"],
+                payload=terminal.model_dump(mode="json"),
             )
             trace.write(
                 RunState.RUN_COMPLETED,
@@ -243,6 +300,17 @@ class Runner:
             )
         except Exception as exc:
             terminal = _terminal_state_for_exception(exc)
+            operator.write(
+                "run",
+                terminal.status,
+                f"run failed before normal completion: {terminal.reason}",
+                evidence=["terminal_state.json", "trace.jsonl"],
+                payload={
+                    "error_type": type(exc).__name__,
+                    "error": truncate_for_operator(str(exc)),
+                    **terminal.model_dump(mode="json"),
+                },
+            )
             failure_state = (
                 RunState.WORKSPACE_FAILED
                 if terminal.layer == "workspace"
@@ -364,6 +432,7 @@ def _write_pr_lifecycle_artifacts(
     config: RunConfig,
     artifacts: ArtifactWriter,
     trace: TraceWriter,
+    operator: OperatorProgressWriter,
     result: AgentFinalResult,
     workspace: DockerWorkspaceManager,
     capture: ArtifactCapture,
@@ -389,6 +458,13 @@ def _write_pr_lifecycle_artifacts(
             "pr_dry_run.draft_created",
             {"title": pr_draft.title, "branch": pr_draft.branch, "labels": pr_draft.labels},
         )
+        operator.write(
+            "pr_draft",
+            "created",
+            "created PR draft from accepted contribution",
+            evidence=["pr_description.md", "trace.jsonl"],
+            payload={"title": pr_draft.title, "branch": pr_draft.branch},
+        )
         if config.run.mode == "owned_live":
             governance_decision = _evaluate_owned_live_pr(
                 config=config,
@@ -404,6 +480,13 @@ def _write_pr_lifecycle_artifacts(
                 required=False,
             )
             if not governance_decision.passed:
+                operator.write(
+                    "governance_gate",
+                    "blocked",
+                    "governance blocked live PR submission",
+                    evidence=["governance_decision.json", "trace.jsonl"],
+                    payload=governance_decision.model_dump(mode="json"),
+                )
                 result.status = "blocked"
                 result.blockers.extend(
                     [
@@ -420,6 +503,13 @@ def _write_pr_lifecycle_artifacts(
                     harness_status="blocked",
                 )
             else:
+                operator.write(
+                    "governance_gate",
+                    "pass",
+                    "governance allowed live PR submission",
+                    evidence=["governance_decision.json", "trace.jsonl"],
+                    payload=governance_decision.model_dump(mode="json"),
+                )
                 live_pr_result = _execute_owned_live_pr(
                     config=config,
                     workspace=workspace,
@@ -427,10 +517,14 @@ def _write_pr_lifecycle_artifacts(
                     draft=pr_draft,
                     pr_client=pr_client,
                 )
-                if (
-                    live_pr_result.fork_result is not None
-                    and not live_pr_result.fork_result.ok
-                ):
+                if live_pr_result.fork_result is not None and not live_pr_result.fork_result.ok:
+                    operator.write(
+                        "pr_submit",
+                        "failed",
+                        "fork preparation failed before PR creation",
+                        evidence=["live_action_log.jsonl", "trace.jsonl"],
+                        payload={"error": truncate_for_operator(live_pr_result.fork_result.error)},
+                    )
                     result.status = "failed"
                     result.blockers.append("owned_live fork preparation failed")
                     terminal = TerminalState(
@@ -442,9 +536,21 @@ def _write_pr_lifecycle_artifacts(
                         harness_status="failed",
                     )
                 elif (
-                    live_pr_result.push_result is None
-                    or live_pr_result.push_result.exit_code != 0
+                    live_pr_result.push_result is None or live_pr_result.push_result.exit_code != 0
                 ):
+                    operator.write(
+                        "pr_submit",
+                        "failed",
+                        "branch push failed before PR creation",
+                        evidence=["live_action_log.jsonl", "trace.jsonl"],
+                        payload={
+                            "exit_code": (
+                                live_pr_result.push_result.exit_code
+                                if live_pr_result.push_result is not None
+                                else None
+                            )
+                        },
+                    )
                     result.status = "failed"
                     result.blockers.append("owned_live branch push failed")
                     terminal = TerminalState(
@@ -452,8 +558,7 @@ def _write_pr_lifecycle_artifacts(
                         reason="pr_branch_push_failed",
                         layer="pr",
                         message=(
-                            live_pr_result.push_result.stderr
-                            or live_pr_result.push_result.stdout
+                            live_pr_result.push_result.stderr or live_pr_result.push_result.stdout
                             if live_pr_result.push_result is not None
                             else ""
                         ),
@@ -461,6 +566,19 @@ def _write_pr_lifecycle_artifacts(
                         harness_status="failed",
                     )
                 elif live_pr_result.pr_result is None or not live_pr_result.pr_result.ok:
+                    operator.write(
+                        "pr_submit",
+                        "failed",
+                        "GitHub PR creation failed",
+                        evidence=["live_action_log.jsonl", "trace.jsonl"],
+                        payload={
+                            "error": (
+                                truncate_for_operator(live_pr_result.pr_result.error)
+                                if live_pr_result.pr_result
+                                else ""
+                            )
+                        },
+                    )
                     result.status = "failed"
                     result.blockers.append("owned_live PR creation failed")
                     terminal = TerminalState(
@@ -468,14 +586,64 @@ def _write_pr_lifecycle_artifacts(
                         reason="pr_open_failed",
                         layer="pr",
                         message=(
-                            live_pr_result.pr_result.error
-                            if live_pr_result.pr_result
-                            else ""
+                            live_pr_result.pr_result.error if live_pr_result.pr_result else ""
                         ),
                         agent_status=terminal.agent_status,
                         harness_status="failed",
                     )
+                elif _live_label_failure(live_pr_result):
+                    _record_opened_live_pr(
+                        config,
+                        governance_decision,
+                        pr_draft,
+                        live_pr_result.pr_result,
+                    )
+                    live_ci_status = _observe_live_ci(
+                        config=config,
+                        pr_client=pr_client,
+                        pr_result=live_pr_result.pr_result,
+                    )
+                    label_error = _live_label_error(live_pr_result)
+                    label_permission_boundary = _live_label_permission_boundary(
+                        live_pr_result
+                    )
+                    operator.write(
+                        "pr_labels",
+                        "permission_denied" if label_permission_boundary else "failed",
+                        (
+                            "GitHub PR label application lacked upstream permission"
+                            if label_permission_boundary
+                            else "GitHub PR label application failed"
+                        ),
+                        evidence=["live_action_log.jsonl", "trace.jsonl"],
+                        payload={
+                            "error": truncate_for_operator(label_error),
+                            "nonfatal": label_permission_boundary,
+                        },
+                    )
+                    if not label_permission_boundary:
+                        result.status = "failed"
+                        result.blockers.append("owned_live PR label application failed")
+                        terminal = TerminalState(
+                            status="failed",
+                            reason="pr_label_failed",
+                            layer="pr",
+                            message=label_error,
+                            agent_status=terminal.agent_status,
+                            harness_status="failed",
+                        )
                 else:
+                    operator.write(
+                        "pr_submit",
+                        "opened",
+                        "opened live pull request",
+                        evidence=["live_action_log.jsonl", "pr_description.md"],
+                        payload={
+                            "number": live_pr_result.pr_result.number,
+                            "url": live_pr_result.pr_result.url,
+                            "head": live_pr_result.head,
+                        },
+                    )
                     _record_opened_live_pr(
                         config,
                         governance_decision,
@@ -491,6 +659,13 @@ def _write_pr_lifecycle_artifacts(
     ci_status = live_ci_status or build_ci_status(capture, quality_gate)
     artifacts.write_json("ci_status.json", ci_status.model_dump(mode="json"))
     trace.write(RunState.CI_OBSERVED, "ci.observed", ci_status.model_dump(mode="json"))
+    operator.write(
+        "ci_observe",
+        ci_status.status,
+        "observed CI/check status",
+        evidence=["ci_status.json", "trace.jsonl"],
+        payload=ci_status.model_dump(mode="json"),
+    )
     artifacts.write_text(
         "live_action_log.jsonl",
         "\n".join(
@@ -499,7 +674,7 @@ def _write_pr_lifecycle_artifacts(
                 pr_draft,
                 governance_decision,
                 live_pr_result,
-                ci_status,
+                live_ci_status,
             )
         ),
         kind="jsonl",
@@ -513,6 +688,12 @@ def _write_pr_lifecycle_artifacts(
         RunState.POSTMORTEM_WRITTEN,
         "postmortem.written",
         {"artifact": "postmortem.md"},
+    )
+    operator.write(
+        "postmortem",
+        "written",
+        "wrote run postmortem",
+        evidence=["postmortem.md", "trace.jsonl"],
     )
     return pr_draft, terminal
 
@@ -594,6 +775,38 @@ def _execute_owned_live_pr(
         head=head,
         base=candidate.branch or _owned_default_branch(config),
     )
+    label_ensure_result: LabelOperationResult | None = None
+    label_set_result: LabelOperationResult | None = None
+    if pr_result.ok and draft.labels:
+        ensure_labels = getattr(client, "ensure_labels", None)
+        set_pr_labels = getattr(client, "set_pr_labels", None)
+        if pr_result.number is None:
+            label_ensure_result = LabelOperationResult(
+                ok=False,
+                labels=draft.labels,
+                error="GitHub PR response did not include a PR number for labels",
+                source="harness",
+            )
+        elif ensure_labels is None or set_pr_labels is None:
+            label_ensure_result = LabelOperationResult(
+                ok=False,
+                labels=draft.labels,
+                error="PR client does not support GitHub label submission",
+                source="harness",
+            )
+        else:
+            label_ensure_result = ensure_labels(
+                owner=candidate.owner,
+                repo=candidate.repo,
+                labels=draft.labels,
+            )
+            if label_ensure_result.ok:
+                label_set_result = set_pr_labels(
+                    owner=candidate.owner,
+                    repo=candidate.repo,
+                    issue_number=pr_result.number,
+                    labels=draft.labels,
+                )
     return OwnedLivePrExecutionResult(
         strategy=strategy,
         head=head,
@@ -601,6 +814,8 @@ def _execute_owned_live_pr(
         fork_result=fork_result,
         push_result=push_result,
         pr_result=pr_result,
+        label_ensure_result=label_ensure_result,
+        label_set_result=label_set_result,
     )
 
 
@@ -611,16 +826,73 @@ def _observe_live_ci(
     pr_result: PullRequestCreateResult,
 ) -> CiStatus:
     if not config.discovery.candidates:
-        return CiStatus(status="not_run", source="github")
+        return CiStatus(
+            status="not_run",
+            source="github",
+            checks=[
+                CiCheck(
+                    name="github_check_runs",
+                    status="skipped",
+                    details="No configured repository was available for CI observation.",
+                )
+            ],
+        )
     candidate = config.discovery.candidates[0]
-    client = pr_client or GitHubPullRequestClient(token_env=config.governance.bot_identity.token_env)
+    client = pr_client or GitHubPullRequestClient(
+        token_env=config.governance.bot_identity.token_env
+    )
     get_check_runs = getattr(client, "get_check_runs", None)
     if get_check_runs is None:
-        return CiStatus(status="not_run", source="github")
+        return CiStatus(
+            status="not_run",
+            source="github",
+            checks=[
+                CiCheck(
+                    name="github_check_runs",
+                    status="skipped",
+                    details="PR client does not support GitHub check-runs observation.",
+                )
+            ],
+        )
     ref = pr_result.head_sha or ""
     if not ref:
-        return CiStatus(status="not_run", source="github")
+        return CiStatus(
+            status="not_run",
+            source="github",
+            checks=[
+                CiCheck(
+                    name="github_check_runs",
+                    status="skipped",
+                    details="GitHub PR response did not include a head SHA for CI observation.",
+                )
+            ],
+        )
     return get_check_runs(owner=candidate.owner, repo=candidate.repo, ref=ref)
+
+
+def _live_label_failure(result: OwnedLivePrExecutionResult) -> bool:
+    return (
+        result.label_ensure_result is not None
+        and not result.label_ensure_result.ok
+        or result.label_set_result is not None
+        and not result.label_set_result.ok
+    )
+
+
+def _live_label_error(result: OwnedLivePrExecutionResult) -> str:
+    if result.label_ensure_result is not None and not result.label_ensure_result.ok:
+        return result.label_ensure_result.error
+    if result.label_set_result is not None and not result.label_set_result.ok:
+        return result.label_set_result.error
+    return ""
+
+
+def _live_label_permission_boundary(result: OwnedLivePrExecutionResult) -> bool:
+    return any(
+        _label_operation_status(label_result) == "permission_denied"
+        for label_result in (result.label_ensure_result, result.label_set_result)
+        if label_result is not None and not label_result.ok
+    )
 
 
 def _owned_live_push_command(
@@ -633,6 +905,9 @@ def _owned_live_push_command(
     token_env: str,
 ) -> str:
     remote_url = f'"https://x-access-token:${{{token_env}}}@github.com/{owner}/{repo}.git"'
+    remote_name = "contribarena-submit"
+    remote_branch_ref = f"refs/heads/{branch}"
+    tracking_ref = f"refs/remotes/{remote_name}/{branch}"
     email = f"{actor}@users.noreply.github.com"
     return " && ".join(
         [
@@ -642,9 +917,25 @@ def _owned_live_push_command(
             "git -C repo add -A",
             f"git -C repo commit -m {shlex.quote(title)}",
             "git -C repo status --short",
-            "git -C repo push "
-            f"{remote_url} "
-            f"{shlex.quote('HEAD:refs/heads/' + branch)} --force-with-lease",
+            f"(git -C repo remote remove {remote_name} >/dev/null 2>&1 || true)",
+            f"git -C repo remote add {remote_name} {remote_url}",
+            "(git -C repo fetch --no-tags "
+            f"{remote_name} "
+            f"{shlex.quote('+' + remote_branch_ref + ':' + tracking_ref)} "
+            ">/dev/null 2>&1 || true)",
+            "if git -C repo show-ref --verify --quiet "
+            f"{shlex.quote(tracking_ref)}; then "
+            "lease_arg="
+            f"{shlex.quote('--force-with-lease=' + remote_branch_ref + ':')}"
+            "$(git -C repo rev-parse "
+            f"{shlex.quote(tracking_ref)}); "
+            "else "
+            "lease_arg="
+            f"{shlex.quote('--force-with-lease=' + remote_branch_ref + ':')}; "
+            "fi; "
+            f"git -C repo push {remote_name} "
+            f"{shlex.quote('HEAD:' + remote_branch_ref)} "
+            '"$lease_arg"',
         ]
     )
 
@@ -780,9 +1071,7 @@ def _live_action_log_entries(
     entries: list[dict[str, object]] = []
     if live_pr_result is not None and live_pr_result.fork_result is not None:
         fork_action = (
-            "github.create_fork"
-            if live_pr_result.fork_result.created
-            else "github.ensure_fork"
+            "github.create_fork" if live_pr_result.fork_result.created else "github.ensure_fork"
         )
         entries.append(
             {
@@ -826,6 +1115,38 @@ def _live_action_log_entries(
                 "head": live_pr_result.head,
             }
         )
+        if live_pr_result.label_ensure_result is not None:
+            label_status = _label_operation_status(live_pr_result.label_ensure_result)
+            entries.append(
+                {
+                    **base_entry,
+                    "action": "github.ensure_labels",
+                    "status": label_status,
+                    "external_write": True,
+                    "labels": live_pr_result.label_ensure_result.labels,
+                    "label_error": live_pr_result.label_ensure_result.error,
+                    "label_status_code": live_pr_result.label_ensure_result.status_code,
+                    "nonfatal": label_status == "permission_denied",
+                    "source": live_pr_result.label_ensure_result.source,
+                    "pr_number": live_pr_result.pr_result.number,
+                }
+            )
+        if live_pr_result.label_set_result is not None:
+            label_status = _label_operation_status(live_pr_result.label_set_result)
+            entries.append(
+                {
+                    **base_entry,
+                    "action": "github.set_pr_labels",
+                    "status": "set" if live_pr_result.label_set_result.ok else label_status,
+                    "external_write": True,
+                    "labels": live_pr_result.label_set_result.labels,
+                    "label_error": live_pr_result.label_set_result.error,
+                    "label_status_code": live_pr_result.label_set_result.status_code,
+                    "nonfatal": label_status == "permission_denied",
+                    "source": live_pr_result.label_set_result.source,
+                    "pr_number": live_pr_result.pr_result.number,
+                }
+            )
         if live_pr_result.pr_result.ok and ci_status is not None:
             entries.append(
                 {
@@ -836,6 +1157,7 @@ def _live_action_log_entries(
                     "head": live_pr_result.head,
                     "ci_source": ci_status.source,
                     "check_count": len(ci_status.checks),
+                    "ci_details": [check.details for check in ci_status.checks],
                 }
             )
     if entries:
@@ -848,6 +1170,31 @@ def _live_action_log_entries(
             "external_write": False,
         }
     ]
+
+
+def _label_operation_status(result: LabelOperationResult) -> str:
+    if result.ok:
+        return "ready"
+    if result.status_code in {401, 403, 404}:
+        return "permission_denied"
+    error = result.error.lower()
+    if any(
+        marker in error
+        for marker in _LABEL_PERMISSION_ERROR_MARKERS
+    ):
+        return "permission_denied"
+    return "failed"
+
+
+_LABEL_PERMISSION_ERROR_MARKERS = (
+    "403",
+    "404",
+    "permission",
+    "denied",
+    "repo not found",
+    "resource not accessible",
+    "not found",
+)
 
 
 def _terminal_state_for_result(
@@ -1020,7 +1367,17 @@ def _has_submitted_patch(capture: ArtifactCapture) -> bool:
 def _has_successful_verification_after_last_edit(capture: ArtifactCapture) -> bool:
     last_edit_index = -1
     for index, item in enumerate(capture.aci_results):
-        if item.tool in {"aci_replace", "aci_insert", "aci_create", "aci_undo"} and item.success:
+        if (
+            item.tool
+            in {
+                "aci_apply_patch",
+                "aci_replace",
+                "aci_insert",
+                "aci_create",
+                "aci_undo",
+            }
+            and item.success
+        ):
             last_edit_index = index
     accepted_no_command_review = any(
         item.tool == "aci_submit_patch"
@@ -1081,6 +1438,7 @@ def _command_log(commands: list[object]) -> str:
 
 
 def _quality_report(
+    config: RunConfig,
     result: AgentFinalResult,
     capture: ArtifactCapture,
     terminal: TerminalState,
@@ -1089,13 +1447,13 @@ def _quality_report(
 ) -> str:
     submitted = _has_submitted_patch(capture)
     failed_commands = [command for command in capture.commands if command.exit_code != 0]
-    review_results = [
-        item.review_notes for item in capture.aci_results if item.tool == "aci_submit_patch"
+    submit_reviews = [
+        item for item in capture.aci_results if item.tool == "aci_submit_patch" and item.review_notes
     ]
+    latest_review = submit_reviews[-1].review_notes if submit_reviews else ""
+    prior_failed_reviews = [item.review_notes for item in submit_reviews[:-1] if not item.success]
     recovery_results = [
-        item
-        for item in capture.aci_results
-        if item.recovery_kind or item.terminal_status
+        item for item in capture.aci_results if item.recovery_kind or item.terminal_status
     ]
     sections = [
         "# Quality Report",
@@ -1104,7 +1462,8 @@ def _quality_report(
         f"- Terminal status: {terminal.status}",
         f"- Terminal reason: {terminal.reason}",
         f"- Terminal layer: {terminal.layer}",
-        f"- Patch submitted in shadow mode: {submitted}",
+        f"- Patch submitted: {submitted}",
+        f"- Run mode: {config.run.mode}",
         f"- Commands run: {len(capture.commands)}",
         f"- Failed commands: {len(failed_commands)}",
         f"- Patch applications: {len(capture.patches)}",
@@ -1117,8 +1476,10 @@ def _quality_report(
         sections.extend(["", "## Problem Summary", "", result.problem_statement_summary])
     if result.verification_summary:
         sections.extend(["", "## Verification Summary", "", result.verification_summary])
-    if review_results:
-        sections.extend(["", "## Submit-Time Review", "", *review_results])
+    if latest_review:
+        sections.extend(["", "## Submit-Time Review", "", latest_review])
+    if prior_failed_reviews:
+        sections.extend(["", "## Prior Submit-Time Review Failures", "", *prior_failed_reviews])
     if recovery_results:
         sections.extend(
             [
@@ -1127,21 +1488,9 @@ def _quality_report(
                 "",
                 *[
                     f"- {item.tool}: {item.recovery_kind or 'n/a'}"
-                    + (
-                        f" retry={item.retry_count}"
-                        if item.retry_count
-                        else ""
-                    )
-                    + (
-                        f" -> {item.terminal_status}"
-                        if item.terminal_status
-                        else ""
-                    )
-                    + (
-                        " terminal_after_retries"
-                        if item.terminal_after_retries
-                        else ""
-                    )
+                    + (f" retry={item.retry_count}" if item.retry_count else "")
+                    + (f" -> {item.terminal_status}" if item.terminal_status else "")
+                    + (" terminal_after_retries" if item.terminal_after_retries else "")
                     for item in recovery_results
                 ],
             ]

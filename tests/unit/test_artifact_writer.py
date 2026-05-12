@@ -33,6 +33,17 @@ class ArtifactWriterTest(unittest.TestCase):
             names = [entry["name"] for entry in manifest["artifacts"]]
             self.assertEqual(1, names.count("artifact_manifest.json"))
 
+    def test_manifest_records_registered_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            writer = ArtifactWriter(Path(tmp), "run-1", "owner/repo", "model")
+            path = writer.register("operator_events.jsonl", kind="jsonl")
+            manifest_path = writer.finalize_manifest()
+
+            self.assertTrue(path.exists())
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            entries = {entry["name"]: entry for entry in manifest["artifacts"]}
+            self.assertEqual("jsonl", entries["operator_events.jsonl"]["kind"])
+
 
 if __name__ == "__main__":
     unittest.main()

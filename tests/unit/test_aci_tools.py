@@ -7,6 +7,8 @@ from pathlib import Path
 
 from contribarena.models import CommandResult, PatchResult
 from contribarena.tools.aci import (
+    aci_apply_patch,
+    aci_clean_generated,
     aci_create,
     aci_find_files,
     aci_insert,
@@ -83,7 +85,7 @@ class LocalWorkspace:
         )
         return PatchResult(
             success=completed.returncode == 0,
-            files_modified=["repo/app.py"] if "repo/app.py" in diff else ["repo/new.py"],
+            files_modified=_files_from_patch(diff),
             error=None if completed.returncode == 0 else completed.stderr,
         )
 
@@ -139,6 +141,113 @@ class AciToolsTest(unittest.TestCase):
 
             self.assertTrue(undo_create.success, undo_create.error)
             self.assertFalse((root / "repo" / "new.py").exists())
+
+    def test_apply_patch_updates_file_with_structured_patch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "repo").mkdir()
+            (root / "repo" / "app.py").write_text(
+                "def value():\n    return 'old'\n",
+                encoding="utf-8",
+            )
+            workspace = LocalWorkspace(root)
+
+            result = aci_apply_patch(
+                workspace,
+                [
+                    {
+                        "type": "update_file",
+                        "path": "repo/app.py",
+                        "diff": (
+                            "*** Begin Patch\n"
+                            "*** Update File: repo/app.py\n"
+                            "@@\n"
+                            " def value():\n"
+                            "-    return 'old'\n"
+                            "+    return 'new'\n"
+                            "*** End Patch"
+                        ),
+                    }
+                ],
+                rationale="change returned value",
+                expected_files=["repo/app.py"],
+            ).result  # type: ignore[arg-type]
+
+            self.assertTrue(result.success, result.error)
+            self.assertEqual(["repo/app.py"], result.files_modified)
+            self.assertIn("Snippet", result.output)
+            self.assertEqual(
+                "def value():\n    return 'new'\n",
+                (root / "repo" / "app.py").read_text(encoding="utf-8"),
+            )
+
+    def test_apply_patch_create_delete_move_and_undo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "repo").mkdir()
+            workspace = LocalWorkspace(root)
+
+            create = aci_apply_patch(
+                workspace,
+                [{"type": "create_file", "path": "repo/a.txt", "content": "alpha\n"}],
+            )  # type: ignore[arg-type]
+            move = aci_apply_patch(
+                workspace,
+                [
+                    {
+                        "type": "move_file",
+                        "path": "repo/a.txt",
+                        "destination": "repo/b.txt",
+                    }
+                ],
+            )  # type: ignore[arg-type]
+            delete = aci_apply_patch(
+                workspace,
+                [{"type": "delete_file", "path": "repo/b.txt"}],
+            )  # type: ignore[arg-type]
+            undo = aci_undo(workspace, delete.undo_diff or "").result  # type: ignore[arg-type]
+
+            self.assertTrue(create.result.success, create.result.error)
+            self.assertTrue(move.result.success, move.result.error)
+            self.assertTrue(delete.result.success, delete.result.error)
+            self.assertTrue(undo.success, undo.error)
+            self.assertTrue((root / "repo" / "b.txt").exists())
+            self.assertEqual("alpha\n", (root / "repo" / "b.txt").read_text(encoding="utf-8"))
+
+    def test_apply_patch_returns_structured_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "repo").mkdir()
+            (root / "repo" / "app.py").write_text("print('old')\n", encoding="utf-8")
+            workspace = LocalWorkspace(root)
+
+            mismatch = aci_apply_patch(
+                workspace,
+                [
+                    {
+                        "type": "update_file",
+                        "path": "repo/app.py",
+                        "diff": (
+                            "*** Begin Patch\n"
+                            "*** Update File: repo/app.py\n"
+                            "@@\n"
+                            "-print('missing')\n"
+                            "+print('new')\n"
+                            "*** End Patch"
+                        ),
+                    }
+                ],
+            ).result  # type: ignore[arg-type]
+            generated = aci_apply_patch(
+                workspace,
+                [{"type": "create_file", "path": "repo/__pycache__/x.pyc", "content": "x"}],
+            ).result  # type: ignore[arg-type]
+
+            self.assertFalse(mismatch.success)
+            self.assertEqual("context_mismatch", mismatch.error_kind)
+            self.assertIn("Snippet", mismatch.output)
+            self.assertFalse(generated.success)
+            self.assertEqual("generated_file_rejected", generated.error_kind)
 
     def test_submit_patch_includes_untracked_created_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -197,6 +306,7 @@ class AciToolsTest(unittest.TestCase):
             self.assertTrue(insert.success, insert.error)
             self.assertIn("Snippet", insert.output)
             self.assertTrue(verify.success, verify.error)
+            self.assertFalse((root / "repo" / "__pycache__").exists())
 
             undo_diff = aci_insert(workspace, "repo/app.py", 2, "print('temp')").undo_diff  # type: ignore[arg-type]
             self.assertIsNotNone(undo_diff)
@@ -205,12 +315,41 @@ class AciToolsTest(unittest.TestCase):
             self.assertTrue(undo.success, undo.error)
             self.assertNotIn("temp", (root / "repo" / "app.py").read_text())
 
+    def test_clean_generated_removes_cache_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "repo" / "__pycache__").mkdir(parents=True)
+            (root / "repo" / ".pytest_cache").mkdir()
+            (root / "repo" / "__pycache__" / "app.cpython-311.pyc").write_bytes(b"bytecode")
+            (root / "repo" / "standalone.pyc").write_bytes(b"bytecode")
+            subprocess.run(["git", "init"], cwd=root / "repo", capture_output=True, check=True)
+            workspace = LocalWorkspace(root)
+
+            clean = aci_clean_generated(workspace, "repo").result  # type: ignore[arg-type]
+
+            self.assertTrue(clean.success, clean.error)
+            self.assertFalse((root / "repo" / "__pycache__").exists())
+            self.assertFalse((root / "repo" / ".pytest_cache").exists())
+            self.assertFalse((root / "repo" / "standalone.pyc").exists())
+
+    def test_verify_does_not_record_failed_cleanup_as_verification_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = LocalWorkspace(Path(tmp))
+
+            execution = aci_verify(workspace, "true", "missing")
+
+            self.assertFalse(execution.result.success)
+            self.assertEqual(1, len(execution.commands))
+            self.assertIn("cd missing", execution.commands[0].command)
+
     def test_suggest_verification_from_project_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "repo").mkdir()
             (root / "repo" / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
-            (root / "repo" / "package.json").write_text('{"scripts":{"test":"echo ok"}}\n', encoding="utf-8")
+            (root / "repo" / "package.json").write_text(
+                '{"scripts":{"test":"echo ok"}}\n', encoding="utf-8"
+            )
             workspace = LocalWorkspace(root)
 
             result = aci_suggest_verification(workspace, "repo").result  # type: ignore[arg-type]
@@ -228,6 +367,18 @@ def _cmd(command: str, stdout: str = "", stderr: str = "", exit_code: int = 0) -
         exit_code=exit_code,
         duration_seconds=0.01,
     )
+
+
+def _files_from_patch(diff: str) -> list[str]:
+    files: list[str] = []
+    for line in diff.splitlines():
+        if line.startswith("diff --git "):
+            parts = line.split()
+            if len(parts) >= 4:
+                files.append(parts[3].removeprefix("b/"))
+        elif line.startswith("+++ b/"):
+            files.append(line.removeprefix("+++ b/"))
+    return sorted(set(files))
 
 
 if __name__ == "__main__":

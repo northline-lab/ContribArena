@@ -1,9 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from urllib.parse import quote
 
 from contribarena.models import CiCheck, CiStatus
 from contribarena.tools.github_client import GitHubClient, repo_api_path
+
+
+LABEL_METADATA: dict[str, tuple[str, str]] = {
+    "contribarena-live": ("0e8a16", "Opened by the ContribArena owned-live harness"),
+    "issue-solving": ("1d76db", "ContribArena issue-solving run"),
+    "risk-low": ("c2e0c6", "Low-risk contribution"),
+    "risk-medium": ("fbca04", "Medium-risk contribution"),
+    "risk-high": ("d93f0b", "High-risk contribution"),
+}
 
 
 @dataclass(frozen=True)
@@ -26,6 +36,15 @@ class ForkEnsureResult:
     created: bool = False
     error: str = ""
     source: str = ""
+
+
+@dataclass(frozen=True)
+class LabelOperationResult:
+    ok: bool
+    labels: list[str]
+    error: str = ""
+    source: str = ""
+    status_code: int | None = None
 
 
 class GitHubPullRequestClient:
@@ -114,6 +133,73 @@ class GitHubPullRequestClient:
             source=response.source,
         )
 
+    def ensure_labels(self, *, owner: str, repo: str, labels: list[str]) -> LabelOperationResult:
+        normalized = _normalize_labels(labels)
+        for label in normalized:
+            existing = self.client.rest_json(
+                "GET",
+                repo_api_path(owner, repo, f"labels/{quote(label, safe='')}"),
+                token_env=self.token_env,
+            )
+            if existing.ok:
+                continue
+            if "repo not found" not in existing.error:
+                return LabelOperationResult(
+                    ok=False,
+                    labels=normalized,
+                    error=existing.error,
+                    source=existing.source,
+                    status_code=existing.status_code,
+                )
+            color, description = LABEL_METADATA.get(
+                label, ("cfd3d7", "ContribArena run label")
+            )
+            created = self.client.rest_json(
+                "POST",
+                repo_api_path(owner, repo, "labels"),
+                json_body={"name": label, "color": color, "description": description},
+                token_env=self.token_env,
+            )
+            if not created.ok:
+                return LabelOperationResult(
+                    ok=False,
+                    labels=normalized,
+                    error=created.error,
+                    source=created.source,
+                    status_code=created.status_code,
+                )
+        return LabelOperationResult(ok=True, labels=normalized)
+
+    def set_pr_labels(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        issue_number: int,
+        labels: list[str],
+    ) -> LabelOperationResult:
+        normalized = _normalize_labels(labels)
+        response = self.client.rest_json(
+            "PUT",
+            repo_api_path(owner, repo, f"issues/{issue_number}/labels"),
+            json_body={"labels": normalized},
+            token_env=self.token_env,
+        )
+        if not response.ok:
+            return LabelOperationResult(
+                ok=False,
+                labels=normalized,
+                error=response.error,
+                source=response.source,
+                status_code=response.status_code,
+            )
+        return LabelOperationResult(
+            ok=True,
+            labels=normalized,
+            source=response.source,
+            status_code=response.status_code,
+        )
+
     def get_check_runs(self, *, owner: str, repo: str, ref: str) -> CiStatus:
         response = self.client.rest_json(
             "GET",
@@ -146,17 +232,7 @@ class GitHubPullRequestClient:
             )
         raw_checks = response.data.get("check_runs")
         if not isinstance(raw_checks, list) or not raw_checks:
-            return CiStatus(
-                status="not_run",
-                source="github",
-                checks=[
-                    CiCheck(
-                        name="github_check_runs",
-                        status="skipped",
-                        details="No GitHub check runs were returned.",
-                    )
-                ],
-            )
+            return self._empty_check_runs_status(owner=owner, repo=repo)
         checks = [_normalize_check_run(item) for item in raw_checks if isinstance(item, dict)]
         if not checks:
             return CiStatus(status="not_run", source="github")
@@ -164,6 +240,37 @@ class GitHubPullRequestClient:
         if all(check.status == "skipped" for check in checks):
             overall = "not_run"
         return CiStatus(status=overall, source="github", checks=checks)
+
+    def _empty_check_runs_status(self, *, owner: str, repo: str) -> CiStatus:
+        workflows = self.client.rest_json(
+            "GET",
+            repo_api_path(owner, repo, "actions/workflows"),
+            token_env=self.token_env,
+        )
+        details = "No GitHub check runs were returned yet."
+        if workflows.ok and isinstance(workflows.data, dict):
+            raw_workflows = workflows.data.get("workflows")
+            if isinstance(raw_workflows, list) and raw_workflows:
+                details = f"No GitHub check runs were returned yet; workflows_configured={len(raw_workflows)}."
+            elif isinstance(raw_workflows, list):
+                details = "No GitHub Actions workflows are configured for this repository."
+        elif not workflows.ok:
+            details = f"No GitHub check runs were returned; workflow lookup failed: {workflows.error}"
+        return CiStatus(
+            status="not_run",
+            source="github",
+            checks=[
+                CiCheck(
+                    name="github_check_runs",
+                    status="skipped",
+                    details=details,
+                )
+            ],
+        )
+
+
+def _normalize_labels(labels: list[str]) -> list[str]:
+    return list(dict.fromkeys(label.strip() for label in labels if label.strip()))
 
 
 def _normalize_check_run(item: dict[str, object]) -> CiCheck:

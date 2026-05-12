@@ -21,13 +21,17 @@ from contribarena.config.schema import (
     WorkspaceConfig,
 )
 from contribarena.agent.contributor import build_agent_instructions
-from contribarena.engine.runner import Runner
+from contribarena.engine.runner import Runner, _owned_live_push_command
 from contribarena.errors import AgentError
 from contribarena.models import AgentFinalResult, OpportunitySummary, RepoSummary, SelectedTask
 from contribarena.models.lifecycle import CiCheck, CiStatus
 from contribarena.models.agent_result import WorkspaceSummary
 from contribarena.providers import TracingModelProvider
-from contribarena.tools.github_pr import ForkEnsureResult, PullRequestCreateResult
+from contribarena.tools.github_pr import (
+    ForkEnsureResult,
+    LabelOperationResult,
+    PullRequestCreateResult,
+)
 
 
 class FakeM02Agent:
@@ -97,6 +101,8 @@ class FakeIssueAgent:
         include_evidence: bool = True,
         status: str = "completed",
         no_command_verification_rationale: str = "",
+        report_progress: bool = False,
+        use_apply_patch: bool = False,
     ) -> None:
         self.verify = verify
         self.verify_before_edit = verify_before_edit
@@ -104,6 +110,8 @@ class FakeIssueAgent:
         self.include_evidence = include_evidence
         self.status = status
         self.no_command_verification_rationale = no_command_verification_rationale
+        self.report_progress = report_progress
+        self.use_apply_patch = use_apply_patch
 
     def run(
         self,
@@ -118,9 +126,37 @@ class FakeIssueAgent:
             "git clone https://github.com/example/repo.git repo && cd repo && git status --short"
         )
         tools.aci_view("repo/app.py")  # type: ignore[attr-defined]
+        if self.report_progress:
+            tools.operator_report_progress(  # type: ignore[attr-defined]
+                "task_discovery",
+                "working",
+                "Inspecting repo/app.py for the configured marker.",
+                '["repo/app.py", "trace.jsonl"]',
+            )
         if self.verify and self.verify_before_edit:
             tools.aci_verify("python3 -m compileall .", "repo")  # type: ignore[attr-defined]
-        tools.aci_replace("repo/app.py", "return 'old'", "return 'new'")  # type: ignore[attr-defined]
+        if self.use_apply_patch:
+            tools.aci_apply_patch(  # type: ignore[attr-defined]
+                [
+                    {
+                        "type": "update_file",
+                        "path": "repo/app.py",
+                        "diff": (
+                            "*** Begin Patch\n"
+                            "*** Update File: repo/app.py\n"
+                            "@@\n"
+                            " def marker():\n"
+                            "-    return 'old'\n"
+                            "+    return 'new'\n"
+                            "*** End Patch"
+                        ),
+                    }
+                ],
+                "fix configured marker",
+                ["repo/app.py"],
+            )
+        else:
+            tools.aci_replace("repo/app.py", "return 'old'", "return 'new'")  # type: ignore[attr-defined]
         if self.verify and not self.verify_before_edit:
             tools.aci_verify("python3 -m compileall .", "repo")  # type: ignore[attr-defined]
         if self.submit_patch:
@@ -157,9 +193,7 @@ class FakeIssueAgent:
                 else ""
             ),
             reproduction_notes=(
-                "Inspected repo/app.py and found the old marker."
-                if self.include_evidence
-                else ""
+                "Inspected repo/app.py and found the old marker." if self.include_evidence else ""
             ),
             verification_summary=(
                 self.no_command_verification_rationale
@@ -227,9 +261,7 @@ class RunnerM02Test(unittest.TestCase):
         self.assertIn("discover and select exactly one low-risk task", instructions)
 
     def test_owned_live_agent_instructions_keep_writes_harness_owned(self) -> None:
-        instructions = build_agent_instructions(
-            _owned_live_config(Path("runs"), live_enabled=True)
-        )
+        instructions = build_agent_instructions(_owned_live_config(Path("runs"), live_enabled=True))
 
         self.assertIn("Owned-live mode", instructions)
         self.assertIn("harness will handle governed branch push and PR creation", instructions)
@@ -295,9 +327,7 @@ class RunnerM02Test(unittest.TestCase):
             self.assertIn("aci_suggest_verification", {step["tool"] for step in trajectory})
             self.assertIn("aci_verify", {step["tool"] for step in trajectory})
             self.assertIn("aci_submit_patch", {step["tool"] for step in trajectory})
-            workspace_command = json.loads(
-                (result.run_dir / "workspace_command.json").read_text()
-            )
+            workspace_command = json.loads((result.run_dir / "workspace_command.json").read_text())
             self.assertIn("aci_results", workspace_command)
             submit_results = [
                 item
@@ -481,7 +511,88 @@ class RunnerM02Test(unittest.TestCase):
             self.assertEqual("blocked", result.status)
             report = (result.run_dir / "quality_report.md").read_text()
             self.assertIn("suspicious generated or temporary files", report)
+            self.assertIn("aci_clean_generated", report)
             self.assertIn("submit_review_failed", report)
+
+    def test_submit_review_rejects_untracked_source_edit_provenance(self) -> None:
+        class FakeShellEditAgent(FakeIssueAgent):
+            def run(
+                self,
+                config: RunConfig,
+                tools: object,
+                prompt: str,
+                model_provider: object = None,
+            ) -> AgentFinalResult:
+                tools.workspace_run(  # type: ignore[attr-defined]
+                    "git clone https://github.com/example/repo.git repo"
+                )
+                tools.aci_view("repo/app.py")  # type: ignore[attr-defined]
+                tools.workspace_run("cd repo && sed -i s/old/new/ app.py")  # type: ignore[attr-defined]
+                tools.aci_verify("python3 -m compileall .", "repo")  # type: ignore[attr-defined]
+                tools.aci_submit_patch()  # type: ignore[attr-defined]
+                return AgentFinalResult(
+                    status="completed",
+                    repo=RepoSummary(
+                        owner="example", name="repo", url="https://github.com/example/repo"
+                    ),
+                    repo_profile="# Repo Profile\n\nSmall issue fixture.",
+                    opportunities=[
+                        OpportunitySummary(
+                            title="Fix configured problem",
+                            rationale="Directly addresses the problem statement.",
+                            risk="low",
+                            source="configured",
+                        )
+                    ],
+                    selected_task=SelectedTask(
+                        title="Fix configured problem",
+                        rationale="Issue-solving mode should not self-select another task.",
+                        expected_change="old -> new",
+                        risk="low",
+                    ),
+                    workspace_summary=WorkspaceSummary(
+                        commands_run=[],
+                        patch_applied=True,
+                        notes="Shell edit patch submitted.",
+                    ),
+                    problem_statement_summary="Configured issue asks for old marker to become new.",
+                    reproduction_notes="Inspected repo/app.py and found the old marker.",
+                    verification_summary="python3 -m compileall . passed.",
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            result = _run_with_fake_docker(
+                FakeShellEditAgent(),
+                _issue_config(tmp_path / "runs"),
+                tmp_path,
+            )
+
+            self.assertEqual("blocked", result.status)
+            report = (result.run_dir / "quality_report.md").read_text()
+            self.assertIn("without unified editor provenance", report)
+
+    def test_runner_records_structured_apply_patch_edit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            result = _run_with_fake_docker(
+                FakeIssueAgent(use_apply_patch=True),
+                _issue_config(tmp_path / "runs"),
+                tmp_path,
+            )
+
+            trajectory = json.loads((result.run_dir / "trajectory.json").read_text())
+            self.assertIn("aci_apply_patch", {step["tool"] for step in trajectory})
+            trace_events = [
+                json.loads(line)
+                for line in (result.run_dir / "trace.jsonl").read_text().splitlines()
+                if line.strip()
+            ]
+            self.assertIn("aci.apply_patch.started", {event["event"] for event in trace_events})
+            dirty_events = [event for event in trace_events if event["event"] == "workspace.dirty"]
+            self.assertTrue(
+                any(event["payload"].get("tool") == "aci_apply_patch" for event in dirty_events)
+            )
 
     def test_submit_review_accepts_no_command_verification_rationale(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -520,6 +631,71 @@ class RunnerM02Test(unittest.TestCase):
                 "requires successful focused verification after the last edit or a specific",
                 report,
             )
+
+    def test_quality_report_separates_latest_submit_review_from_prior_failures(self) -> None:
+        class FakeRetrySubmitAgent(FakeIssueAgent):
+            def run(
+                self,
+                config: RunConfig,
+                tools: object,
+                prompt: str,
+                model_provider: object = None,
+            ) -> AgentFinalResult:
+                self.model_provider = model_provider
+                self.prompt = prompt
+                command = tools.workspace_run(  # type: ignore[attr-defined]
+                    "git clone https://github.com/example/repo.git repo"
+                )
+                tools.aci_replace("repo/app.py", "return 'old'", "return 'new'")  # type: ignore[attr-defined]
+                tools.aci_submit_patch()  # type: ignore[attr-defined]
+                tools.aci_verify("python3 -m compileall .", "repo")  # type: ignore[attr-defined]
+                tools.aci_submit_patch()  # type: ignore[attr-defined]
+                return AgentFinalResult(
+                    status="completed",
+                    repo=RepoSummary(
+                        owner="example",
+                        name="repo",
+                        url="https://github.com/example/repo",
+                    ),
+                    repo_profile="# Repo Profile\n\nSmall issue fixture.",
+                    opportunities=[
+                        OpportunitySummary(
+                            title="Fix configured problem",
+                            rationale="Directly addresses the problem statement.",
+                            risk="low",
+                            source="configured",
+                        )
+                    ],
+                    selected_task=SelectedTask(
+                        title="Fix configured problem",
+                        rationale="Issue-solving mode should not self-select another task.",
+                        expected_change="old -> new",
+                        risk="low",
+                    ),
+                    workspace_summary=WorkspaceSummary(
+                        commands_run=[command],
+                        patch_applied=True,
+                        notes="Issue-solving patch submitted.",
+                    ),
+                    problem_statement_summary="Configured issue asks for old marker to become new.",
+                    reproduction_notes="Inspected repo/app.py and found the old marker.",
+                    verification_summary="python3 -m compileall . passed.",
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            result = _run_with_fake_docker(
+                FakeRetrySubmitAgent(),
+                _issue_config(tmp_path / "runs"),
+                tmp_path,
+            )
+
+            report = (result.run_dir / "quality_report.md").read_text()
+            self.assertEqual("completed", result.status)
+            self.assertIn("## Submit-Time Review", report)
+            self.assertIn("submit-time review passed", report)
+            self.assertIn("## Prior Submit-Time Review Failures", report)
+            self.assertIn("requires successful focused verification after the last edit", report)
 
     def test_issue_solving_completed_requires_problem_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -595,9 +771,19 @@ class RunnerM02Test(unittest.TestCase):
             self.assertEqual(1, pr_client.ensure_fork_calls)
             self.assertEqual("Fix old marker", pr_client.last_title)
             self.assertEqual(
+                ["contribarena-live", "issue-solving", "risk-low"],
+                pr_client.last_labels,
+            )
+            self.assertEqual(
                 "contribarena-bot:contribarena/fix-configured-problem",
                 pr_client.last_head,
             )
+            self.assertIn("Live PR Notice", pr_client.last_body)
+            self.assertNotIn("Dry-Run Notice", pr_client.last_body)
+            pr_description = (result.run_dir / "pr_description.md").read_text()
+            self.assertIn("contribarena-live", pr_description)
+            self.assertIn("Live PR Notice", pr_description)
+            self.assertNotIn("contribarena-dry-run", pr_description)
             live_action_log = (result.run_dir / "live_action_log.jsonl").read_text()
             live_action_entries = [
                 json.loads(line) for line in live_action_log.splitlines() if line.strip()
@@ -607,6 +793,8 @@ class RunnerM02Test(unittest.TestCase):
                     "github.ensure_fork",
                     "github.push_fork_branch",
                     "github.open_pr",
+                    "github.ensure_labels",
+                    "github.set_pr_labels",
                     "github.observe_checks",
                 ],
                 [entry["action"] for entry in live_action_entries],
@@ -614,8 +802,15 @@ class RunnerM02Test(unittest.TestCase):
             self.assertEqual("ready", live_action_entries[0]["status"])
             self.assertEqual("pushed", live_action_entries[1]["status"])
             self.assertEqual("opened", live_action_entries[2]["status"])
-            self.assertEqual("success", live_action_entries[3]["status"])
-            self.assertEqual("github", live_action_entries[3]["ci_source"])
+            self.assertEqual("ready", live_action_entries[3]["status"])
+            self.assertEqual("set", live_action_entries[4]["status"])
+            self.assertEqual(
+                ["contribarena-live", "issue-solving", "risk-low"],
+                live_action_entries[4]["labels"],
+            )
+            self.assertEqual("success", live_action_entries[5]["status"])
+            self.assertEqual("github", live_action_entries[5]["ci_source"])
+            self.assertEqual(["fake check passed"], live_action_entries[5]["ci_details"])
             self.assertEqual("contribarena-bot", live_action_entries[0]["requested_fork_owner"])
             self.assertEqual("contribarena-bot/repo", live_action_entries[0]["fork_repo"])
             self.assertEqual(
@@ -666,13 +861,17 @@ class RunnerM02Test(unittest.TestCase):
             self.assertEqual("contribarena/fix-configured-problem", pr_client.last_head)
             live_action_entries = [
                 json.loads(line)
-                for line in (result.run_dir / "live_action_log.jsonl")
-                .read_text()
-                .splitlines()
+                for line in (result.run_dir / "live_action_log.jsonl").read_text().splitlines()
                 if line.strip()
             ]
             self.assertEqual(
-                ["github.push_upstream_branch", "github.open_pr", "github.observe_checks"],
+                [
+                    "github.push_upstream_branch",
+                    "github.open_pr",
+                    "github.ensure_labels",
+                    "github.set_pr_labels",
+                    "github.observe_checks",
+                ],
                 [entry["action"] for entry in live_action_entries],
             )
             command_log = (result.run_dir / "test_log.txt").read_text()
@@ -680,6 +879,101 @@ class RunnerM02Test(unittest.TestCase):
                 "x-access-token:${GITHUB_TOKEN}@github.com/example/repo.git",
                 command_log,
             )
+
+    def test_owned_live_label_permission_failure_keeps_opened_pr_completed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _owned_live_config(tmp_path / "runs", live_enabled=True)
+            os.environ["GITHUB_TOKEN"] = "test-token"
+            try:
+                result = _run_with_fake_docker(
+                    FakeIssueAgent(),
+                    config,
+                    tmp_path,
+                    pr_client=FakePrClient(
+                        actor="contribarena-bot",
+                        label_error="The user is not allowed to label this issue.",
+                        label_status_code=404,
+                    ),
+                )
+            finally:
+                os.environ.pop("GITHUB_TOKEN", None)
+
+            self.assertEqual("completed", result.status)
+            self.assertEqual("run_completed", result.terminal_reason)
+            live_action_entries = [
+                json.loads(line)
+                for line in (result.run_dir / "live_action_log.jsonl").read_text().splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(
+                [
+                    "github.ensure_fork",
+                    "github.push_fork_branch",
+                    "github.open_pr",
+                    "github.ensure_labels",
+                    "github.observe_checks",
+                ],
+                [entry["action"] for entry in live_action_entries],
+            )
+            self.assertEqual("opened", live_action_entries[2]["status"])
+            self.assertEqual("permission_denied", live_action_entries[3]["status"])
+            self.assertTrue(live_action_entries[3]["nonfatal"])
+            self.assertEqual(
+                "The user is not allowed to label this issue.",
+                live_action_entries[3]["label_error"],
+            )
+            self.assertEqual(404, live_action_entries[3]["label_status_code"])
+            self.assertEqual("success", live_action_entries[4]["status"])
+
+    def test_owned_live_non_permission_label_failure_still_fails_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _owned_live_config(tmp_path / "runs", live_enabled=True)
+            os.environ["GITHUB_TOKEN"] = "test-token"
+            try:
+                result = _run_with_fake_docker(
+                    FakeIssueAgent(),
+                    config,
+                    tmp_path,
+                    pr_client=FakePrClient(
+                        actor="contribarena-bot",
+                        label_error="malformed label response",
+                    ),
+                )
+            finally:
+                os.environ.pop("GITHUB_TOKEN", None)
+
+            self.assertEqual("failed", result.status)
+            self.assertEqual("pr_label_failed", result.terminal_reason)
+            live_action_entries = [
+                json.loads(line)
+                for line in (result.run_dir / "live_action_log.jsonl").read_text().splitlines()
+                if line.strip()
+            ]
+            self.assertEqual("failed", live_action_entries[3]["status"])
+            self.assertFalse(live_action_entries[3]["nonfatal"])
+
+    def test_owned_live_push_fetches_existing_branch_for_explicit_lease(self) -> None:
+        command = _owned_live_push_command(
+            owner="northline-lab",
+            repo="ContribArena",
+            branch="contribarena/example",
+            title="Example change",
+            actor="northline-lab",
+            token_env="GITHUB_TOKEN",
+        )
+
+        self.assertIn("remote add contribarena-submit", command)
+        self.assertIn(
+            "+refs/heads/contribarena/example:refs/remotes/contribarena-submit/contribarena/example",
+            command,
+        )
+        self.assertIn(
+            "--force-with-lease=refs/heads/contribarena/example:",
+            command,
+        )
+        self.assertIn("git -C repo push contribarena-submit", command)
 
     def test_owned_live_run_blocks_when_authenticated_actor_mismatches(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -726,9 +1020,7 @@ class RunnerM02Test(unittest.TestCase):
             self.assertEqual("pr_fork_prepare_failed", result.terminal_reason)
             live_action_entries = [
                 json.loads(line)
-                for line in (result.run_dir / "live_action_log.jsonl")
-                .read_text()
-                .splitlines()
+                for line in (result.run_dir / "live_action_log.jsonl").read_text().splitlines()
                 if line.strip()
             ]
             self.assertEqual("github.ensure_fork", live_action_entries[0]["action"])
@@ -770,6 +1062,55 @@ class RunnerM02Test(unittest.TestCase):
             _run_with_fake_docker(agent, _issue_config(tmp_path / "runs"), tmp_path)
 
             self.assertIsInstance(agent.model_provider, TracingModelProvider)
+
+    def test_runner_writes_operator_progress_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            result = _run_with_fake_docker(
+                FakeIssueAgent(),
+                _issue_config(tmp_path / "runs"),
+                tmp_path,
+            )
+
+            events = [
+                json.loads(line)
+                for line in (result.run_dir / "operator_events.jsonl").read_text().splitlines()
+                if line.strip()
+            ]
+            phases = {event["phase"] for event in events}
+            self.assertIn("run", phases)
+            self.assertIn("task_discovery", phases)
+            self.assertIn("coding", phases)
+            self.assertIn("verification", phases)
+            self.assertIn("quality_gate", phases)
+            self.assertTrue(all("summary" in event for event in events))
+            self.assertTrue(all("source" in event for event in events))
+            self.assertIn("harness", {event["source"] for event in events})
+            manifest = json.loads((result.run_dir / "artifact_manifest.json").read_text())
+            manifest_names = {entry["name"] for entry in manifest["artifacts"]}
+            self.assertIn("operator_events.jsonl", manifest_names)
+
+    def test_agent_reported_progress_tool_writes_agent_source_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            result = _run_with_fake_docker(
+                FakeIssueAgent(report_progress=True),
+                _issue_config(tmp_path / "runs"),
+                tmp_path,
+            )
+
+            events = [
+                json.loads(line)
+                for line in (result.run_dir / "operator_events.jsonl").read_text().splitlines()
+                if line.strip()
+            ]
+            agent_events = [event for event in events if event["source"] == "agent"]
+            self.assertEqual(1, len(agent_events))
+            self.assertEqual("task_discovery", agent_events[0]["phase"])
+            self.assertEqual("working", agent_events[0]["status"])
+            self.assertIn("repo/app.py", agent_events[0]["evidence"])
+            trajectory = json.loads((result.run_dir / "trajectory.json").read_text())
+            self.assertIn("operator_report_progress", {step["tool"] for step in trajectory})
 
 
 def _config(output_root: Path) -> RunConfig:
@@ -827,13 +1168,23 @@ def _owned_live_config(
 
 
 class FakePrClient:
-    def __init__(self, actor: str = "", fork_error: str = "") -> None:
+    def __init__(
+        self,
+        actor: str = "",
+        fork_error: str = "",
+        label_error: str = "",
+        label_status_code: int | None = None,
+    ) -> None:
         self.calls = 0
         self.ensure_fork_calls = 0
         self.last_title = ""
+        self.last_body = ""
         self.last_head = ""
+        self.last_labels: list[str] = []
         self.actor = actor
         self.fork_error = fork_error
+        self.label_error = label_error
+        self.label_status_code = label_status_code
 
     def authenticated_actor(self) -> str:
         return self.actor
@@ -868,6 +1219,7 @@ class FakePrClient:
     ) -> PullRequestCreateResult:
         self.calls += 1
         self.last_title = title
+        self.last_body = body
         self.last_head = head
         return PullRequestCreateResult(
             ok=True,
@@ -876,6 +1228,28 @@ class FakePrClient:
             head_sha="abc123",
             source="fake",
         )
+
+    def ensure_labels(self, *, owner: str, repo: str, labels: list[str]) -> LabelOperationResult:
+        if self.label_error:
+            return LabelOperationResult(
+                ok=False,
+                labels=labels,
+                error=self.label_error,
+                source="fake",
+                status_code=self.label_status_code,
+            )
+        return LabelOperationResult(ok=True, labels=labels, source="fake")
+
+    def set_pr_labels(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        issue_number: int,
+        labels: list[str],
+    ) -> LabelOperationResult:
+        self.last_labels = labels
+        return LabelOperationResult(ok=True, labels=labels, source="fake")
 
     def get_check_runs(self, *, owner: str, repo: str, ref: str) -> CiStatus:
         return CiStatus(
@@ -908,8 +1282,8 @@ def _run_with_fake_docker(
         'if [ "$1" = "rm" ]; then exit 0; fi\n'
         'if [ "$1" = "exec" ]; then\n'
         '  case "$args" in\n'
-        "    *\"cat -- repo/app.py\"*) printf \"def marker():\\n    return 'old'\\n\"; exit 0 ;;\n"
-        "    *\"nl -ba repo/app.py\"*) printf \"     1\\tdef marker():\\n     2\\t    return 'old'\\n\"; exit 0 ;;\n"
+        '    *"cat -- repo/app.py"*) printf "def marker():\\n    return \'old\'\\n"; exit 0 ;;\n'
+        '    *"nl -ba repo/app.py"*) printf "     1\\tdef marker():\\n     2\\t    return \'old\'\\n"; exit 0 ;;\n'
         '    *"python3 -m compileall ."*) printf "compile ok\\n"; exit 0 ;;\n'
         '    *"git diff --binary -- ."*) '
         f'printf "diff --git a/{diff_path} b/{diff_path}\\n"; exit 0 ;;\n'

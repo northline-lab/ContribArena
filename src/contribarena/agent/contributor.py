@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from json import JSONDecodeError
 
 from agents.models.interface import ModelProvider
 
@@ -83,11 +84,6 @@ class ContributorAgent:
             return _to_json(tools.workspace_run(cmd, timeout_seconds=timeout_seconds))
 
         @function_tool
-        def workspace_apply_patch(diff: str) -> str:
-            """Apply a unified diff inside the Docker workspace."""
-            return _to_json(tools.workspace_apply_patch(diff))
-
-        @function_tool
         def aci_view(path: str, start_line: int = 1, max_lines: int = 200) -> str:
             """View a workspace file with line numbers and bounded output."""
             return _to_json(tools.aci_view(path, start_line=start_line, max_lines=max_lines))
@@ -103,19 +99,32 @@ class ContributorAgent:
             return _to_json(tools.aci_find_files(pattern, path=path, max_results=max_results))
 
         @function_tool
-        def aci_replace(path: str, old_str: str, new_str: str) -> str:
-            """Replace exactly one matching string in a workspace file."""
-            return _to_json(tools.aci_replace(path, old_str, new_str))
-
-        @function_tool
-        def aci_insert(path: str, insert_after_line: int, text: str) -> str:
-            """Insert text after a specific 1-indexed line; use 0 to insert at file start."""
-            return _to_json(tools.aci_insert(path, insert_after_line, text))
-
-        @function_tool
-        def aci_create(path: str, content: str) -> str:
-            """Create a new workspace file without overwriting existing files."""
-            return _to_json(tools.aci_create(path, content))
+        def aci_apply_patch(
+            operations_json: str,
+            rationale: str = "",
+            expected_files_json: str = "[]",
+        ) -> str:
+            """Apply structured edits. Example operations_json: [{"type":"update_file","path":"repo/app.py","content":"new text\n"}]."""
+            try:
+                operations = json.loads(operations_json)
+                expected_files = json.loads(expected_files_json) if expected_files_json else []
+            except JSONDecodeError as exc:
+                return _to_json(
+                    tools.aci_recover_invalid_action(
+                        "invalid_tool_arguments",
+                        f"aci_apply_patch received invalid JSON: {exc}",
+                        attempted_tool="aci_apply_patch",
+                    )
+                )
+            if not isinstance(expected_files, list):
+                return _to_json(
+                    tools.aci_recover_invalid_action(
+                        "invalid_tool_arguments",
+                        "aci_apply_patch expected_files_json must decode to a JSON list",
+                        attempted_tool="aci_apply_patch",
+                    )
+                )
+            return _to_json(tools.aci_apply_patch(operations, rationale, expected_files))
 
         @function_tool
         def aci_undo() -> str:
@@ -136,6 +145,21 @@ class ContributorAgent:
             """Suggest likely lightweight verification commands from repository files."""
             return _to_json(tools.aci_suggest_verification(path))
 
+        @function_tool
+        def aci_clean_generated(path: str = "repo") -> str:
+            """Clean generated verification/cache artifacts before submitting a patch."""
+            return _to_json(tools.aci_clean_generated(path))
+
+        @function_tool
+        def operator_report_progress(
+            phase: str,
+            status: str,
+            summary: str,
+            evidence_refs: str = "",
+        ) -> str:
+            """Report short, evidence-linked operator progress without ending the run."""
+            return _to_json(tools.operator_report_progress(phase, status, summary, evidence_refs))
+
         @function_tool(name_override=RECOVERY_TOOL_NAME)
         def aci_recover_invalid_action(
             recovery_kind: str,
@@ -153,9 +177,7 @@ class ContributorAgent:
             no_command_verification_rationale: str = "",
         ) -> str:
             """Return the current workspace git diff as the shadow submission patch."""
-            return _to_json(
-                tools.aci_submit_patch(path, no_command_verification_rationale)
-            )
+            return _to_json(tools.aci_submit_patch(path, no_command_verification_rationale))
 
         agent = Agent(
             name="contribarena-contributor",
@@ -166,16 +188,15 @@ class ContributorAgent:
                 repo_get_metadata,
                 repo_get_issues,
                 workspace_run,
-                workspace_apply_patch,
                 aci_view,
                 aci_search,
                 aci_find_files,
-                aci_replace,
-                aci_insert,
-                aci_create,
+                aci_apply_patch,
                 aci_undo,
                 aci_verify,
                 aci_suggest_verification,
+                aci_clean_generated,
+                operator_report_progress,
                 aci_recover_invalid_action,
                 aci_submit_patch,
             ],
@@ -267,13 +288,21 @@ def build_agent_instructions(config: RunConfig) -> str:
         "You are an autonomous open-source contributor running inside ContribArena. "
         f"{boundary}Repository code interaction must go through workspace or ACI tools. "
         "Use workspace_run for setup, cloning, and "
-        "unusual shell operations; prefer ACI tools for navigation, search, edits, "
+        "unusual shell operations; prefer ACI tools for navigation, search, structured edits, "
         "verification, undo, and final patch submission. Use exactly one tool call at "
         "a time. If output is too broad, narrow the search instead of repeating it. "
+        "Use aci_apply_patch with operations_json containing create_file, update_file, "
+        "delete_file, or move_file operations as the primary edit tool; do not emit "
+        "raw git diffs for source edits. Do not use workspace_run, shell redirection, "
+        "sed, python scripts, or git commands to edit files; submit-time review requires "
+        "unified-editor provenance for changed source files. "
         "If an edit or verification fails, inspect the smallest relevant context, fix "
         "once, or use aci_undo before trying a safer edit. Ask aci_suggest_verification "
         "when unsure how to test, verify locally with aci_verify or workspace_run, call "
-        "aci_submit_patch, then finish with the structured ContribArena result. Do not "
+        "aci_submit_patch, then finish with the structured ContribArena result. Use "
+        "operator_report_progress at phase boundaries or when discovery, selection, "
+        "verification, governance, or PR work would otherwise look silent; keep it short, "
+        "evidence-linked, and do not expose hidden chain-of-thought. Do not "
         "ignore repository contribution guidance; if CONTRIBUTING.md or .github guidance "
         "is easy to find, follow it before proposing a PR-shaped patch. Do not "
         "continue exploring after the expected shadow patch and verification summary "
@@ -286,8 +315,7 @@ def build_agent_instructions(config: RunConfig) -> str:
             "Make the smallest useful reviewable change."
         )
     return (
-        base
-        + " This run has an explicit issue/problem statement. Do not self-select a typo, "
+        base + " This run has an explicit issue/problem statement. Do not self-select a typo, "
         "docs cleanup, or unrelated low-risk task. Address only the configured problem. "
         "A completed result must include a submitted diff, successful focused local "
         "verification, problem_statement_summary, reproduction_notes, and "

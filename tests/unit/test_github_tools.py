@@ -230,6 +230,67 @@ class GithubToolsTest(unittest.TestCase):
         self.assertEqual("Improve docs", fake.json_body["title"])
         self.assertEqual("contribarena/improve-docs", fake.json_body["head"])
         self.assertEqual("main", fake.json_body["base"])
+        self.assertNotIn("labels", fake.json_body)
+
+    def test_github_pr_client_ensures_and_sets_labels(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str, dict | None]] = []
+
+            def rest_json(
+                self,
+                method: str,
+                path: str,
+                params: dict | None = None,
+                json_body: dict | None = None,
+                token_env: str | None = None,
+            ) -> GitHubResponse:
+                self.calls.append((method, path, json_body))
+                if method == "GET" and path.endswith("/labels/contribarena-live"):
+                    return GitHubResponse(ok=True, source="fake", data={"name": "contribarena-live"})
+                if method == "GET":
+                    return GitHubResponse(ok=False, source="fake", error="repo not found")
+                return GitHubResponse(ok=True, source="fake", data={})
+
+        fake = FakeClient()
+        client = GitHubPullRequestClient(client=fake, token_env="BOT_TOKEN")  # type: ignore[arg-type]
+
+        ensure = client.ensure_labels(
+            owner="owner",
+            repo="project",
+            labels=["contribarena-live", "risk-low", "risk-low"],
+        )
+        set_result = client.set_pr_labels(
+            owner="owner",
+            repo="project",
+            issue_number=42,
+            labels=["contribarena-live", "risk-low"],
+        )
+
+        self.assertTrue(ensure.ok)
+        self.assertTrue(set_result.ok)
+        self.assertEqual(["contribarena-live", "risk-low"], ensure.labels)
+        self.assertEqual(
+            [
+                ("GET", "/repos/owner/project/labels/contribarena-live", None),
+                ("GET", "/repos/owner/project/labels/risk-low", None),
+                (
+                    "POST",
+                    "/repos/owner/project/labels",
+                    {
+                        "name": "risk-low",
+                        "color": "c2e0c6",
+                        "description": "Low-risk contribution",
+                    },
+                ),
+                (
+                    "PUT",
+                    "/repos/owner/project/issues/42/labels",
+                    {"labels": ["contribarena-live", "risk-low"]},
+                ),
+            ],
+            fake.calls,
+        )
 
     def test_github_pr_client_ensures_existing_fork(self) -> None:
         class FakeClient:
@@ -370,6 +431,43 @@ class GithubToolsTest(unittest.TestCase):
         self.assertEqual("unit", status.checks[0].name)
         self.assertEqual("/repos/owner/project/commits/abc123/check-runs", fake.path)
         self.assertEqual("BOT_TOKEN", fake.token_env)
+
+    def test_github_pr_client_classifies_empty_check_runs_with_workflow_inventory(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str]] = []
+
+            def rest_json(
+                self,
+                method: str,
+                path: str,
+                params: dict | None = None,
+                json_body: dict | None = None,
+                token_env: str | None = None,
+            ) -> GitHubResponse:
+                self.calls.append((method, path))
+                if path.endswith("/check-runs"):
+                    return GitHubResponse(ok=True, source="fake", data={"check_runs": []})
+                return GitHubResponse(
+                    ok=True,
+                    source="fake",
+                    data={"workflows": [{"name": "CI"}]},
+                )
+
+        fake = FakeClient()
+        client = GitHubPullRequestClient(client=fake, token_env="BOT_TOKEN")  # type: ignore[arg-type]
+
+        status = client.get_check_runs(owner="owner", repo="project", ref="abc123")
+
+        self.assertEqual("not_run", status.status)
+        self.assertIn("workflows_configured=1", status.checks[0].details)
+        self.assertEqual(
+            [
+                ("GET", "/repos/owner/project/commits/abc123/check-runs"),
+                ("GET", "/repos/owner/project/actions/workflows"),
+            ],
+            fake.calls,
+        )
 
 
 def _candidate() -> RepoCandidate:

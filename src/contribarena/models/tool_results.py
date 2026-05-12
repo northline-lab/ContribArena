@@ -18,12 +18,21 @@ class PatchResult(BaseModel):
     error: str | None = None
 
 
+class PatchOperation(BaseModel):
+    type: str
+    path: str
+    content: str | None = None
+    diff: str | None = None
+    destination: str | None = None
+
+
 class AciResult(BaseModel):
     tool: str
     success: bool
     output: str = ""
     files_modified: list[str] = Field(default_factory=list)
     error: str | None = None
+    error_kind: str | None = None
     recovery_kind: str | None = None
     terminal_status: str | None = None
     review_notes: str = ""

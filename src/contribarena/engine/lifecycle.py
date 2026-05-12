@@ -133,7 +133,7 @@ def apply_quality_gate_to_result(
         return
     result.status = "blocked"
     result.blockers.extend(
-        [f"quality gate blocked PR dry-run: {blocker}" for blocker in quality_gate.blockers]
+        [f"quality gate blocked PR readiness: {blocker}" for blocker in quality_gate.blockers]
     )
     if not result.verification_summary:
         result.verification_summary = "; ".join(quality_gate.blockers)
@@ -142,11 +142,12 @@ def apply_quality_gate_to_result(
 def build_pr_draft(config: RunConfig, result: AgentFinalResult, patch: str) -> PullRequestDraft:
     title = _pr_title(config, result)
     branch = _branch_name(result)
-    labels = ["contribarena-dry-run"]
+    labels = [_pr_lifecycle_label(config)]
     if config.issue is not None:
         labels.append("issue-solving")
     if result.selected_task.risk:
         labels.append(f"risk-{result.selected_task.risk}")
+    notice_heading, notice_body = _pr_notice(config)
     body = "\n".join(
         [
             "## Summary",
@@ -165,9 +166,9 @@ def build_pr_draft(config: RunConfig, result: AgentFinalResult, patch: str) -> P
             f"- Selected task risk: {result.selected_task.risk}",
             f"- Files changed: {', '.join(_patch_paths(patch)) or 'n/a'}",
             "",
-            "## Dry-Run Notice",
+            notice_heading,
             "",
-            "This is a dry-run PR draft. No external repository write was performed.",
+            notice_body,
         ]
     )
     return PullRequestDraft(title=title, branch=branch, labels=labels, body=body)
@@ -195,7 +196,7 @@ def build_ci_status(capture: ArtifactCapture, quality_gate: QualityGateResult) -
                 CiCheck(
                     name="dry_run_quality_gate",
                     status="skipped",
-                    details="CI dry-run skipped because contribution quality gate did not pass.",
+                    details="CI observation skipped because contribution quality gate did not pass.",
                 )
             ],
         )
@@ -274,7 +275,7 @@ def render_postmortem(
     sections.extend(
         [
             "",
-            "## PR Dry-Run",
+            "## PR Lifecycle",
             "",
             f"- Draft produced: {draft is not None}",
             f"- CI status: {ci_status.status}",
@@ -298,10 +299,7 @@ def render_quality_gate_section(quality_gate: QualityGateResult) -> list[str]:
             "",
             "### Checks",
             "",
-            *[
-                f"- {check.name}: {check.status} ({check.detail})"
-                for check in quality_gate.checks
-            ],
+            *[f"- {check.name}: {check.status} ({check.detail})" for check in quality_gate.checks],
         ]
     )
     return sections
@@ -326,7 +324,17 @@ def _has_patch_diff(patch: str) -> bool:
 def _has_successful_verification_after_last_edit(capture: ArtifactCapture) -> bool:
     last_edit_index = -1
     for index, item in enumerate(capture.aci_results):
-        if item.tool in {"aci_replace", "aci_insert", "aci_create", "aci_undo"} and item.success:
+        if (
+            item.tool
+            in {
+                "aci_apply_patch",
+                "aci_replace",
+                "aci_insert",
+                "aci_create",
+                "aci_undo",
+            }
+            and item.success
+        ):
             last_edit_index = index
     accepted_no_command_review = any(
         item.tool == "aci_submit_patch"
@@ -379,10 +387,27 @@ def _pr_title(config: RunConfig, result: AgentFinalResult) -> str:
     return result.selected_task.title
 
 
+def _pr_lifecycle_label(config: RunConfig) -> str:
+    if config.run.mode == "owned_live":
+        return "contribarena-live"
+    return "contribarena-dry-run"
+
+
+def _pr_notice(config: RunConfig) -> tuple[str, str]:
+    if config.run.mode == "owned_live":
+        return (
+            "## Live PR Notice",
+            "This PR was opened by the ContribArena harness after local quality and governance gates passed.",
+        )
+    return (
+        "## Dry-Run Notice",
+        "This is a dry-run PR draft. No external repository write was performed.",
+    )
+
+
 def _branch_name(result: AgentFinalResult) -> str:
     slug = "".join(
-        char.lower() if char.isalnum() else "-"
-        for char in result.selected_task.title.strip()
+        char.lower() if char.isalnum() else "-" for char in result.selected_task.title.strip()
     ).strip("-")
     while "--" in slug:
         slug = slug.replace("--", "-")
@@ -399,6 +424,5 @@ def _postmortem_lesson(
     if quality_gate.status != "pass":
         return "Contribution did not meet PR-readiness requirements."
     if ci_status.status != "success":
-        return "Dry-run CI evidence was not clean enough for a live PR."
-    return "Run produced a PR-ready dry-run artifact set without external writes."
-
+        return "CI evidence was not clean enough for a live PR."
+    return "Run produced a PR-ready artifact set."

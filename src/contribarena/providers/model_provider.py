@@ -2,11 +2,18 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 
+from agents import ModelSettings
+from agents.agent_output import AgentOutputSchemaBase
+from agents.handoffs import Handoff
+from agents.items import ModelResponse, TResponseInputItem
 from agents.models.interface import Model, ModelProvider
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.models.openai_provider import OpenAIProvider
 from agents.models.openai_responses import OpenAIResponsesModel
+from agents.tool import Tool
+from agents.usage import Usage
 from openai import AsyncOpenAI
 
 from contribarena.config.schema import ModelsConfig
@@ -61,11 +68,13 @@ class ContribArenaModelProvider(ModelProvider):
         api_key = os.environ.get(provider_config.api_key_env, "EMPTY")
         client = AsyncOpenAI(
             api_key=api_key,
-            base_url=_openai_compatible_base_url(_resolve_env_value(
-                provider_config.base_url,
-                provider_config.base_url_env,
-                "compatible base_url",
-            )),
+            base_url=_openai_compatible_base_url(
+                _resolve_env_value(
+                    provider_config.base_url,
+                    provider_config.base_url_env,
+                    "compatible base_url",
+                )
+            ),
         )
         model = OpenAIChatCompletionsModel(
             model=provider_config.model or name,
@@ -83,13 +92,15 @@ class ContribArenaModelProvider(ModelProvider):
         api_key = os.environ.get(provider_config.api_key_env, "EMPTY")
         client = AsyncOpenAI(
             api_key=api_key,
-            base_url=_openai_compatible_base_url(_resolve_env_value(
-                provider_config.base_url,
-                provider_config.base_url_env,
-                "responses base_url",
-            )),
+            base_url=_openai_compatible_base_url(
+                _resolve_env_value(
+                    provider_config.base_url,
+                    provider_config.base_url_env,
+                    "responses base_url",
+                )
+            ),
         )
-        model = OpenAIResponsesModel(
+        model = SafeOpenAIResponsesModel(
             model=provider_config.model or name,
             openai_client=client,
         )
@@ -174,3 +185,52 @@ def _openai_compatible_base_url(url: str) -> str:
     if stripped.endswith(suffix):
         return stripped[: -len(suffix)]
     return stripped
+
+
+class SafeOpenAIResponsesModel(OpenAIResponsesModel):
+    """Responses model tolerant of gateway usage payload quirks."""
+
+    async def get_response(
+        self,
+        system_instructions: str | None,
+        input: str | list[TResponseInputItem],
+        model_settings: ModelSettings,
+        tools: list[Tool],
+        output_schema: AgentOutputSchemaBase | None,
+        handoffs: list[Handoff],
+        tracing: Any,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
+        prompt: Any = None,
+    ) -> ModelResponse:
+        response = await self._fetch_response(
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            output_schema,
+            handoffs,
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+            stream=False,
+            prompt=prompt,
+        )
+        return ModelResponse(
+            output=response.output,
+            usage=_safe_response_usage(getattr(response, "usage", None)),
+            response_id=response.id,
+            request_id=getattr(response, "_request_id", None),
+        )
+
+
+def _safe_response_usage(raw_usage: object) -> Usage:
+    if raw_usage is None or isinstance(raw_usage, str):
+        return Usage()
+    return Usage(
+        requests=1,
+        input_tokens=int(getattr(raw_usage, "input_tokens", 0) or 0),
+        output_tokens=int(getattr(raw_usage, "output_tokens", 0) or 0),
+        total_tokens=int(getattr(raw_usage, "total_tokens", 0) or 0),
+        input_tokens_details=getattr(raw_usage, "input_tokens_details", None),
+        output_tokens_details=getattr(raw_usage, "output_tokens_details", None),
+    )

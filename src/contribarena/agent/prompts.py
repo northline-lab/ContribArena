@@ -25,12 +25,14 @@ RECOVERY_TEMPLATES: dict[str, str] = {
         "window before asking for more context."
     ),
     "patch_failure": (
-        "If an edit or patch fails, view the exact target lines, make one smaller edit, "
-        "or use aci_undo if the workspace got worse."
+        "If aci_apply_patch returns patch_parse_error, context_mismatch, or "
+        "ambiguous_match, view the exact target lines and retry with a smaller "
+        "structured operation; use aci_undo if the workspace got worse."
     ),
     "submit_review_failed": (
-        "If submit-time review rejects the patch, fix the named issue, rerun focused "
-        "verification when needed, then submit again; otherwise return blocked."
+        "If submit-time review rejects generated or cache files, call aci_clean_generated, "
+        "rerun focused verification when needed, then submit again. For other review "
+        "failures, fix the named issue or return blocked."
     ),
 }
 
@@ -52,7 +54,7 @@ def build_goal_prompt(config: RunConfig) -> str:
             f"4. Call repo_get_issues(owner='{candidate.owner}', repo='{candidate.repo}').\n"
             "5. Call workspace_run to clone the repo, using this command exactly:\n"
             f"   {clone_command}\n"
-            "6. Use ACI tools against paths under repo/ to inspect, search, and make the smallest useful change.\n"
+            "6. Use ACI tools against paths under repo/ to inspect and search; use aci_apply_patch as the primary edit tool for the smallest useful change.\n"
             "7. If the verification command is not obvious, call aci_suggest_verification(path='repo'); then use aci_verify.\n"
             "8. Call aci_submit_patch(path='repo') to capture the shadow patch; it includes new files, so do not run git add or git commit for submission. Only set no_command_verification_rationale when command verification is genuinely unavailable.\n"
             "9. Return the final structured completion result.\n"
@@ -70,7 +72,7 @@ def build_goal_prompt(config: RunConfig) -> str:
             "5. Call repo_get_issues(owner=<chosen_owner>, repo=<chosen_repo>).\n"
             "6. Call workspace_run to clone the repo into repo/. Use a GitHub HTTPS clone URL and prefer "
             "`git -c http.version=HTTP/1.1 clone --depth 1 <url> repo`.\n"
-            "7. Use ACI tools against paths under repo/ to inspect, search, and make the smallest useful change.\n"
+            "7. Use ACI tools against paths under repo/ to inspect and search; use aci_apply_patch as the primary edit tool for the smallest useful change.\n"
             "8. If the verification command is not obvious, call aci_suggest_verification(path='repo'); then use aci_verify.\n"
             "9. Call aci_submit_patch(path='repo') to capture the shadow patch; it includes new files, so do not run git add or git commit for submission. Only set no_command_verification_rationale when command verification is genuinely unavailable.\n"
             "10. Return the final structured completion result.\n"
@@ -98,9 +100,14 @@ def build_goal_prompt(config: RunConfig) -> str:
         f"{task_source}"
         f"{live_boundary}"
         "Prefer ACI tools over raw shell editing: aci_find_files for file discovery, aci_view for bounded reading, "
-        "aci_search for bounded text search, aci_replace or aci_insert for edits, aci_create for new files, "
+        "aci_search for bounded text search, aci_apply_patch for create_file/update_file/delete_file/move_file edits "
+        "with operations_json as a JSON list, "
         "aci_undo when an edit needs to be reverted, aci_suggest_verification when test commands are unclear, "
-        "aci_verify for focused checks, and aci_submit_patch to finish without staging or committing. "
+        "aci_verify for focused checks, aci_clean_generated for generated/cache cleanup, "
+        "and aci_submit_patch to finish without staging or committing. "
+        'Minimal aci_apply_patch example: operations_json=[{"type":"update_file","path":"repo/app.py","diff":"*** Begin Patch\\n*** Update File: repo/app.py\\n@@\\n old context\\n-old line\\n+new line\\n*** End Patch"}]. '
+        "Do not edit files through workspace_run, shell redirection, sed, python scripts, or git commands; "
+        "those edits lack unified-editor provenance and submit-time review will reject them. "
         "Before editing, briefly check for CONTRIBUTING.md, .github guidance, or PR templates when they are easy to inspect, and follow them when present. "
         "If a tool output is truncated or too broad, narrow the query. If a command is missing or the environment is blocked, "
         "record the blocker instead of making broad setup changes."
@@ -144,7 +151,7 @@ def _build_issue_solving_prompt(config: RunConfig) -> str:
         f"   {clone_command}\n"
         "6. Restate the problem briefly in your own words, then inspect the smallest relevant files using ACI tools.\n"
         "7. Reproduce the failure when practical, or write explicit reproduction notes when the issue is directly inspectable.\n"
-        "8. Make the smallest code or test/docs change that directly addresses the problem statement. Do not make unrelated cleanup.\n"
+        "8. Make the smallest code or test/docs change that directly addresses the problem statement using aci_apply_patch as the primary edit tool. Do not make unrelated cleanup.\n"
         "9. Use aci_suggest_verification(path='repo') if the focused verification command is not obvious, then run aci_verify.\n"
         "10. If verification is blocked by missing dependencies, timeout, or unavailable tests, record that blocker explicitly instead of broad setup churn.\n"
         "11. Call aci_submit_patch(path='repo') to capture the shadow patch; it includes new files, so do not run git add or git commit for submission. Only set no_command_verification_rationale when command verification is genuinely unavailable.\n"
@@ -174,6 +181,4 @@ def _clone_command(clone_url: str) -> str:
 
 
 def _recovery_template_text() -> str:
-    return "\n".join(
-        f"- {name}: {text}" for name, text in RECOVERY_TEMPLATES.items()
-    )
+    return "\n".join(f"- {name}: {text}" for name, text in RECOVERY_TEMPLATES.items())

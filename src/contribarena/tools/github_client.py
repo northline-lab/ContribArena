@@ -16,6 +16,7 @@ class GitHubResponse:
     data: Any = None
     error: str = ""
     source: str = ""
+    status_code: int | None = None
 
 
 class GitHubClient:
@@ -78,9 +79,15 @@ class GitHubClient:
                 ok=False,
                 error=classify_http_error(response.status_code, response.text),
                 source="httpx",
+                status_code=response.status_code,
             )
         try:
-            return GitHubResponse(ok=True, data=response.json(), source="httpx")
+            return GitHubResponse(
+                ok=True,
+                data=response.json(),
+                source="httpx",
+                status_code=response.status_code,
+            )
         except json.JSONDecodeError as exc:
             return GitHubResponse(ok=False, error=f"invalid REST JSON: {exc}", source="httpx")
 
@@ -99,8 +106,14 @@ class GitHubClient:
                 ok=False,
                 error=classify_http_error(response.status_code, response.text),
                 source="httpx",
+                status_code=response.status_code,
             )
-        return GitHubResponse(ok=True, data=response.text, source="httpx")
+        return GitHubResponse(
+            ok=True,
+            data=response.text,
+            source="httpx",
+            status_code=response.status_code,
+        )
 
 
 def classify_github_error(returncode: int, detail: str) -> str:

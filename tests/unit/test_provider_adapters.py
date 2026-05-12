@@ -5,12 +5,17 @@ import unittest
 
 from agents import function_tool
 from agents.items import ModelResponse
+from agents.models.chatcmpl_converter import Converter
 from agents.usage import Usage
 from openai.types.chat import ChatCompletionMessage
 from openai.types.responses import ResponseFunctionToolCall
 
 from contribarena.providers.action_guard import RECOVERY_TOOL_NAME, guard_model_response
-from contribarena.providers.adapters import _repair_structured_output_message
+from contribarena.providers.adapters import (
+    _repair_structured_output_message,
+    _to_anthropic_tools,
+    _to_gemini_tools,
+)
 
 
 class ProviderAdapterRepairTest(unittest.TestCase):
@@ -36,6 +41,26 @@ class ProviderAdapterRepairTest(unittest.TestCase):
         self.assertEqual(payload["repo"]["name"], "openai\n-agents-python")
         self.assertEqual(payload["risk"], "medium")
         self.assertEqual(payload["duration"], 12.345)
+
+
+class ProviderToolSchemaTest(unittest.TestCase):
+    def test_anthropic_and_gemini_preserve_aci_apply_patch_schema(self) -> None:
+        anthropic_tools = _to_anthropic_tools([_patch_tool])
+        gemini_tools = _to_gemini_tools([_patch_tool])
+
+        anthropic_schema = anthropic_tools[0]["input_schema"]
+        gemini_schema = gemini_tools[0]["functionDeclarations"][0]["parameters"]
+
+        self.assertEqual("aci_apply_patch", anthropic_tools[0]["name"])
+        self.assertEqual(
+            "aci_apply_patch",
+            gemini_tools[0]["functionDeclarations"][0]["name"],
+        )
+        for schema in [anthropic_schema, gemini_schema]:
+            self.assertIn("operations_json", schema["properties"])
+            self.assertIn("rationale", schema["properties"])
+            self.assertIn("expected_files_json", schema["properties"])
+            self.assertIn("operations_json", schema["required"])
 
 
 class ProviderActionGuardTest(unittest.TestCase):
@@ -81,6 +106,33 @@ class ProviderActionGuardTest(unittest.TestCase):
 
         self.assertIs(guarded, response)
 
+    def test_rejects_plain_text_when_structured_output_is_required(self) -> None:
+        response = ModelResponse(
+            output=Converter.message_to_output_items(
+                ChatCompletionMessage(role="assistant", content="Proceeding to clone."),
+                provider_data={"model": "adapter"},
+            ),
+            usage=Usage(),
+            response_id="response-id",
+        )
+
+        guarded = guard_model_response(response, [_sample_tool, _recovery_tool])
+        self.assertIs(guarded, response)
+
+        from contribarena.providers.action_guard import guard_structured_model_response
+
+        structured = guard_structured_model_response(
+            response,
+            [_sample_tool, _recovery_tool],
+            _StructuredSchema(),
+        )
+
+        recovery = structured.output[0]
+        self.assertIsInstance(recovery, ResponseFunctionToolCall)
+        self.assertEqual(RECOVERY_TOOL_NAME, recovery.name)
+        payload = json.loads(recovery.arguments)
+        self.assertEqual("non_tool_text_response", payload["recovery_kind"])
+
 
 @function_tool(name_override="sample_tool")
 def _sample_tool(path: str) -> str:
@@ -100,6 +152,16 @@ def _recovery_tool(recovery_kind: str, message: str, attempted_tool: str = "") -
     return f"{recovery_kind}: {message}: {attempted_tool}"
 
 
+@function_tool(name_override="aci_apply_patch")
+def _patch_tool(
+    operations_json: str,
+    rationale: str = "",
+    expected_files_json: str = "[]",
+) -> str:
+    """Patch tool used to verify provider-neutral edit schema conversion."""
+    return f"{operations_json}: {rationale}: {expected_files_json}"
+
+
 def _tool_call(name: str, arguments: dict[str, object]) -> ResponseFunctionToolCall:
     return ResponseFunctionToolCall(
         arguments=json.dumps(arguments),
@@ -111,6 +173,11 @@ def _tool_call(name: str, arguments: dict[str, object]) -> ResponseFunctionToolC
 
 def _model_response(output: list[ResponseFunctionToolCall]) -> ModelResponse:
     return ModelResponse(output=output, usage=Usage(), response_id="response-id")
+
+
+class _StructuredSchema:
+    def is_plain_text(self) -> bool:
+        return False
 
 
 if __name__ == "__main__":

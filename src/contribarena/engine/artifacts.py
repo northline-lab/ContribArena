@@ -48,6 +48,12 @@ class ArtifactWriter:
         self._record_entry(ArtifactEntry(name=name, kind=kind, required=required, path=name))  # type: ignore[arg-type]
         return path
 
+    def register(self, name: str, *, kind: str = "text", required: bool = True) -> Path:
+        path = self.run_dir / name
+        path.touch(exist_ok=True)
+        self._record_entry(ArtifactEntry(name=name, kind=kind, required=required, path=name))  # type: ignore[arg-type]
+        return path
+
     def finalize_manifest(self) -> Path:
         if self._manifest_path is not None:
             return self._manifest_path
