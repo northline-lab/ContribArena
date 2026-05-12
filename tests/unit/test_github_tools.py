@@ -15,7 +15,7 @@ from contribarena.config.schema import (
 from contribarena.models import RepoMetadata
 from contribarena.tools.github_client import GitHubResponse
 from contribarena.tools.github_pr import GitHubPullRequestClient
-from contribarena.tools.repo_eligibility import repo_check_eligibility
+from contribarena.tools.repo_eligibility import _prohibits_ai_or_bots, repo_check_eligibility
 from contribarena.tools.repo_issues import repo_get_issues
 from contribarena.tools.repo_metadata import repo_get_metadata
 from contribarena.tools.repo_search import repo_search
@@ -142,6 +142,11 @@ class GithubToolsTest(unittest.TestCase):
         self.assertEqual(7, issues[0].number)
         self.assertEqual(["good first issue"], issues[0].labels)
 
+
+    def test_prohibits_ai_or_bots_detects_ai_authored_phrase(self) -> None:
+        self.assertTrue(
+            _prohibits_ai_or_bots("Policy: AI-authored contributions are not accepted.")
+        )
     def test_repo_eligibility_runs_rule_checks(self) -> None:
         class FakeClient:
             def gh_json(self, args: list[str]) -> GitHubResponse:
