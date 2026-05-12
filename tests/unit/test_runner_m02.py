@@ -26,6 +26,7 @@ from contribarena.errors import AgentError
 from contribarena.models import AgentFinalResult, OpportunitySummary, RepoSummary, SelectedTask
 from contribarena.models.lifecycle import CiCheck, CiStatus
 from contribarena.models.agent_result import WorkspaceSummary
+from contribarena.providers import TracingModelProvider
 from contribarena.tools.github_pr import ForkEnsureResult, PullRequestCreateResult
 
 
@@ -111,6 +112,7 @@ class FakeIssueAgent:
         prompt: str,
         model_provider: object = None,
     ) -> AgentFinalResult:
+        self.model_provider = model_provider
         self.prompt = prompt
         command = tools.workspace_run(  # type: ignore[attr-defined]
             "git clone https://github.com/example/repo.git repo && cd repo && git status --short"
@@ -759,6 +761,15 @@ class RunnerM02Test(unittest.TestCase):
                 for line in (run_dirs[0] / "trace.jsonl").read_text().splitlines()
             }
             self.assertIn("workspace_retained", trace_states)
+
+    def test_runner_passes_tracing_model_provider_to_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            agent = FakeIssueAgent()
+
+            _run_with_fake_docker(agent, _issue_config(tmp_path / "runs"), tmp_path)
+
+            self.assertIsInstance(agent.model_provider, TracingModelProvider)
 
 
 def _config(output_root: Path) -> RunConfig:

@@ -44,7 +44,7 @@ from contribarena.models import (
     RunState,
     TerminalState,
 )
-from contribarena.providers import ContribArenaModelProvider
+from contribarena.providers import ContribArenaModelProvider, TracingModelProvider
 from contribarena.trace import TraceWriter
 from contribarena.tools.github_pr import (
     ForkEnsureResult,
@@ -146,7 +146,10 @@ class Runner:
                 config,
                 registry,
                 prompt,
-                model_provider=ContribArenaModelProvider(config.models),
+                model_provider=TracingModelProvider(
+                    ContribArenaModelProvider(config.models),
+                    trace,
+                ),
             )
             trace.write(
                 RunState.AGENT_FINAL_RESULT,
