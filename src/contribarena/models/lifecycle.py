@@ -54,6 +54,6 @@ class CiCheck(BaseModel):
 
 
 class CiStatus(BaseModel):
-    status: Literal["success", "failure", "not_run"]
+    status: Literal["success", "failure", "not_run", "pending"]
     source: str = "dry_run"
     checks: list[CiCheck] = Field(default_factory=list)

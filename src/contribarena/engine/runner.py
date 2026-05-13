@@ -83,6 +83,7 @@ class OwnedLivePrExecutionResult:
     pr_result: PullRequestCreateResult | None = None
     label_ensure_result: LabelOperationResult | None = None
     label_set_result: LabelOperationResult | None = None
+    label_skipped_reason: str = ""
 
 
 @dataclass
@@ -496,6 +497,7 @@ def _write_pr_lifecycle_artifacts(
                 result=result,
                 quality_gate=quality_gate,
                 draft=pr_draft,
+                patch=patch,
                 pr_client=pr_client,
                 target=target,
                 external_review=external_review,
@@ -813,7 +815,15 @@ def _execute_live_pr(
     )
     label_ensure_result: LabelOperationResult | None = None
     label_set_result: LabelOperationResult | None = None
-    if pr_result.ok and draft.labels:
+    label_skipped_reason = ""
+    if (
+        pr_result.ok
+        and draft.labels
+        and config.run.mode == "external_live"
+        and not config.governance.external_live.attempt_upstream_labels
+    ):
+        label_skipped_reason = "upstream label submission skipped by external_live policy"
+    elif pr_result.ok and draft.labels:
         ensure_labels = getattr(client, "ensure_labels", None)
         set_pr_labels = getattr(client, "set_pr_labels", None)
         if pr_result.number is None:
@@ -852,6 +862,7 @@ def _execute_live_pr(
         pr_result=pr_result,
         label_ensure_result=label_ensure_result,
         label_set_result=label_set_result,
+        label_skipped_reason=label_skipped_reason,
     )
 
 
@@ -1038,6 +1049,9 @@ def _record_opened_live_pr(
                     head_sha=pr_result.head_sha,
                     ci_status=ci_status,
                     poll_interval_seconds=config.governance.external_live.poll_interval_seconds,
+                    initial_poll_delay_seconds=(
+                        config.governance.external_live.initial_poll_delay_seconds
+                    ),
                 ),
             )
     save_governance_state(config, state)
@@ -1050,6 +1064,7 @@ def _evaluate_live_pr(
     result: AgentFinalResult,
     quality_gate: QualityGateResult,
     draft: PullRequestDraft,
+    patch: str,
     target: RepoCandidate,
     external_review: ExternalLiveReviewResult | None,
     pr_client: object | None = None,
@@ -1062,7 +1077,7 @@ def _evaluate_live_pr(
         target_owner=target.owner,
         target_repo=target.repo,
         base_branch=_live_base_branch(config, target),
-        contribution_class=_contribution_class(result),
+        contribution_class=_contribution_class(patch),
         state=state,
         actor=actor,
         external_review_passed=external_review.passed if external_review is not None else True,
@@ -1184,7 +1199,11 @@ def _evaluate_external_live_review(
         reasons.append("spam-risk rationale is missing from selected task")
     if "duplicate" in lowered_task:
         warnings.append("selected task mentions possible duplicate work")
-    if len(_diff_paths(patch)) > 12:
+    diff_paths = _diff_paths(patch)
+    if "docs" not in config.governance.contribution_classes.allowed and diff_paths:
+        if not _has_code_or_test_path(diff_paths):
+            reasons.append("external_live code-only run requires at least one code or test path")
+    if len(diff_paths) > 12:
         warnings.append("external patch touches many files; maintainer fit should be reviewed")
     return ExternalLiveReviewResult(
         passed=not reasons,
@@ -1314,6 +1333,66 @@ def _diff_paths(patch: str) -> list[str]:
     return sorted(set(paths))
 
 
+def _normalized_diff_path(path: str) -> str:
+    lowered = path.lower()
+    return lowered.removeprefix("repo/") if lowered.startswith("repo/") else lowered
+
+
+def _is_docs_only_path(path: str) -> bool:
+    lowered = _normalized_diff_path(path)
+    if _is_code_or_test_path(lowered):
+        return False
+    if lowered.startswith(("docs/", "doc/")):
+        return True
+    if lowered in {"readme.md", "readme.rst", "changelog.md", "changelog.rst"}:
+        return True
+    return lowered.endswith((".md", ".rst", ".txt"))
+
+
+def _is_test_only_path(path: str) -> bool:
+    lowered = _normalized_diff_path(path)
+    if lowered.startswith(("tests/", "test/")):
+        return True
+    name = lowered.rsplit("/", maxsplit=1)[-1]
+    return name.startswith("test_") or name.endswith("_test.py")
+
+
+def _is_code_or_test_path(path: str) -> bool:
+    lowered = _normalized_diff_path(path)
+    if _is_test_only_path(lowered):
+        return True
+    if lowered.startswith(("src/", "lib/", "pkg/", "packages/", "app/")):
+        return True
+    return lowered.endswith(
+        (
+            ".py",
+            ".js",
+            ".jsx",
+            ".ts",
+            ".tsx",
+            ".go",
+            ".rs",
+            ".java",
+            ".kt",
+            ".c",
+            ".cc",
+            ".cpp",
+            ".h",
+            ".hpp",
+            ".cs",
+            ".rb",
+            ".php",
+            ".swift",
+            ".scala",
+            ".sh",
+        )
+    )
+
+
+def _has_code_or_test_path(paths: list[str]) -> bool:
+    return any(_is_code_or_test_path(path) for path in paths)
+
+
 def _owned_repo_policy(config: RunConfig) -> OwnedRepositoryPolicy | None:
     if not config.discovery.candidates:
         return None
@@ -1324,10 +1403,15 @@ def _owned_repo_policy(config: RunConfig) -> OwnedRepositoryPolicy | None:
     return None
 
 
-def _contribution_class(result: AgentFinalResult) -> str:
-    if result.selected_task.risk == "low":
+def _contribution_class(patch: str) -> str:
+    paths = _diff_paths(patch)
+    if not paths:
         return "low_risk_code"
-    return result.selected_task.risk or "low_risk_code"
+    if all(_is_docs_only_path(path) for path in paths):
+        return "docs"
+    if all(_is_test_only_path(path) for path in paths):
+        return "tests"
+    return "low_risk_code"
 
 
 def _live_action_log_entries(
@@ -1423,6 +1507,21 @@ def _live_action_log_entries(
                     "nonfatal": label_status in {"permission_denied", "failed"},
                     "retryable": label_status == "failed",
                     "source": live_pr_result.label_ensure_result.source,
+                    "pr_number": live_pr_result.pr_result.number,
+                }
+            )
+        if live_pr_result.label_skipped_reason:
+            entries.append(
+                {
+                    **base_entry,
+                    "action": "github.ensure_labels",
+                    "status": "skipped",
+                    "external_write": False,
+                    "labels": draft.labels if draft is not None else [],
+                    "reason": live_pr_result.label_skipped_reason,
+                    "nonfatal": True,
+                    "retryable": False,
+                    "source": "policy",
                     "pr_number": live_pr_result.pr_result.number,
                 }
             )

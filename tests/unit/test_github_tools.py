@@ -459,7 +459,7 @@ class GithubToolsTest(unittest.TestCase):
 
         status = client.get_check_runs(owner="owner", repo="project", ref="abc123")
 
-        self.assertEqual("not_run", status.status)
+        self.assertEqual("pending", status.status)
         self.assertIn("workflows_configured=1", status.checks[0].details)
         self.assertEqual(
             [

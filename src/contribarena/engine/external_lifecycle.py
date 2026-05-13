@@ -27,11 +27,17 @@ def lifecycle_record_for_opened_pr(
     head_sha: str,
     ci_status: CiStatus | None,
     poll_interval_seconds: int,
+    initial_poll_delay_seconds: int | None = None,
     originating_run_dir: str = "",
     now: datetime | None = None,
 ) -> PrLifecycleRecord:
     observed_at = _iso(now or datetime.now(UTC))
-    next_poll_at = _iso(_parse(observed_at) + timedelta(seconds=poll_interval_seconds))
+    next_poll_delay = (
+        poll_interval_seconds
+        if initial_poll_delay_seconds is None
+        else initial_poll_delay_seconds
+    )
+    next_poll_at = _iso(_parse(observed_at) + timedelta(seconds=next_poll_delay))
     return PrLifecycleRecord(
         repository=repository,
         number=number,

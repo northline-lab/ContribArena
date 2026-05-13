@@ -11,6 +11,7 @@ from unittest.mock import patch
 from contribarena.config.schema import (
     ArtifactConfig,
     BotIdentityConfig,
+    ContributionClassesConfig,
     DiscoveryConfig,
     GovernanceConfig,
     GovernanceRateLimits,
@@ -114,6 +115,7 @@ class FakeIssueAgent:
         report_progress: bool = False,
         use_apply_patch: bool = False,
         repo_default_branch: str = "",
+        edit_path: str = "repo/app.py",
     ) -> None:
         self.verify = verify
         self.verify_before_edit = verify_before_edit
@@ -124,6 +126,7 @@ class FakeIssueAgent:
         self.report_progress = report_progress
         self.use_apply_patch = use_apply_patch
         self.repo_default_branch = repo_default_branch
+        self.edit_path = edit_path
 
     def run(
         self,
@@ -137,7 +140,7 @@ class FakeIssueAgent:
         command = tools.workspace_run(  # type: ignore[attr-defined]
             "git clone https://github.com/example/repo.git repo && cd repo && git status --short"
         )
-        tools.aci_view("repo/app.py")  # type: ignore[attr-defined]
+        tools.aci_view(self.edit_path)  # type: ignore[attr-defined]
         if self.report_progress:
             tools.operator_report_progress(  # type: ignore[attr-defined]
                 "task_discovery",
@@ -152,10 +155,10 @@ class FakeIssueAgent:
                 [
                     {
                         "type": "update_file",
-                        "path": "repo/app.py",
+                        "path": self.edit_path,
                         "diff": (
                             "*** Begin Patch\n"
-                            "*** Update File: repo/app.py\n"
+                            f"*** Update File: {self.edit_path}\n"
                             "@@\n"
                             " def marker():\n"
                             "-    return 'old'\n"
@@ -165,10 +168,10 @@ class FakeIssueAgent:
                     }
                 ],
                 "fix configured marker",
-                ["repo/app.py"],
+                [self.edit_path],
             )
         else:
-            tools.aci_replace("repo/app.py", "return 'old'", "return 'new'")  # type: ignore[attr-defined]
+            tools.aci_replace(self.edit_path, "return 'old'", "return 'new'")  # type: ignore[attr-defined]
         if self.verify and not self.verify_before_edit:
             tools.aci_verify("python3 -m compileall .", "repo")  # type: ignore[attr-defined]
         if self.submit_patch:
@@ -1090,10 +1093,7 @@ class RunnerM02Test(unittest.TestCase):
             self.assertEqual("develop", pr_client.last_base)
             self.assertIn("External Live PR Notice", pr_client.last_body)
             self.assertIn("AI-assisted", pr_client.last_body)
-            self.assertEqual(
-                ["contribarena-external-live", "risk-low"],
-                pr_client.last_labels,
-            )
+            self.assertEqual([], pr_client.last_labels)
             live_action_entries = [
                 json.loads(line)
                 for line in (result.run_dir / "live_action_log.jsonl").read_text().splitlines()
@@ -1102,6 +1102,11 @@ class RunnerM02Test(unittest.TestCase):
             self.assertEqual("external_live", live_action_entries[0]["mode"])
             self.assertEqual("github.ensure_fork", live_action_entries[0]["action"])
             self.assertEqual("github.push_fork_branch", live_action_entries[1]["action"])
+            self.assertEqual("github.open_pr", live_action_entries[2]["action"])
+            self.assertEqual("github.ensure_labels", live_action_entries[3]["action"])
+            self.assertEqual("skipped", live_action_entries[3]["status"])
+            self.assertEqual("policy", live_action_entries[3]["source"])
+            self.assertEqual("github.observe_checks", live_action_entries[4]["action"])
             command_log = (result.run_dir / "test_log.txt").read_text()
             self.assertIn(
                 "x-access-token:${GITHUB_TOKEN}@github.com/contribarena-bot/repo.git",
@@ -1153,6 +1158,101 @@ class RunnerM02Test(unittest.TestCase):
             decision = json.loads((result.run_dir / "governance_decision.json").read_text())
             self.assertEqual("block", decision["status"])
             self.assertIn("eligibility: repository policy", "; ".join(decision["reasons"]))
+
+    def test_external_live_code_only_config_blocks_docs_only_patch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _external_live_config(tmp_path / "runs", live_enabled=True)
+            pr_client = FakePrClient(actor="contribarena-bot")
+            os.environ["GITHUB_TOKEN"] = "test-token"
+            try:
+                with (
+                    patch(
+                        "contribarena.engine.runner.repo_check_eligibility",
+                        return_value=EligibilityResult(
+                            eligible=True,
+                            reasons=["eligible"],
+                            checks_performed=["fixture"],
+                        ),
+                    ),
+                    patch(
+                        "contribarena.engine.runner.repo_get_metadata",
+                        return_value=RepoMetadata(
+                            owner="example",
+                            repo="repo",
+                            full_name="example/repo",
+                            url="https://github.com/example/repo",
+                            default_branch="main",
+                        ),
+                    ),
+                ):
+                    result = _run_with_fake_docker(
+                        FakeIssueAgent(
+                            repo_default_branch="main",
+                            edit_path="repo/docs/guide.md",
+                        ),
+                        config,
+                        tmp_path,
+                        diff_path="repo/docs/guide.md",
+                        pr_client=pr_client,
+                    )
+            finally:
+                os.environ.pop("GITHUB_TOKEN", None)
+
+            self.assertEqual("blocked", result.status)
+            self.assertEqual(0, pr_client.calls)
+            decision = json.loads((result.run_dir / "governance_decision.json").read_text())
+            self.assertEqual("block", decision["status"])
+            self.assertEqual("docs", decision["contribution_class"])
+            self.assertIn("contribution class is not allowed: docs", decision["reasons"])
+            self.assertIn(
+                "code-only run requires at least one code or test path",
+                "; ".join(decision["reasons"]),
+            )
+
+    def test_external_live_code_only_config_allows_test_fixture_text_when_tests_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _external_live_config(tmp_path / "runs", live_enabled=True)
+            pr_client = FakePrClient(actor="contribarena-bot")
+            os.environ["GITHUB_TOKEN"] = "test-token"
+            try:
+                with (
+                    patch(
+                        "contribarena.engine.runner.repo_check_eligibility",
+                        return_value=EligibilityResult(
+                            eligible=True,
+                            reasons=["eligible"],
+                            checks_performed=["fixture"],
+                        ),
+                    ),
+                    patch(
+                        "contribarena.engine.runner.repo_get_metadata",
+                        return_value=RepoMetadata(
+                            owner="example",
+                            repo="repo",
+                            full_name="example/repo",
+                            url="https://github.com/example/repo",
+                            default_branch="main",
+                        ),
+                    ),
+                ):
+                    result = _run_with_fake_docker(
+                        FakeIssueAgent(
+                            repo_default_branch="main",
+                            edit_path="repo/tests/fixtures/sample.txt",
+                        ),
+                        config,
+                        tmp_path,
+                        diff_path="repo/tests/fixtures/sample.txt",
+                        pr_client=pr_client,
+                    )
+            finally:
+                os.environ.pop("GITHUB_TOKEN", None)
+
+            self.assertEqual("completed", result.status)
+            decision = json.loads((result.run_dir / "governance_decision.json").read_text())
+            self.assertEqual("tests", decision["contribution_class"])
 
     def test_external_live_blocks_when_independent_eligibility_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1379,6 +1479,9 @@ def _external_live_config(output_root: Path, live_enabled: bool) -> RunConfig:
         governance=GovernanceConfig(
             live_enabled=live_enabled,
             bot_identity=BotIdentityConfig(kind="pat", actor="contribarena-bot"),
+            contribution_classes=ContributionClassesConfig(
+                allowed=["tests", "low_risk_code"]
+            ),
             rate_limits=GovernanceRateLimits(
                 max_open_prs_per_repo=1,
                 max_prs_per_repo_per_day=1,
@@ -1527,6 +1630,8 @@ def _run_with_fake_docker(
         '  case "$args" in\n'
         '    *"cat -- repo/app.py"*) printf "def marker():\\n    return \'old\'\\n"; exit 0 ;;\n'
         '    *"nl -ba repo/app.py"*) printf "     1\\tdef marker():\\n     2\\t    return \'old\'\\n"; exit 0 ;;\n'
+        f"    *\"cat -- {diff_path}\"*) printf \"def marker():\\n    return 'old'\\n\"; exit 0 ;;\n"
+        f"    *\"nl -ba {diff_path}\"*) printf \"     1\\tdef marker():\\n     2\\t    return 'old'\\n\"; exit 0 ;;\n"
         '    *"python3 -m compileall ."*) printf "compile ok\\n"; exit 0 ;;\n'
         f"{push_failure_case}"
         f"{push_success_case}"

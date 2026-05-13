@@ -139,8 +139,10 @@ class KillSwitchesConfig(BaseModel):
 
 class ExternalLiveConfig(BaseModel):
     poll_interval_seconds: int = Field(default=21_600, ge=60)
+    initial_poll_delay_seconds: int = Field(default=60, ge=0)
     require_maintainer_fit: bool = True
     require_spam_risk_review: bool = True
+    attempt_upstream_labels: bool = False
     allow_public_comments: bool = True
     allowed_comment_events: list[str] = Field(
         default_factory=lambda: [

@@ -386,10 +386,10 @@ class GitHubPullRequestClient:
             return self._empty_check_runs_status(owner=owner, repo=repo)
         checks = [_normalize_check_run(item) for item in raw_checks if isinstance(item, dict)]
         if not checks:
-            return CiStatus(status="not_run", source="github")
+            return CiStatus(status="pending", source="github")
         overall = "failure" if any(check.status == "failure" for check in checks) else "success"
         if all(check.status == "skipped" for check in checks):
-            overall = "not_run"
+            overall = "pending"
         return CiStatus(status=overall, source="github", checks=checks)
 
     def _empty_check_runs_status(self, *, owner: str, repo: str) -> CiStatus:
@@ -403,12 +403,19 @@ class GitHubPullRequestClient:
             raw_workflows = workflows.data.get("workflows")
             if isinstance(raw_workflows, list) and raw_workflows:
                 details = f"No GitHub check runs were returned yet; workflows_configured={len(raw_workflows)}."
+                status = "pending"
             elif isinstance(raw_workflows, list):
                 details = "No GitHub Actions workflows are configured for this repository."
+                status = "not_run"
+            else:
+                status = "not_run"
         elif not workflows.ok:
             details = f"No GitHub check runs were returned; workflow lookup failed: {workflows.error}"
+            status = "not_run"
+        else:
+            status = "not_run"
         return CiStatus(
-            status="not_run",
+            status=status,
             source="github",
             checks=[
                 CiCheck(
