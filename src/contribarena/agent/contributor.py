@@ -160,6 +160,40 @@ class ContributorAgent:
             """Report short, evidence-linked operator progress without ending the run."""
             return _to_json(tools.operator_report_progress(phase, status, summary, evidence_refs))
 
+        @function_tool
+        def aci_memory_get_context(scope: str = "run") -> str:
+            """Return bounded run/repo/global memory context for this run."""
+            return _to_json(tools.aci_memory_get_context(scope))
+
+        @function_tool
+        def aci_memory_search(
+            query: str,
+            intent: str = "unknown",
+            max_results: int = 5,
+        ) -> str:
+            """Search prior run evidence and current working memory."""
+            return _to_json(tools.aci_memory_search(query, intent, max_results))
+
+        @function_tool
+        def aci_memory_note(
+            scope: str,
+            text: str,
+            tags_json: str = "[]",
+            confidence: str = "medium",
+        ) -> str:
+            """Record a concrete memory note for this run or future retrieval."""
+            return _to_json(tools.aci_memory_note(scope, text, tags_json, confidence))
+
+        @function_tool
+        def aci_memory_plan_update(
+            action: str,
+            item_id: str = "",
+            text: str = "",
+            status: str = "",
+        ) -> str:
+            """Add or update a run-local memory plan item."""
+            return _to_json(tools.aci_memory_plan_update(action, item_id, text, status))
+
         @function_tool(name_override=RECOVERY_TOOL_NAME)
         def aci_recover_invalid_action(
             recovery_kind: str,
@@ -197,6 +231,10 @@ class ContributorAgent:
                 aci_suggest_verification,
                 aci_clean_generated,
                 operator_report_progress,
+                aci_memory_get_context,
+                aci_memory_search,
+                aci_memory_note,
+                aci_memory_plan_update,
                 aci_recover_invalid_action,
                 aci_submit_patch,
             ],
@@ -310,9 +348,14 @@ def build_agent_instructions(config: RunConfig) -> str:
         "aci_submit_patch, then finish with the structured ContribArena result. Use "
         "operator_report_progress at phase boundaries or when discovery, selection, "
         "verification, governance, or PR work would otherwise look silent; keep it short, "
-        "evidence-linked, and do not expose hidden chain-of-thought. Do not "
-        "ignore repository contribution guidance; if CONTRIBUTING.md or .github guidance "
-        "is easy to find, follow it before proposing a PR-shaped patch. Do not "
+        "evidence-linked, and do not expose hidden chain-of-thought. Read "
+        ".contribarena/guidance/guidance_entry.md early when available; it is fixed "
+        "system guidance, while repository CONTRIBUTING and PR templates remain the "
+        "target repo's source of truth. You have a working memory scratchpad for this "
+        "run: use aci_memory_get_context(scope='run') to remind yourself what you have "
+        "checked, aci_memory_note(scope='run', ...) for concrete observations, and "
+        "aci_memory_plan_update for multi-step plans. Memory is optional; use it when "
+        "the task spans many tool calls. Do not "
         "continue exploring after the expected shadow patch and verification summary "
         "are complete."
     )

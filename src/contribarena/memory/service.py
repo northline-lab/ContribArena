@@ -1,0 +1,395 @@
+from __future__ import annotations
+
+import re
+import uuid
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Mapping
+
+from contribarena.config.schema import MemoryConfig
+from contribarena.memory.event_log import MemoryEventLog
+from contribarena.memory.history_index import HistoryIndex
+from contribarena.memory.redact import redact_payload, redact_text
+from contribarena.memory.schema import (
+    MemoryContext,
+    MemoryEvent,
+    MemorySearchItem,
+    MemorySearchResult,
+    MemoryWriteReport,
+    MemoryWriteResult,
+    WorkingMemory,
+    WorkingMemoryFact,
+    WorkingMemoryNote,
+    WorkingMemoryPlanItem,
+)
+
+
+class MemoryService:
+    def __init__(
+        self,
+        config: MemoryConfig,
+        *,
+        run_id: str,
+        repo_full_name: str = "",
+    ) -> None:
+        self.config = config
+        self.run_id = run_id
+        self.repo_full_name = repo_full_name
+        self.working = WorkingMemory(run_id=run_id, repo_full_name=repo_full_name)
+        self.context = MemoryContext(
+            run_id=run_id,
+            repo_full_name=repo_full_name,
+            enabled=config.enabled,
+            backend=config.backend,
+        )
+        self._event_log = MemoryEventLog(config.root, run_id) if config.enabled else None
+        self._history = (
+            HistoryIndex(config.root, config.max_history_record_chars)
+            if config.enabled and config.history_index_enabled
+            else None
+        )
+        self._failures: list[dict[str, str]] = []
+        self._last_index_entries = 0
+        self._last_indexed_sources: list[str] = []
+
+    @property
+    def enabled(self) -> bool:
+        return self.config.enabled
+
+    def start_run_context(self, repo_full_name: str = "") -> MemoryContext:
+        if repo_full_name:
+            self.repo_full_name = repo_full_name
+            self.working.repo_full_name = repo_full_name
+            self.context.repo_full_name = repo_full_name
+        if not self.enabled:
+            self.context.enabled = False
+            self.context.notes = ["memory disabled"]
+            return self.context
+        self.context.history_results = []
+        if self._history is not None:
+            try:
+                self.context.history_results = self._history.search(
+                    "terminal failed blocked guidance verification",
+                    repo_full_name=self.repo_full_name,
+                    limit=5,
+                )
+            except Exception as exc:  # pragma: no cover - defensive fail-soft path
+                self.context.degraded = True
+                self.context.notes.append("history index unavailable")
+                self._failures.append(
+                    {"error_kind": "history_index_unavailable", "error_message": str(exc)}
+                )
+        return self.context
+
+    def record_tool_observation(
+        self,
+        step_id: str,
+        tool_name: str,
+        payload: Mapping[str, Any],
+        result: Mapping[str, Any],
+    ) -> MemoryWriteResult:
+        if not self.enabled:
+            return _skipped("memory_disabled")
+        facts = _derive_facts(tool_name, payload, result)
+        for key, value in facts.items():
+            self._set_fact(
+                key,
+                value,
+                source="harness",
+                derived_from=f"{tool_name} step={step_id}",
+            )
+        return MemoryWriteResult(success=True)
+
+    def note_agent_memory(
+        self,
+        scope: str,
+        text: str,
+        tags: list[str],
+        confidence: str,
+        source_ref: str,
+    ) -> MemoryWriteResult:
+        if not self.enabled:
+            return _skipped("memory_disabled")
+        now = _now()
+        clean_text = redact_text(text, max_chars=2048)
+        clean_tags = [redact_text(str(tag), max_chars=64) for tag in tags[:8]]
+        if scope == "run":
+            note = WorkingMemoryNote(id=uuid.uuid4().hex[:8], text=clean_text, tags=clean_tags, created_at=now)
+            if len(self.working.notes) < 32:
+                self.working.notes.append(note)
+            else:
+                self.working.truncated = True
+            key = _fact_key(clean_tags[0] if clean_tags else "agent_note")
+            self._set_fact(key, clean_text, source="agent", derived_from=source_ref)
+        event_id = self._append_event(
+            "agent_lesson_proposed",
+            payload={"scope": scope, "text": clean_text, "tags": clean_tags},
+            source_ref=source_ref,
+            confidence=_confidence(confidence),
+        )
+        return MemoryWriteResult(success=True, event_ids=[event_id] if event_id else [])
+
+    def plan_update(
+        self,
+        action: str,
+        item_id: str = "",
+        text: str = "",
+        status: str = "",
+    ) -> MemoryWriteResult:
+        if not self.enabled:
+            return _skipped("memory_disabled")
+        now = _now()
+        action = action.strip().lower()
+        if action == "add":
+            item = WorkingMemoryPlanItem(
+                id=item_id.strip() or uuid.uuid4().hex[:8],
+                text=redact_text(text, max_chars=512),
+                created_at=now,
+                updated_at=now,
+            )
+            if len(self.working.plan) < 32:
+                self.working.plan.append(item)
+            else:
+                self.working.truncated = True
+        elif action == "update":
+            for item in self.working.plan:
+                if item.id == item_id:
+                    if text.strip():
+                        item.text = redact_text(text, max_chars=512)
+                    if status in {"open", "doing", "done", "dropped"}:
+                        item.status = status  # type: ignore[assignment]
+                    item.updated_at = now
+                    break
+        else:
+            return MemoryWriteResult(
+                success=False,
+                error_kind="invalid_memory_plan_action",
+                error_message="action must be add or update",
+            )
+        return MemoryWriteResult(success=True)
+
+    def search_for_agent(
+        self,
+        query: str,
+        intent: str = "unknown",
+        max_results: int = 5,
+    ) -> MemorySearchResult:
+        if not self.enabled:
+            return MemorySearchResult(
+                success=False,
+                intent=intent,
+                query=query,
+                repo_full_name=self.repo_full_name,
+                error_kind="memory_disabled",
+            )
+        results = _search_working_memory(self.working, query, max_results)
+        if self._history is not None and len(results) < max_results:
+            try:
+                results.extend(
+                    self._history.search(
+                        query,
+                        repo_full_name=self.repo_full_name,
+                        limit=max_results - len(results),
+                    )
+                )
+            except Exception as exc:  # pragma: no cover - defensive fail-soft path
+                self._failures.append(
+                    {"error_kind": "history_index_search_failed", "error_message": str(exc)}
+                )
+                return MemorySearchResult(
+                    success=True,
+                    intent=intent,
+                    query=query,
+                    repo_full_name=self.repo_full_name,
+                    results=results,
+                    degraded=True,
+                    error_kind="history_index_search_failed",
+                )
+        return MemorySearchResult(
+            success=True,
+            intent=intent,
+            query=query,
+            repo_full_name=self.repo_full_name,
+            results=results[:max_results],
+        )
+
+    def finalize_run(self, terminal: Mapping[str, Any], run_dir: Path) -> MemoryWriteReport:
+        if not self.enabled:
+            return MemoryWriteReport(
+                graphiti_enabled=False,
+                graphiti_available=False,
+                events_written=0,
+                degraded=False,
+            )
+        self._append_event(
+            "run_terminal",
+            payload={"terminal": redact_payload(dict(terminal))},
+            source_ref="terminal_state.json",
+        )
+        if self._history is not None:
+            try:
+                indexed = self._history.index_run_dir(
+                    run_dir,
+                    run_id=self.run_id,
+                    repo_full_name=self.repo_full_name,
+                )
+                self._last_index_entries = indexed.entries_written
+                self._last_indexed_sources = indexed.indexed_sources
+            except Exception as exc:  # pragma: no cover - defensive fail-soft path
+                self._failures.append(
+                    {"error_kind": "history_index_write_failed", "error_message": str(exc)}
+                )
+        return MemoryWriteReport(
+            graphiti_enabled=False,
+            graphiti_available=False,
+            events_written=len(self.events_text().splitlines()),
+            history_index_entries_written=self._last_index_entries,
+            degraded=bool(self._failures),
+            failures=self._failures,
+            indexed_sources=self._last_indexed_sources,
+        )
+
+    def events_text(self) -> str:
+        if self._event_log is None:
+            return ""
+        return self._event_log.read_text()
+
+    def _set_fact(
+        self,
+        key: str,
+        value: str,
+        *,
+        source: str,
+        derived_from: str = "",
+    ) -> None:
+        clean_key = _fact_key(key)
+        if clean_key in self.working.facts and self.working.facts[clean_key].source == "agent":
+            return
+        if clean_key not in self.working.facts and len(self.working.facts) >= 64:
+            self.working.truncated = True
+            return
+        now = _now()
+        existing = self.working.facts.get(clean_key)
+        created_at = existing.created_at if existing else now
+        self.working.facts[clean_key] = WorkingMemoryFact(
+            key=clean_key,
+            value=redact_text(str(value), max_chars=1024),
+            source="agent" if source == "agent" else "harness",
+            derived_from=derived_from,
+            created_at=created_at,
+            updated_at=now,
+        )
+
+    def _append_event(
+        self,
+        event_type: str,
+        *,
+        payload: dict[str, Any],
+        source_ref: str = "",
+        confidence: str = "medium",
+    ) -> str:
+        if self._event_log is None:
+            return ""
+        event = MemoryEvent(
+            event_id=uuid.uuid4().hex[:12],
+            event_type=event_type,
+            run_id=self.run_id,
+            repo_full_name=self.repo_full_name,
+            source_ref=source_ref,
+            payload=redact_payload(payload),
+            confidence=_confidence(confidence),
+            created_at=_now(),
+        )
+        self._event_log.append(event)
+        return event.event_id
+
+
+def _derive_facts(
+    tool_name: str,
+    payload: Mapping[str, Any],
+    result: Mapping[str, Any],
+) -> dict[str, str]:
+    if not bool(result.get("success", True)):
+        return {}
+    facts: dict[str, str] = {}
+    path = str(payload.get("path") or "")
+    if tool_name == "aci_view":
+        lowered = path.lower()
+        if re.search(r"contributing(\.md)?$", lowered):
+            facts["contributing_checked"] = path
+        if "readme" in lowered:
+            facts["readme_checked"] = path
+        if ".github/" in lowered and (
+            "pull_request_template" in lowered or "issue_template" in lowered
+        ):
+            facts["pr_template_seen"] = path
+    if tool_name == "aci_find_files":
+        pattern = str(payload.get("pattern") or "")
+        if "test" in pattern.lower() or "tests/" in str(payload.get("path") or ""):
+            facts["tests_dir_explored"] = pattern
+    if tool_name == "aci_search":
+        pattern = str(payload.get("pattern") or "")
+        if pattern:
+            facts["search_used"] = pattern
+    if tool_name == "aci_verify":
+        command = str(payload.get("command") or "")
+        if command:
+            facts["last_verification"] = command
+    if tool_name == "aci_submit_patch":
+        facts["patch_submitted"] = "true"
+    if tool_name == "aci_apply_patch":
+        paths = payload.get("paths")
+        if isinstance(paths, list) and paths:
+            facts["last_edit_paths"] = ", ".join(str(item) for item in paths[:5])
+    return facts
+
+
+def _search_working_memory(
+    working: WorkingMemory,
+    query: str,
+    max_results: int,
+) -> list[MemorySearchItem]:
+    terms = [term.lower() for term in re.findall(r"[A-Za-z0-9_/-]+", query)]
+    if not terms:
+        return []
+    results: list[MemorySearchItem] = []
+    for fact in working.facts.values():
+        haystack = f"{fact.key} {fact.value}".lower()
+        if any(term in haystack for term in terms):
+            results.append(
+                MemorySearchItem(
+                    text=f"{fact.key}: {fact.value}",
+                    source="working_memory",
+                    source_ref=fact.derived_from,
+                    created_at=fact.updated_at,
+                )
+            )
+    for note in working.notes:
+        haystack = f"{note.text} {' '.join(note.tags)}".lower()
+        if any(term in haystack for term in terms):
+            results.append(
+                MemorySearchItem(
+                    text=note.text,
+                    source="working_memory",
+                    source_ref="working_memory.notes",
+                    created_at=note.created_at,
+                )
+            )
+    return results[:max_results]
+
+
+def _fact_key(value: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9_-]+", "_", value.strip().lower()).strip("_")
+    return (cleaned or "memory_note")[:64]
+
+
+def _confidence(value: str) -> str:
+    return value if value in {"low", "medium", "high"} else "medium"
+
+
+def _skipped(reason: str) -> MemoryWriteResult:
+    return MemoryWriteResult(success=False, skipped_reason=reason, error_kind=reason)
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()

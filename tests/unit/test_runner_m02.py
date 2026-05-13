@@ -16,6 +16,7 @@ from contribarena.config.schema import (
     GovernanceConfig,
     GovernanceRateLimits,
     IssueConfig,
+    MemoryConfig,
     OwnedRepositoryPolicy,
     PrSubmissionConfig,
     RepoCandidate,
@@ -101,6 +102,54 @@ class FakeFailingAgent:
         model_provider: object = None,
     ) -> AgentFinalResult:
         raise AgentError("synthetic agent failure")
+
+
+class FakeMemoryAgent:
+    def run(
+        self,
+        config: RunConfig,
+        tools: object,
+        prompt: str,
+        model_provider: object = None,
+    ) -> AgentFinalResult:
+        self.prompt = prompt
+        command = tools.workspace_run(  # type: ignore[attr-defined]
+            "git clone https://github.com/example/repo.git repo && cd repo && git status --short"
+        )
+        tools.aci_view("repo/CONTRIBUTING.md")  # type: ignore[attr-defined]
+        tools.aci_memory_note(  # type: ignore[attr-defined]
+            "run",
+            "CONTRIBUTING.md was inspected before editing.",
+            '["contributing"]',
+            "medium",
+        )
+        tools.aci_replace("repo/app.py", "old", "new")  # type: ignore[attr-defined]
+        tools.aci_verify("python3 -m compileall .", "repo")  # type: ignore[attr-defined]
+        tools.aci_submit_patch()  # type: ignore[attr-defined]
+        return AgentFinalResult(
+            status="completed",
+            repo=RepoSummary(owner="example", name="repo", url="https://github.com/example/repo"),
+            repo_profile="# Repo Profile\n\nSmall test repository.",
+            opportunities=[
+                OpportunitySummary(
+                    title="Replace old marker",
+                    rationale="Low-risk deterministic test change.",
+                    risk="low",
+                    source="test",
+                )
+            ],
+            selected_task=SelectedTask(
+                title="Replace old marker",
+                rationale="Exercise M0.6 memory path.",
+                expected_change="old -> new",
+                risk="low",
+            ),
+            workspace_summary=WorkspaceSummary(
+                commands_run=[command],
+                patch_applied=True,
+                notes="M0.6 memory path submitted.",
+            ),
+        )
 
 
 class FakeIssueAgent:
@@ -1414,6 +1463,48 @@ class RunnerM02Test(unittest.TestCase):
             self.assertIn("repo/app.py", agent_events[0]["evidence"])
             trajectory = json.loads((result.run_dir / "trajectory.json").read_text())
             self.assertIn("operator_report_progress", {step["tool"] for step in trajectory})
+
+    def test_runner_writes_guidance_and_memory_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _issue_config(tmp_path / "runs")
+            config.memory = MemoryConfig(root=tmp_path / "memory")
+            agent = FakeMemoryAgent()
+
+            result = _run_with_fake_docker(agent, config, tmp_path)
+
+            guidance = json.loads((result.run_dir / "repo_guidance.json").read_text())
+            self.assertTrue(guidance["installed"])
+            self.assertIn(".contribarena/guidance/guidance_entry.md", agent.prompt)
+            working = json.loads((result.run_dir / "working_memory.json").read_text())
+            self.assertEqual(
+                "repo/CONTRIBUTING.md",
+                working["facts"]["contributing_checked"]["value"],
+            )
+            self.assertEqual("agent", working["facts"]["contributing"]["source"])
+            report = json.loads((result.run_dir / "memory_write_report.json").read_text())
+            self.assertGreater(report["history_index_entries_written"], 0)
+            manifest = json.loads((result.run_dir / "artifact_manifest.json").read_text())
+            manifest_names = {entry["name"] for entry in manifest["artifacts"]}
+            self.assertIn("memory_context.json", manifest_names)
+            self.assertIn("working_memory.json", manifest_names)
+            self.assertIn("memory_events.jsonl", manifest_names)
+            self.assertIn("memory_write_report.json", manifest_names)
+
+    def test_memory_disabled_returns_tool_recovery_and_writes_no_memory_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _issue_config(tmp_path / "runs")
+            config.memory = MemoryConfig(enabled=False, root=tmp_path / "memory")
+            agent = FakeMemoryAgent()
+
+            result = _run_with_fake_docker(agent, config, tmp_path)
+
+            self.assertFalse((result.run_dir / "working_memory.json").exists())
+            trajectory = json.loads((result.run_dir / "trajectory.json").read_text())
+            memory_steps = [step for step in trajectory if step["tool"] == "aci_memory_note"]
+            self.assertEqual(1, len(memory_steps))
+            self.assertEqual("memory_disabled", memory_steps[0]["recovery_kind"])
 
 
 def _config(output_root: Path) -> RunConfig:

@@ -55,6 +55,31 @@ class ContributorTools(Protocol):
         evidence_refs: str = "",
     ) -> AciResult: ...
 
+    def aci_memory_get_context(self, scope: str = "run") -> AciResult: ...
+
+    def aci_memory_search(
+        self,
+        query: str,
+        intent: str = "unknown",
+        max_results: int = 5,
+    ) -> AciResult: ...
+
+    def aci_memory_note(
+        self,
+        scope: str,
+        text: str,
+        tags_json: str = "[]",
+        confidence: str = "medium",
+    ) -> AciResult: ...
+
+    def aci_memory_plan_update(
+        self,
+        action: str,
+        item_id: str = "",
+        text: str = "",
+        status: str = "",
+    ) -> AciResult: ...
+
     def aci_recover_invalid_action(
         self,
         recovery_kind: str,

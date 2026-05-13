@@ -88,6 +88,16 @@ class ArtifactConfig(BaseModel):
     output_root: Path = Path("runs")
 
 
+class MemoryConfig(BaseModel):
+    enabled: bool = True
+    root: Path = Path(".contribarena/memory")
+    backend: Literal["noop", "graphiti"] = "noop"
+    graphiti_enabled: bool = False
+    history_index_enabled: bool = True
+    max_history_record_chars: int = Field(default=16_000, ge=1)
+    schema_version: Literal["1"] = "1"
+
+
 class PrSubmissionConfig(BaseModel):
     strategy: Literal["fork", "upstream_branch"] = "fork"
     fork_owner: str | None = None
@@ -246,6 +256,7 @@ class RunConfig(BaseModel):
     issue: IssueConfig | None = None
     workspace: WorkspaceConfig
     artifacts: ArtifactConfig = Field(default_factory=ArtifactConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     governance: GovernanceConfig = Field(default_factory=GovernanceConfig)
     controller: ControllerConfig = Field(default_factory=ControllerConfig)

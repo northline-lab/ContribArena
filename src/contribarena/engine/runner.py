@@ -15,6 +15,7 @@ from contribarena.config.schema import OwnedRepositoryPolicy, RepoCandidate, Run
 from contribarena.engine.artifacts import ArtifactWriter
 from contribarena.engine.context import ContextBuilder
 from contribarena.engine.external_lifecycle import lifecycle_record_for_opened_pr
+from contribarena.engine.guidance import guidance_artifact_payload, install_guidance_sidecar
 from contribarena.engine.lifecycle import (
     apply_quality_gate_to_result,
     build_ci_status,
@@ -39,6 +40,7 @@ from contribarena.engine.operator_events import OperatorProgressWriter, truncate
 from contribarena.engine.runtime_config import apply_output_dir
 from contribarena.engine.workspace import DockerWorkspaceManager
 from contribarena.errors import AgentError, BudgetExhausted, InfrastructureError
+from contribarena.memory import MemoryService
 from contribarena.models import (
     AgentFinalResult,
     CiCheck,
@@ -139,6 +141,13 @@ class Runner:
         workspace = DockerWorkspaceManager(run_id, repo_slug, config.workspace)
         budget = BudgetTracker(config.run.budget)
         capture = ArtifactCapture()
+        memory = MemoryService(config.memory, run_id=run_id, repo_full_name=repo_slug)
+        if memory.enabled:
+            memory_context = memory.start_run_context(repo_slug)
+            artifacts.write_json(
+                "memory_context.json",
+                memory_context.model_dump(mode="json"),
+            )
         terminal: TerminalState | None = None
         workspace_started = False
 
@@ -165,6 +174,22 @@ class Runner:
                 evidence=["trace.jsonl"],
                 payload={"container": workspace.container_name},
             )
+            guidance = install_guidance_sidecar(
+                workspace,
+                config,
+                run_id=run_id,
+                repo_full_name=repo_slug,
+            )
+            artifacts.write_json(
+                "repo_guidance.json",
+                guidance_artifact_payload(guidance),
+                required=False,
+            )
+            trace.write(
+                RunState.AGENT_CONTEXT_LOADED,
+                "guidance.sidecar_installed",
+                {"installed": guidance.installed, "error": guidance.error},
+            )
             registry = ToolRegistry(
                 config=config,
                 workspace=workspace,
@@ -172,6 +197,7 @@ class Runner:
                 budget=budget,
                 capture=capture,
                 operator=operator,
+                memory=memory,
             )
             trace.write(RunState.AGENT_INITIALIZED, "agent.initialized", {"agent": "builtin"})
             operator.write(
@@ -278,6 +304,7 @@ class Runner:
                 _quality_report(config, result, capture, terminal, quality_gate, pr_draft),
                 required=False,
             )
+            _write_memory_artifacts(artifacts, memory, terminal)
             trace.write(
                 RunState.ARTIFACTS_WRITTEN,
                 "artifacts.written",
@@ -351,6 +378,7 @@ class Runner:
                 _failure_quality_report(terminal, capture),
                 required=False,
             )
+            _write_memory_artifacts(artifacts, memory, terminal)
             trace.write(
                 RunState.RUN_TERMINAL,
                 "run.terminal",
@@ -440,6 +468,38 @@ def _write_capture_artifacts(artifacts: ArtifactWriter, capture: ArtifactCapture
     artifacts.write_json(
         "trajectory.json",
         [step.model_dump(mode="json") for step in capture.steps],
+    )
+
+
+def _write_memory_artifacts(
+    artifacts: ArtifactWriter,
+    memory: MemoryService,
+    terminal: TerminalState,
+) -> None:
+    if not memory.enabled:
+        return
+    artifacts.write_json(
+        "working_memory.json",
+        memory.working.model_dump(mode="json"),
+        required=False,
+    )
+    artifacts.write_text(
+        "memory_events.jsonl",
+        memory.events_text(),
+        kind="jsonl",
+        required=False,
+    )
+    report = memory.finalize_run(terminal.model_dump(mode="json"), artifacts.run_dir)
+    artifacts.write_text(
+        "memory_events.jsonl",
+        memory.events_text(),
+        kind="jsonl",
+        required=False,
+    )
+    artifacts.write_json(
+        "memory_write_report.json",
+        report.model_dump(mode="json"),
+        required=False,
     )
 
 

@@ -42,6 +42,13 @@ workspace:
 artifacts:
   output_root: runs
 
+memory:
+  enabled: true
+  root: .contribarena/memory
+  backend: noop
+  graphiti_enabled: false
+  history_index_enabled: true
+
 governance:
   live_enabled: false
   owned_repositories: []

@@ -35,6 +35,9 @@ class ConfigSchemaTest(unittest.TestCase):
             self.assertEqual("always", config.workspace.cleanup_policy)
             self.assertFalse(config.governance.live_enabled)
             self.assertFalse(config.controller.enabled)
+            self.assertTrue(config.memory.enabled)
+            self.assertEqual("noop", config.memory.backend)
+            self.assertTrue(config.memory.history_index_enabled)
             self.assertEqual(
                 "openai/openai-agents-python", config.discovery.candidates[0].full_name
             )

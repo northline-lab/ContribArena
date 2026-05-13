@@ -13,6 +13,7 @@ from contribarena.engine.operator_events import (
     truncate_for_operator,
 )
 from contribarena.engine.workspace import DockerWorkspaceManager
+from contribarena.memory import MemoryService
 from contribarena.models import AciResult, AgentStep, CommandResult, PatchResult, RunState
 from contribarena.trace import TraceWriter
 from contribarena.tools.aci import (
@@ -48,6 +49,7 @@ class ToolRegistry:
     budget: BudgetTracker
     capture: ArtifactCapture
     operator: OperatorProgressWriter | None = None
+    memory: MemoryService | None = None
 
     def repo_search(self, query: str = "", filters: object | None = None) -> object:
         return self._record(
@@ -318,6 +320,123 @@ class ToolRegistry:
         )
         return result
 
+    def aci_memory_get_context(self, scope: str = "run") -> AciResult:
+        def run() -> AciResult:
+            if self.memory is None or not self.memory.enabled:
+                return _memory_disabled("aci_memory_get_context")
+            if scope not in {"run", "repo", "global"}:
+                return _memory_error("aci_memory_get_context", "invalid_memory_scope")
+            return AciResult(
+                tool="aci_memory_get_context",
+                success=True,
+                output=json.dumps(
+                    self.memory.working.model_dump(mode="json")
+                    if scope == "run"
+                    else self.memory.context.model_dump(mode="json"),
+                    ensure_ascii=True,
+                ),
+            )
+
+        return self._record_memory(
+            event="aci.memory_get_context",
+            tool="aci_memory_get_context",
+            payload={"scope": scope},
+            fn=run,
+        )
+
+    def aci_memory_search(
+        self,
+        query: str,
+        intent: str = "unknown",
+        max_results: int = 5,
+    ) -> AciResult:
+        def run() -> AciResult:
+            if self.memory is None or not self.memory.enabled:
+                return _memory_disabled("aci_memory_search")
+            result = self.memory.search_for_agent(
+                query,
+                intent=intent,
+                max_results=max(1, min(max_results, 10)),
+            )
+            return AciResult(
+                tool="aci_memory_search",
+                success=result.success,
+                output=result.model_dump_json(),
+                error=result.error_kind or None if not result.success else None,
+                recovery_kind=result.error_kind or None if not result.success else None,
+            )
+
+        return self._record_memory(
+            event="aci.memory_search",
+            tool="aci_memory_search",
+            payload={"query": query, "intent": intent, "max_results": max_results},
+            fn=run,
+        )
+
+    def aci_memory_note(
+        self,
+        scope: str,
+        text: str,
+        tags_json: str = "[]",
+        confidence: str = "medium",
+    ) -> AciResult:
+        def run() -> AciResult:
+            if self.memory is None or not self.memory.enabled:
+                return _memory_disabled("aci_memory_note")
+            try:
+                tags = json.loads(tags_json) if tags_json else []
+            except json.JSONDecodeError as exc:
+                return _memory_error("aci_memory_note", f"invalid tags_json: {exc}")
+            if not isinstance(tags, list):
+                return _memory_error("aci_memory_note", "tags_json must decode to a list")
+            write = self.memory.note_agent_memory(
+                scope,
+                text,
+                [str(tag) for tag in tags],
+                confidence,
+                source_ref="aci_memory_note",
+            )
+            return AciResult(
+                tool="aci_memory_note",
+                success=write.success,
+                output=write.model_dump_json(),
+                error=write.error_message or None if not write.success else None,
+                recovery_kind=write.error_kind or None if not write.success else None,
+            )
+
+        return self._record_memory(
+            event="aci.memory_note",
+            tool="aci_memory_note",
+            payload={"scope": scope, "tags_json": tags_json, "confidence": confidence},
+            fn=run,
+        )
+
+    def aci_memory_plan_update(
+        self,
+        action: str,
+        item_id: str = "",
+        text: str = "",
+        status: str = "",
+    ) -> AciResult:
+        def run() -> AciResult:
+            if self.memory is None or not self.memory.enabled:
+                return _memory_disabled("aci_memory_plan_update")
+            write = self.memory.plan_update(action, item_id=item_id, text=text, status=status)
+            return AciResult(
+                tool="aci_memory_plan_update",
+                success=write.success,
+                output=write.model_dump_json(),
+                error=write.error_message or None if not write.success else None,
+                recovery_kind=write.error_kind or None if not write.success else None,
+            )
+
+        return self._record_memory(
+            event="aci.memory_plan_update",
+            tool="aci_memory_plan_update",
+            payload={"action": action, "item_id": item_id, "status": status},
+            fn=run,
+        )
+
     def aci_recover_invalid_action(
         self,
         recovery_kind: str,
@@ -532,6 +651,20 @@ class ToolRegistry:
                 "workspace.patch_captured",
                 {"bytes": len((result.output or "").encode("utf-8"))},
             )
+        if self.memory is not None:
+            try:
+                self.memory.record_tool_observation(
+                    str(len(self.capture.steps) + 1),
+                    tool,
+                    payload,
+                    result.model_dump(mode="json"),
+                )
+            except Exception as exc:  # pragma: no cover - memory must fail soft
+                self.trace.write(
+                    RunState.AGENT_ACTING,
+                    "memory.tool_observation_failed",
+                    {"tool": tool, "error": str(exc)},
+                )
         self.trace.write(state, f"{event}.finished", {"result": _safe_result(result)})
         self._write_operator_event(event, "finished", result, payload, phase=phase, tool=tool)
         self.capture.record_step(
@@ -549,6 +682,39 @@ class ToolRegistry:
                 terminal_status=result.terminal_status,
                 retry_count=result.retry_count,
                 terminal_after_retries=result.terminal_after_retries,
+            )
+        )
+        return result
+
+    def _record_memory(
+        self,
+        *,
+        event: str,
+        tool: str,
+        payload: dict[str, Any],
+        fn: Callable[[], AciResult],
+    ) -> AciResult:
+        self.budget.record_step()
+        start = time.monotonic()
+        self.trace.write(RunState.AGENT_ACTING, f"{event}.started", payload)
+        result = _annotate_aci_result(tool, fn())
+        duration = time.monotonic() - start
+        self.capture.record_aci_result(result)
+        self.trace.write(RunState.AGENT_ACTING, f"{event}.finished", {"result": _safe_result(result)})
+        self._write_operator_event(event, "finished", result, payload, phase="memory", tool=tool)
+        self.capture.record_step(
+            AgentStep(
+                step=len(self.capture.steps) + 1,
+                phase="memory",
+                tool=tool,
+                input_summary=_summary(payload),
+                result_summary=_result_summary(result),
+                state=str(RunState.AGENT_ACTING),
+                duration_seconds=duration,
+                error=result.error,
+                accepted=_step_accepted(result),
+                recovery_kind=result.recovery_kind,
+                terminal_status=result.terminal_status,
             )
         )
         return result
@@ -634,6 +800,8 @@ def _operator_status(result: object, fallback: str) -> str:
 
 
 def _operator_summary(tool: str, result: object, payload: dict[str, Any]) -> str:
+    if tool.startswith("aci_memory_"):
+        return f"updated or queried run memory with {tool}"
     if tool in {"aci_view", "aci_search", "aci_find_files"}:
         return f"inspected repository context with {tool}"
     if tool in {"aci_apply_patch", "aci_replace", "aci_insert", "aci_create", "aci_undo"}:
@@ -727,6 +895,26 @@ def _result_summary(result: object, max_chars: int = 300) -> str:
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + "...[truncated]"
+
+
+def _memory_disabled(tool: str) -> AciResult:
+    return AciResult(
+        tool=tool,
+        success=False,
+        output="memory is disabled",
+        error="memory is disabled",
+        recovery_kind="memory_disabled",
+    )
+
+
+def _memory_error(tool: str, message: str) -> AciResult:
+    return AciResult(
+        tool=tool,
+        success=False,
+        output=message,
+        error=message,
+        recovery_kind="memory_tool_error",
+    )
 
 
 def _annotate_aci_result(tool: str, result: AciResult) -> AciResult:
