@@ -14,7 +14,7 @@ class BudgetConfig(BaseModel):
 
 class RunSection(BaseModel):
     id: str | None = None
-    mode: Literal["shadow", "dry_run", "owned_live"] = "shadow"
+    mode: Literal["shadow", "dry_run", "owned_live", "external_live"] = "shadow"
     model: str = "local-stub"
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
 
@@ -114,6 +114,12 @@ class GovernanceRateLimits(BaseModel):
     max_open_prs_per_repo: int = Field(default=1, ge=0)
     max_prs_per_repo_per_day: int = Field(default=3, ge=0)
     min_minutes_between_prs_per_repo: int = Field(default=30, ge=0)
+    max_open_prs_per_org: int = Field(default=3, ge=0)
+    max_prs_per_org_per_day: int = Field(default=5, ge=0)
+    min_minutes_between_prs_per_org: int = Field(default=60, ge=0)
+    max_open_prs_global: int = Field(default=10, ge=0)
+    max_prs_global_per_day: int = Field(default=10, ge=0)
+    min_minutes_between_prs_global: int = Field(default=15, ge=0)
 
 
 class ContributionClassesConfig(BaseModel):
@@ -127,7 +133,23 @@ class KillSwitchesConfig(BaseModel):
 
     global_switch: bool = Field(default=False, alias="global")
     repositories: list[str] = Field(default_factory=list)
+    organizations: list[str] = Field(default_factory=list)
     agents: list[str] = Field(default_factory=list)
+
+
+class ExternalLiveConfig(BaseModel):
+    poll_interval_seconds: int = Field(default=21_600, ge=60)
+    require_maintainer_fit: bool = True
+    require_spam_risk_review: bool = True
+    allow_public_comments: bool = True
+    allowed_comment_events: list[str] = Field(
+        default_factory=lambda: [
+            "pr_opened",
+            "ci_fixed",
+            "review_addressed",
+            "requested_change_completed",
+        ]
+    )
 
 
 class GovernanceConfig(BaseModel):
@@ -139,6 +161,7 @@ class GovernanceConfig(BaseModel):
         default_factory=ContributionClassesConfig
     )
     kill_switches: KillSwitchesConfig = Field(default_factory=KillSwitchesConfig)
+    external_live: ExternalLiveConfig = Field(default_factory=ExternalLiveConfig)
     state_path: Path | None = None
 
 
@@ -236,6 +259,8 @@ class RunConfig(BaseModel):
         return self._validate_owned_live_target()
 
     def _validate_owned_live_target(self) -> RunConfig:
+        if self.run.mode == "external_live":
+            return self._validate_external_live_target()
         if self.run.mode != "owned_live":
             return self
         if len(self.discovery.candidates) != 1:
@@ -245,6 +270,14 @@ class RunConfig(BaseModel):
             raise ValueError(
                 "owned_live mode requires the configured repository in governance.owned_repositories"
             )
+        return self
+
+    def _validate_external_live_target(self) -> RunConfig:
+        if self.issue is not None:
+            raise ValueError("external_live mode does not support fixed issue-solving targets")
+        for policy in self.governance.owned_repositories:
+            if policy.pr_submission.strategy == "upstream_branch":
+                raise ValueError("external_live mode requires fork-only PR submission")
         return self
 
 

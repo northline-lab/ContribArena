@@ -12,12 +12,20 @@ class ContextBuilder:
             )
             or "- no fixed candidates; use repo_search with configured query/filters"
         )
-        mode_boundary = (
-            "The run is owned-live mode: you may propose a PR-ready patch, but live GitHub "
-            "writes are executed only by the harness after quality and governance gates.\n"
-            if config.run.mode == "owned_live"
-            else "The run is shadow mode: do not open pull requests or write comments.\n"
-        )
+        if config.run.mode == "owned_live":
+            mode_boundary = (
+                "The run is owned-live mode: you may propose a PR-ready patch, but live GitHub "
+                "writes are executed only by the harness after quality and governance gates.\n"
+            )
+        elif config.run.mode == "external_live":
+            mode_boundary = (
+                "The run is external-live mode: freely discover an eligible external repository, "
+                "choose a defensibly low-risk task, and submit a PR-ready patch. Live GitHub "
+                "writes are executed only by the harness after eligibility, quality, and "
+                "governance gates. External PR submission is fork-only.\n"
+            )
+        else:
+            mode_boundary = "The run is shadow mode: do not open pull requests or write comments.\n"
         return (
             "You are an autonomous open-source contribution agent running inside ContribArena.\n"
             f"{mode_boundary}"

@@ -1,6 +1,13 @@
 from .agent_result import AgentFinalResult, OpportunitySummary, RepoSummary, SelectedTask
 from .artifacts import ArtifactEntry, ArtifactManifest
-from .governance import GovernanceAttempt, GovernanceDecision, GovernancePrRef, GovernanceState
+from .governance import (
+    GovernanceAttempt,
+    GovernanceDecision,
+    GovernancePrRef,
+    GovernanceState,
+    MaintainerSignal,
+    PrLifecycleRecord,
+)
 from .lifecycle import (
     CiCheck,
     CiStatus,
@@ -35,6 +42,8 @@ __all__ = [
     "GovernanceDecision",
     "GovernancePrRef",
     "GovernanceState",
+    "MaintainerSignal",
+    "PrLifecycleRecord",
     "IssueCandidate",
     "OpportunitySummary",
     "PatchOperation",

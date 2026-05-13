@@ -53,6 +53,12 @@ governance:
     max_open_prs_per_repo: 1
     max_prs_per_repo_per_day: 3
     min_minutes_between_prs_per_repo: 30
+    max_open_prs_per_org: 3
+    max_prs_per_org_per_day: 5
+    min_minutes_between_prs_per_org: 60
+    max_open_prs_global: 10
+    max_prs_global_per_day: 10
+    min_minutes_between_prs_global: 15
   contribution_classes:
     allowed:
       - docs
@@ -61,7 +67,13 @@ governance:
   kill_switches:
     global: false
     repositories: []
+    organizations: []
     agents: []
+  external_live:
+    poll_interval_seconds: 21600
+    require_maintainer_fit: true
+    require_spam_risk_review: true
+    allow_public_comments: true
 
 controller:
   enabled: false

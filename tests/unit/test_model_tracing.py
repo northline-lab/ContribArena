@@ -62,8 +62,38 @@ class TracingModelProviderTest(unittest.TestCase):
             self.assertEqual(["model_turn.started", "model_turn.failed"], _event_names(events))
             failed = events[1]["payload"]
             self.assertEqual("RuntimeError", failed["error_type"])
+            self.assertEqual("model_runtime", failed["layer"])
+            self.assertEqual("responses/*", failed["provider_path"])
+            self.assertEqual("responses/test-model", failed["model_alias"])
+            self.assertEqual("provider_error", failed["error_kind"])
+            self.assertEqual(0, failed["retry_attempted"])
+            self.assertEqual("skipped", failed["retry_outcome"])
             self.assertNotIn(fake_secret, failed["error"])
             self.assertIn("sk-[REDACTED]", failed["error"])
+
+    def test_retries_transient_model_turn_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "trace.jsonl"
+            fake = FakeModel(errors=[RuntimeError("HTTP 503 unavailable")])
+            model = TracingModelProvider(
+                FakeModelProvider(fake),
+                TraceWriter(path, "run-1"),
+                heartbeat_interval_seconds=0,
+            ).get_model("compatible/test-model")
+            model._RETRY_BACKOFF_SECONDS = (0, 0, 0)  # type: ignore[attr-defined]
+
+            response = asyncio.run(_get_response(model))
+
+            self.assertEqual("req-1", response.request_id)
+            events = _events(path)
+            self.assertEqual(
+                ["model_turn.started", "model_turn.retry", "model_turn.finished"],
+                _event_names(events),
+            )
+            retry = events[1]["payload"]
+            self.assertEqual("model_runtime", retry["layer"])
+            self.assertEqual("http_503", retry["error_kind"])
+            self.assertEqual(1, retry["retry_attempted"])
 
     def test_traces_heartbeat_during_long_model_turn(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -118,9 +148,15 @@ class FakeModelProvider(ModelProvider):
 
 
 class FakeModel(Model):
-    def __init__(self, delay_seconds: float = 0, error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        delay_seconds: float = 0,
+        error: Exception | None = None,
+        errors: list[Exception] | None = None,
+    ) -> None:
         self.delay_seconds = delay_seconds
         self.error = error
+        self.errors = list(errors or [])
 
     async def get_response(
         self,
@@ -138,6 +174,8 @@ class FakeModel(Model):
     ) -> ModelResponse:
         if self.delay_seconds:
             await asyncio.sleep(self.delay_seconds)
+        if self.errors:
+            raise self.errors.pop(0)
         if self.error is not None:
             raise self.error
         return ModelResponse(

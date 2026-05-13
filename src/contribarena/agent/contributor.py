@@ -278,12 +278,20 @@ def _candidate_ref(config: RunConfig, owner: str, repo: str) -> RepoCandidate:
 
 
 def build_agent_instructions(config: RunConfig) -> str:
-    boundary = (
-        "Owned-live mode still does not give you direct GitHub write authority; submit a "
-        "minimal verified patch and the harness will handle governed branch push and PR creation. "
-        if config.run.mode == "owned_live"
-        else "Shadow mode means no GitHub writes. "
-    )
+    if config.run.mode == "owned_live":
+        boundary = (
+            "Owned-live mode still does not give you direct GitHub write authority; submit a "
+            "minimal verified patch and the harness will handle governed branch push and PR creation. "
+        )
+    elif config.run.mode == "external_live":
+        boundary = (
+            "External-live mode still does not give you direct GitHub write authority; freely "
+            "discover an eligible external repository, choose a defensibly low-risk task, and "
+            "submit a minimal verified patch. The harness will handle fork-only PR creation and "
+            "lifecycle governance. "
+        )
+    else:
+        boundary = "Shadow mode means no GitHub writes. "
     base = (
         "You are an autonomous open-source contributor running inside ContribArena. "
         f"{boundary}Repository code interaction must go through workspace or ACI tools. "
@@ -312,7 +320,9 @@ def build_agent_instructions(config: RunConfig) -> str:
         return (
             base
             + " Use the provided GitHub tools to discover and select exactly one low-risk task. "
-            "Make the smallest useful reviewable change."
+            "For external-live runs, avoid repositories with anti-AI or anti-bot contribution "
+            "language and include maintainer-fit reasoning in the repo profile. Make the smallest "
+            "useful reviewable change."
         )
     return (
         base + " This run has an explicit issue/problem statement. Do not self-select a typo, "

@@ -9,6 +9,10 @@ from contribarena.tools.github_client import GitHubClient, repo_api_path
 
 LABEL_METADATA: dict[str, tuple[str, str]] = {
     "contribarena-live": ("0e8a16", "Opened by the ContribArena owned-live harness"),
+    "contribarena-external-live": (
+        "5319e7",
+        "Opened by the ContribArena external-live harness",
+    ),
     "issue-solving": ("1d76db", "ContribArena issue-solving run"),
     "risk-low": ("c2e0c6", "Low-risk contribution"),
     "risk-medium": ("fbca04", "Medium-risk contribution"),
@@ -42,6 +46,44 @@ class ForkEnsureResult:
 class LabelOperationResult:
     ok: bool
     labels: list[str]
+    error: str = ""
+    source: str = ""
+    status_code: int | None = None
+
+
+@dataclass(frozen=True)
+class PullRequestStatusResult:
+    ok: bool
+    number: int
+    state: str = ""
+    merged: bool = False
+    url: str = ""
+    title: str = ""
+    head_sha: str = ""
+    head_ref: str = ""
+    base_ref: str = ""
+    draft: bool = False
+    comments: int = 0
+    review_comments: int = 0
+    error: str = ""
+    source: str = ""
+    status_code: int | None = None
+
+
+@dataclass(frozen=True)
+class PullRequestReviewSignal:
+    author: str = ""
+    state: str = ""
+    body: str = ""
+    submitted_at: str = ""
+    url: str = ""
+
+
+@dataclass(frozen=True)
+class IssueCommentResult:
+    ok: bool
+    id: int | None = None
+    url: str = ""
     error: str = ""
     source: str = ""
     status_code: int | None = None
@@ -196,6 +238,115 @@ class GitHubPullRequestClient:
         return LabelOperationResult(
             ok=True,
             labels=normalized,
+            source=response.source,
+            status_code=response.status_code,
+        )
+
+    def get_pr(self, *, owner: str, repo: str, number: int) -> PullRequestStatusResult:
+        response = self.client.rest_json(
+            "GET",
+            repo_api_path(owner, repo, f"pulls/{number}"),
+            token_env=self.token_env,
+        )
+        if not response.ok:
+            return PullRequestStatusResult(
+                ok=False,
+                number=number,
+                error=response.error,
+                source=response.source,
+                status_code=response.status_code,
+            )
+        if not isinstance(response.data, dict):
+            return PullRequestStatusResult(
+                ok=False,
+                number=number,
+                error="GitHub PR response was not a JSON object",
+                source=response.source,
+                status_code=response.status_code,
+            )
+        head = response.data.get("head")
+        base = response.data.get("base")
+        return PullRequestStatusResult(
+            ok=True,
+            number=number,
+            state=str(response.data.get("state") or ""),
+            merged=bool(response.data.get("merged") or False),
+            url=str(response.data.get("html_url") or response.data.get("url") or ""),
+            title=str(response.data.get("title") or ""),
+            head_sha=str(head.get("sha") if isinstance(head, dict) else ""),
+            head_ref=str(head.get("ref") if isinstance(head, dict) else ""),
+            base_ref=str(base.get("ref") if isinstance(base, dict) else ""),
+            draft=bool(response.data.get("draft") or False),
+            comments=int(response.data.get("comments") or 0),
+            review_comments=int(response.data.get("review_comments") or 0),
+            source=response.source,
+            status_code=response.status_code,
+        )
+
+    def list_reviews(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        number: int,
+    ) -> list[PullRequestReviewSignal]:
+        response = self.client.rest_json(
+            "GET",
+            repo_api_path(owner, repo, f"pulls/{number}/reviews"),
+            params={"per_page": 100},
+            token_env=self.token_env,
+        )
+        if not response.ok or not isinstance(response.data, list):
+            return []
+        reviews: list[PullRequestReviewSignal] = []
+        for item in response.data:
+            if not isinstance(item, dict):
+                continue
+            user = item.get("user")
+            author = str(user.get("login") if isinstance(user, dict) else "")
+            reviews.append(
+                PullRequestReviewSignal(
+                    author=author,
+                    state=str(item.get("state") or ""),
+                    body=str(item.get("body") or ""),
+                    submitted_at=str(item.get("submitted_at") or ""),
+                    url=str(item.get("html_url") or ""),
+                )
+            )
+        return reviews
+
+    def create_issue_comment(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        issue_number: int,
+        body: str,
+    ) -> IssueCommentResult:
+        response = self.client.rest_json(
+            "POST",
+            repo_api_path(owner, repo, f"issues/{issue_number}/comments"),
+            json_body={"body": body},
+            token_env=self.token_env,
+        )
+        if not response.ok:
+            return IssueCommentResult(
+                ok=False,
+                error=response.error,
+                source=response.source,
+                status_code=response.status_code,
+            )
+        if not isinstance(response.data, dict):
+            return IssueCommentResult(
+                ok=False,
+                error="GitHub comment response was not a JSON object",
+                source=response.source,
+                status_code=response.status_code,
+            )
+        return IssueCommentResult(
+            ok=True,
+            id=response.data.get("id") if isinstance(response.data.get("id"), int) else None,
+            url=str(response.data.get("html_url") or response.data.get("url") or ""),
             source=response.source,
             status_code=response.status_code,
         )

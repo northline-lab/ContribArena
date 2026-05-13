@@ -92,6 +92,19 @@ class ProviderActionGuardTest(unittest.TestCase):
         self.assertEqual("invalid_tool_arguments", payload["recovery_kind"])
         self.assertIn("missing required argument", payload["message"])
 
+    def test_recovery_tool_call_ids_are_unique(self) -> None:
+        response = _model_response([_tool_call("sample_tool", {})])
+
+        first = guard_model_response(response, [_sample_tool, _recovery_tool]).output[0]
+        second = guard_model_response(response, [_sample_tool, _recovery_tool]).output[0]
+
+        self.assertIsInstance(first, ResponseFunctionToolCall)
+        self.assertIsInstance(second, ResponseFunctionToolCall)
+        self.assertNotEqual(first.call_id, second.call_id)
+        self.assertEqual(first.call_id, first.id)
+        self.assertEqual(second.call_id, second.id)
+        self.assertTrue(first.call_id.startswith("contribarena-invalid-action-recovery-"))
+
     def test_accepts_single_valid_tool_call(self) -> None:
         response = _model_response([_tool_call("sample_tool", {"path": "repo/app.py"})])
 

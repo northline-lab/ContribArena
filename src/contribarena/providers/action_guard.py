@@ -4,6 +4,7 @@ import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
+from uuid import uuid4
 
 from agents import ModelSettings
 from agents.agent_output import AgentOutputSchemaBase
@@ -270,6 +271,7 @@ def _looks_like_json(text: str) -> bool:
 
 
 def _recovery_call(violation: ToolActionViolation) -> ResponseFunctionToolCall:
+    recovery_id = f"contribarena-invalid-action-recovery-{uuid4().hex[:12]}"
     return ResponseFunctionToolCall(
         arguments=json.dumps(
             {
@@ -279,8 +281,8 @@ def _recovery_call(violation: ToolActionViolation) -> ResponseFunctionToolCall:
             },
             ensure_ascii=True,
         ),
-        call_id="contribarena-invalid-action-recovery",
+        call_id=recovery_id,
         name=RECOVERY_TOOL_NAME,
         type="function_call",
-        id="contribarena-invalid-action-recovery",
+        id=recovery_id,
     )

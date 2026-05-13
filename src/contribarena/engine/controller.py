@@ -1,20 +1,31 @@
 from __future__ import annotations
 
+import json
+import re
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
 from contribarena.config.schema import RunConfig
+from contribarena.engine.external_lifecycle import (
+    lifecycle_record_due,
+    mark_lifecycle_observation_failed,
+    observe_lifecycle_record,
+)
 from contribarena.engine.middleware.governance import (
     GovernanceMiddleware,
     load_governance_state,
     record_governance_attempt,
     save_governance_state,
+    update_governance_pr_state,
+    upsert_lifecycle_record,
 )
 from contribarena.engine.runtime_config import apply_output_dir
 from contribarena.engine.runner import RunResult, Runner
-from contribarena.models import GovernanceDecision
+from contribarena.models import GovernanceDecision, GovernanceState, MaintainerSignal
+from contribarena.tools.github_pr import GitHubPullRequestClient
 
 
 class RunLauncher(Protocol):
@@ -54,9 +65,11 @@ class LocalController:
         self,
         launcher: RunLauncher | None = None,
         governance: GovernanceMiddleware | None = None,
+        pr_client: object | None = None,
     ) -> None:
         self.launcher = launcher or Runner()
         self.governance = governance or GovernanceMiddleware()
+        self.pr_client = pr_client
 
     def run(
         self,
@@ -84,6 +97,32 @@ class LocalController:
         output_dir: Path | None = None,
         verbose: bool = False,
     ) -> ControllerTickResult:
+        if config.run.mode == "external_live":
+            lifecycle_tick = self._run_external_lifecycle_tick(config)
+            if lifecycle_tick is not None:
+                return lifecycle_tick
+            state = load_governance_state(config)
+            decision = self.governance.evaluate_run_start(
+                config=config,
+                target_owner="external-live",
+                target_repo="discovery",
+                state=state,
+                actor=_authenticated_actor(config, self.pr_client),
+            )
+            if not decision.passed:
+                record_governance_attempt(
+                    state,
+                    repository=decision.target_repository,
+                    status="skipped",
+                    decision_id=decision.id,
+                    action=decision.action,
+                )
+                save_governance_state(config, state)
+                return ControllerTickResult(status="blocked", decision=decision)
+            run_result = self.launcher.run(config, output_dir=output_dir, verbose=verbose)
+            status = "run_completed" if run_result.status == "completed" else "run_failed"
+            return ControllerTickResult(status=status, decision=decision, run_result=run_result)
+
         if not config.discovery.candidates:
             raise ValueError("controller requires a configured target repository")
         candidate = config.discovery.candidates[0]
@@ -121,3 +160,160 @@ class LocalController:
             decision=decision,
             run_result=run_result,
         )
+
+    def _run_external_lifecycle_tick(
+        self,
+        config: RunConfig,
+    ) -> ControllerTickResult | None:
+        state = load_governance_state(config)
+        due_records = [
+            record for record in state.lifecycle_records if lifecycle_record_due(record)
+        ]
+        if not due_records:
+            return None
+        client = self.pr_client or GitHubPullRequestClient(
+            token_env=config.governance.bot_identity.token_env
+        )
+        terminal_seen = False
+        for record in due_records:
+            owner, repo = record.repository.split("/", 1)
+            get_pr = getattr(client, "get_pr", None)
+            get_check_runs = getattr(client, "get_check_runs", None)
+            list_reviews = getattr(client, "list_reviews", None)
+            try:
+                pr_status = get_pr(owner=owner, repo=repo, number=record.number) if get_pr else None
+                ref = (
+                    pr_status.head_sha
+                    if pr_status is not None and getattr(pr_status, "head_sha", "")
+                    else record.head_sha
+                )
+                ci_status = (
+                    get_check_runs(owner=owner, repo=repo, ref=ref)
+                    if get_check_runs and ref
+                    else None
+                )
+                reviews = (
+                    list_reviews(owner=owner, repo=repo, number=record.number)
+                    if list_reviews
+                    else []
+                )
+            except Exception as exc:
+                safe_error = _safe_log_error(str(exc))
+                updated = mark_lifecycle_observation_failed(
+                    record=record,
+                    error=safe_error,
+                    poll_interval_seconds=(
+                        config.governance.external_live.poll_interval_seconds
+                    ),
+                )
+                upsert_lifecycle_record(state, updated)
+                _append_external_lifecycle_log(
+                    config,
+                    updated.originating_run_dir,
+                    {
+                        "ts": datetime.now(UTC).isoformat(),
+                        "event": "lifecycle_observe_failed",
+                        "repository": updated.repository,
+                        "number": updated.number,
+                        "url": updated.url,
+                        "state": updated.state,
+                        "lifecycle_status": updated.lifecycle_status,
+                        "retry_count": updated.lifecycle_retry_count,
+                        "next_poll_at": updated.next_poll_at,
+                        "error": safe_error,
+                    },
+                )
+                continue
+            observation = observe_lifecycle_record(
+                record=record,
+                pr_status=pr_status,
+                ci_status=ci_status,
+                reviews=reviews,
+                poll_interval_seconds=config.governance.external_live.poll_interval_seconds,
+            )
+            _append_maintainer_signals(state, observation.record.maintainer_signals)
+            upsert_lifecycle_record(state, observation.record)
+            update_governance_pr_state(
+                state,
+                repository=observation.record.repository,
+                number=observation.record.number,
+                pr_state=observation.record.state,
+            )
+            _append_external_lifecycle_log(
+                config,
+                observation.record.originating_run_dir,
+                {
+                    "ts": datetime.now(UTC).isoformat(),
+                    "event": "lifecycle_observed",
+                    "repository": observation.record.repository,
+                    "number": observation.record.number,
+                    "url": observation.record.url,
+                    "state": observation.record.state,
+                    "lifecycle_status": observation.record.lifecycle_status,
+                    "ci_status": observation.record.ci_status,
+                    "review_count": len(reviews),
+                    "next_poll_at": observation.record.next_poll_at,
+                },
+            )
+            terminal_seen = terminal_seen or observation.action == "terminal"
+        save_governance_state(config, state)
+        return ControllerTickResult(
+            status="lifecycle_terminal" if terminal_seen else "lifecycle_tracked"
+        )
+
+
+def _authenticated_actor(config: RunConfig, pr_client: object | None) -> str:
+    client = pr_client or GitHubPullRequestClient(token_env=config.governance.bot_identity.token_env)
+    authenticated_actor = getattr(client, "authenticated_actor", None)
+    if authenticated_actor is None:
+        return ""
+    return str(authenticated_actor() or "")
+
+
+def _append_external_lifecycle_log(
+    config: RunConfig,
+    originating_run_dir: str,
+    entry: dict[str, object],
+) -> None:
+    path = (
+        Path(originating_run_dir) / "pr_review_log.jsonl"
+        if originating_run_dir
+        else config.artifacts.output_root / "pr_review_log.jsonl"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Phase 0 controller ticks are single-process; durable concurrent writers belong
+    # with the later SQLite or hosted state backend.
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry, ensure_ascii=True) + "\n")
+
+
+def _safe_log_error(message: str) -> str:
+    redacted = re.sub(r"https://x-access-token:[^@\s]+@", "https://x-access-token:***@", message)
+    redacted = re.sub(r"github_pat_[A-Za-z0-9_]+", "github_pat_[REDACTED]", redacted)
+    redacted = re.sub(r"ghp_[A-Za-z0-9_]+", "ghp_[REDACTED]", redacted)
+    redacted = re.sub(r"sk-[A-Za-z0-9_-]+", "sk-[REDACTED]", redacted)
+    return redacted[:500]
+
+
+def _append_maintainer_signals(
+    state: GovernanceState,
+    signals: list[MaintainerSignal],
+) -> None:
+    existing = {
+        (
+            signal.repository,
+            signal.kind,
+            signal.source,
+        )
+        for signal in state.maintainer_signals
+    }
+    for signal in signals:
+        key = (
+            signal.repository,
+            signal.kind,
+            signal.source,
+        )
+        if key in existing:
+            continue
+        state.maintainer_signals.append(signal)
+        existing.add(key)

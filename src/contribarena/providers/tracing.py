@@ -44,6 +44,9 @@ class TracingModelProvider(ModelProvider):
 
 
 class TracingModel(Model):
+    _MAX_MODEL_ATTEMPTS = 4
+    _RETRY_BACKOFF_SECONDS = (1.0, 2.0, 4.0)
+
     def __init__(
         self,
         model: Model,
@@ -84,22 +87,41 @@ class TracingModel(Model):
             conversation_id=conversation_id,
         )
         heartbeat = self._start_heartbeat(turn_id, started)
+        retries = 0
         try:
-            response = await self._model.get_response(
-                system_instructions,
-                input,
-                model_settings,
-                tools,
-                output_schema,
-                handoffs,
-                tracing,
-                previous_response_id=previous_response_id,
-                conversation_id=conversation_id,
-                prompt=prompt,
-            )
-        except Exception as exc:
-            self._write_failed(turn_id, started, exc)
-            raise
+            while True:
+                try:
+                    response = await self._model.get_response(
+                        system_instructions,
+                        input,
+                        model_settings,
+                        tools,
+                        output_schema,
+                        handoffs,
+                        tracing,
+                        previous_response_id=previous_response_id,
+                        conversation_id=conversation_id,
+                        prompt=prompt,
+                    )
+                    break
+                except Exception as exc:
+                    error_kind = _classify_model_runtime_error(exc)
+                    if _should_retry_model_runtime_error(error_kind, retries):
+                        delay = self._RETRY_BACKOFF_SECONDS[retries]
+                        retries += 1
+                        self._write_retry(turn_id, started, exc, retries, delay, error_kind)
+                        await asyncio.sleep(delay)
+                        continue
+                    retry_outcome = "exhausted" if retries else "skipped"
+                    self._write_failed(
+                        turn_id,
+                        started,
+                        exc,
+                        retry_attempted=retries,
+                        retry_outcome=retry_outcome,
+                        error_kind=error_kind,
+                    )
+                    raise
         finally:
             await _cancel_task(heartbeat)
         self._write_finished(turn_id, started, response)
@@ -149,7 +171,14 @@ class TracingModel(Model):
                     event_count += 1
                     yield event
             except Exception as exc:
-                self._write_failed(turn_id, started, exc)
+                self._write_failed(
+                    turn_id,
+                    started,
+                    exc,
+                    retry_attempted=0,
+                    retry_outcome="skipped",
+                    error_kind=_classify_model_runtime_error(exc),
+                )
                 raise
             finally:
                 await _cancel_task(heartbeat)
@@ -223,17 +252,65 @@ class TracingModel(Model):
             },
         )
 
-    def _write_failed(self, turn_id: str, started: float, exc: Exception) -> None:
+    def _write_retry(
+        self,
+        turn_id: str,
+        started: float,
+        exc: Exception,
+        retry_attempted: int,
+        delay_seconds: float,
+        error_kind: str,
+    ) -> None:
+        self._trace.write(
+            RunState.MODEL_TURN_FAILED,
+            "model_turn.retry",
+            {
+                "turn_id": turn_id,
+                "layer": "model_runtime",
+                "model": self._model_name,
+                "model_alias": self._model_name,
+                "provider": _provider_prefix(self._model_name),
+                "provider_path": _provider_path(self._model_name),
+                "elapsed_ms": _elapsed_ms(started),
+                "error_type": type(exc).__name__,
+                "error_kind": error_kind,
+                "error": _safe_error_message(str(exc)),
+                "error_message": _safe_error_message(str(exc)),
+                "retry_attempted": retry_attempted,
+                "retry_outcome": "not_applicable",
+                "next_retry_delay_seconds": delay_seconds,
+            },
+        )
+
+    def _write_failed(
+        self,
+        turn_id: str,
+        started: float,
+        exc: Exception,
+        *,
+        retry_attempted: int,
+        retry_outcome: str,
+        error_kind: str,
+    ) -> None:
+        safe_error = _safe_error_message(str(exc))
         self._trace.write(
             RunState.MODEL_TURN_FAILED,
             "model_turn.failed",
             {
                 "turn_id": turn_id,
+                "layer": "model_runtime",
                 "model": self._model_name,
+                "model_alias": self._model_name,
                 "provider": _provider_prefix(self._model_name),
+                "provider_path": _provider_path(self._model_name),
                 "elapsed_ms": _elapsed_ms(started),
                 "error_type": type(exc).__name__,
-                "error": _safe_error_message(str(exc)),
+                "error_kind": error_kind,
+                "error": safe_error,
+                "error_message": safe_error,
+                "prior_action_summary": "",
+                "retry_attempted": retry_attempted,
+                "retry_outcome": retry_outcome,
             },
         )
 
@@ -292,6 +369,12 @@ def _provider_prefix(model_name: str) -> str:
     return model_name.split("/", 1)[0]
 
 
+def _provider_path(model_name: str) -> str:
+    if "/" not in model_name:
+        return "default"
+    return f"{_provider_prefix(model_name)}/*"
+
+
 def _elapsed_ms(started: float) -> int:
     return int((time.monotonic() - started) * 1000)
 
@@ -316,3 +399,63 @@ def _safe_error_message(message: str) -> str:
     redacted = re.sub(r"ghp_[A-Za-z0-9_]+", "ghp_[REDACTED]", redacted)
     redacted = re.sub(r"sk-[A-Za-z0-9_-]+", "sk-[REDACTED]", redacted)
     return redacted[:500]
+
+
+def _classify_model_runtime_error(exc: Exception) -> str:
+    message = str(exc).lower()
+    status_code = _status_code_from_error_message(message)
+    if "duplicate" in message and "tool_call_id" in message:
+        return "duplicate_tool_call_id"
+    if "unsupported" in message and "tool" in message:
+        return "unsupported_tool_format"
+    if "tool_calls" in message and "tool messages" in message:
+        return "invalid_tool_sequence"
+    if "context" in message and ("length" in message or "window" in message):
+        return "context_window_exceeded"
+    if status_code in {408, 429, 500, 502, 503, 504}:
+        return f"http_{status_code}"
+    if status_code in {400, 401, 403, 404}:
+        return f"http_{status_code}"
+    if any(
+        marker in message
+        for marker in (
+            "socket reset",
+            "connection reset",
+            "tcp reset",
+            "dns",
+            "name resolution",
+            "clientpayloaderror",
+            "incomplete response",
+            "timeout",
+            "timed out",
+        )
+    ):
+        return "transport_transient"
+    if status_code is not None and status_code >= 500:
+        return "uncertain_provider_error"
+    return "provider_error"
+
+
+def _should_retry_model_runtime_error(error_kind: str, retries_attempted: int) -> bool:
+    if retries_attempted >= TracingModel._MAX_MODEL_ATTEMPTS - 1:
+        return False
+    if error_kind in {
+        "http_408",
+        "http_429",
+        "http_500",
+        "http_502",
+        "http_503",
+        "http_504",
+        "transport_transient",
+    }:
+        return True
+    if error_kind == "uncertain_provider_error":
+        return retries_attempted < 1
+    return False
+
+
+def _status_code_from_error_message(message: str) -> int | None:
+    match = re.search(r"\b(?:http\s*)?(400|401|403|404|408|429|500|502|503|504)\b", message)
+    if not match:
+        return None
+    return int(match.group(1))

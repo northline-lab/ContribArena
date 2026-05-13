@@ -469,6 +469,84 @@ class GithubToolsTest(unittest.TestCase):
             fake.calls,
         )
 
+    def test_github_pr_client_reads_pr_reviews_and_posts_event_comment(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str, dict | None]] = []
+
+            def rest_json(
+                self,
+                method: str,
+                path: str,
+                params: dict | None = None,
+                json_body: dict | None = None,
+                token_env: str | None = None,
+            ) -> GitHubResponse:
+                self.calls.append((method, path, json_body))
+                if path.endswith("/pulls/42") and method == "GET":
+                    return GitHubResponse(
+                        ok=True,
+                        source="fake",
+                        data={
+                            "number": 42,
+                            "state": "open",
+                            "merged": False,
+                            "html_url": "https://github.com/owner/project/pull/42",
+                            "title": "Improve docs",
+                            "head": {"sha": "abc123", "ref": "contribarena/docs"},
+                            "base": {"ref": "main"},
+                            "comments": 1,
+                            "review_comments": 2,
+                        },
+                    )
+                if path.endswith("/pulls/42/reviews") and method == "GET":
+                    return GitHubResponse(
+                        ok=True,
+                        source="fake",
+                        data=[
+                            {
+                                "user": {"login": "maintainer"},
+                                "state": "CHANGES_REQUESTED",
+                                "body": "Please adjust the test.",
+                                "submitted_at": "2026-05-13T00:00:00Z",
+                                "html_url": "https://github.com/owner/project/pull/42#review",
+                            }
+                        ],
+                    )
+                if path.endswith("/issues/42/comments") and method == "POST":
+                    return GitHubResponse(
+                        ok=True,
+                        source="fake",
+                        data={
+                            "id": 99,
+                            "html_url": "https://github.com/owner/project/pull/42#comment",
+                        },
+                    )
+                raise AssertionError(f"unexpected call: {method} {path}")
+
+        fake = FakeClient()
+        client = GitHubPullRequestClient(client=fake, token_env="BOT_TOKEN")  # type: ignore[arg-type]
+
+        pr_status = client.get_pr(owner="owner", repo="project", number=42)
+        reviews = client.list_reviews(owner="owner", repo="project", number=42)
+        comment = client.create_issue_comment(
+            owner="owner",
+            repo="project",
+            issue_number=42,
+            body="CI failure fixed in the latest push.",
+        )
+
+        self.assertTrue(pr_status.ok)
+        self.assertEqual("abc123", pr_status.head_sha)
+        self.assertEqual("main", pr_status.base_ref)
+        self.assertEqual("CHANGES_REQUESTED", reviews[0].state)
+        self.assertTrue(comment.ok)
+        self.assertEqual(99, comment.id)
+        self.assertEqual(
+            ("POST", "/repos/owner/project/issues/42/comments", {"body": "CI failure fixed in the latest push."}),
+            fake.calls[-1],
+        )
+
 
 def _candidate() -> RepoCandidate:
     return RepoCandidate(

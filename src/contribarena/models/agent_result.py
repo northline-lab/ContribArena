@@ -11,6 +11,7 @@ class RepoSummary(BaseModel):
     owner: str
     name: str
     url: str
+    default_branch: str = ""
 
 
 class OpportunitySummary(BaseModel):

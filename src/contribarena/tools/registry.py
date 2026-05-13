@@ -748,12 +748,7 @@ def _annotate_recovery_retry(capture: ArtifactCapture, result: AciResult) -> Aci
     terminal_after_retries = retry_count >= 3
     terminal_status = result.terminal_status
     if terminal_after_retries and terminal_status is None:
-        terminal_status = (
-            "format_exhausted"
-            if result.recovery_kind
-            in {"invalid_tool_arguments", "malformed_action", "multi_tool_action", "unknown_tool"}
-            else "blocked"
-        )
+        terminal_status = "failed_to_recover"
     return result.model_copy(
         update={
             "retry_count": retry_count,

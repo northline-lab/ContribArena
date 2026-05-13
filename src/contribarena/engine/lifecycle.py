@@ -390,6 +390,8 @@ def _pr_title(config: RunConfig, result: AgentFinalResult) -> str:
 def _pr_lifecycle_label(config: RunConfig) -> str:
     if config.run.mode == "owned_live":
         return "contribarena-live"
+    if config.run.mode == "external_live":
+        return "contribarena-external-live"
     return "contribarena-dry-run"
 
 
@@ -398,6 +400,15 @@ def _pr_notice(config: RunConfig) -> tuple[str, str]:
         return (
             "## Live PR Notice",
             "This PR was opened by the ContribArena harness after local quality and governance gates passed.",
+        )
+    if config.run.mode == "external_live":
+        return (
+            "## External Live PR Notice",
+            (
+                "This PR was opened by the ContribArena harness through a bot account "
+                "after local quality, eligibility, maintainer-fit, and governance gates passed. "
+                "The change was AI-assisted and is intended to be low-risk and reviewable."
+            ),
         )
     return (
         "## Dry-Run Notice",

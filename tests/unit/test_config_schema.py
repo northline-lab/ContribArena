@@ -11,6 +11,7 @@ from contribarena.config import load_run_config, write_starter_config
 from contribarena.config.schema import (
     DiscoveryConfig,
     GovernanceConfig,
+    GovernanceRateLimits,
     IssueConfig,
     OwnedRepositoryPolicy,
     PrSubmissionConfig,
@@ -161,6 +162,57 @@ class ConfigSchemaTest(unittest.TestCase):
         )
 
         self.assertEqual("upstream_branch", policy.pr_submission.strategy)
+
+    def test_external_live_allows_free_discovery_without_owned_repository(self) -> None:
+        config = RunConfig(
+            run=RunSection(mode="external_live"),
+            discovery=DiscoveryConfig(query="language:Python good first issue"),
+            workspace=WorkspaceConfig(),
+            governance=GovernanceConfig(
+                live_enabled=True,
+                rate_limits=GovernanceRateLimits(max_open_prs_global=2),
+            ),
+        )
+
+        self.assertEqual("external_live", config.run.mode)
+        self.assertEqual([], config.discovery.candidates)
+        self.assertEqual(21_600, config.governance.external_live.poll_interval_seconds)
+
+    def test_external_live_rejects_issue_mode_and_upstream_branch_policy(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "does not support fixed issue-solving"):
+            RunConfig(
+                run=RunSection(mode="external_live"),
+                discovery=DiscoveryConfig(
+                    candidates=[
+                        RepoCandidate(
+                            owner="example",
+                            repo="repo",
+                            url="https://github.com/example/repo",
+                        )
+                    ]
+                ),
+                issue=IssueConfig(
+                    problem_statement="Fix a configured issue.",
+                    clone_url="https://github.com/example/repo.git",
+                ),
+                workspace=WorkspaceConfig(),
+            )
+
+        with self.assertRaisesRegex(ValidationError, "fork-only"):
+            RunConfig(
+                run=RunSection(mode="external_live"),
+                discovery=DiscoveryConfig(query="language:Python"),
+                workspace=WorkspaceConfig(),
+                governance=GovernanceConfig(
+                    owned_repositories=[
+                        OwnedRepositoryPolicy(
+                            owner="example",
+                            repo="repo",
+                            pr_submission=PrSubmissionConfig(strategy="upstream_branch"),
+                        )
+                    ]
+                ),
+            )
 
 
 if __name__ == "__main__":
