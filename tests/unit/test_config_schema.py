@@ -38,6 +38,7 @@ class ConfigSchemaTest(unittest.TestCase):
             self.assertTrue(config.memory.enabled)
             self.assertEqual("noop", config.memory.backend)
             self.assertTrue(config.memory.history_index_enabled)
+            self.assertTrue(config.guidance.enabled)
             self.assertEqual(
                 "openai/openai-agents-python", config.discovery.candidates[0].full_name
             )

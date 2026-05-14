@@ -117,7 +117,9 @@ def build_goal_prompt(config: RunConfig) -> str:
         'Minimal aci_apply_patch example: operations_json=[{"type":"update_file","path":"repo/app.py","diff":"*** Begin Patch\\n*** Update File: repo/app.py\\n@@\\n old context\\n-old line\\n+new line\\n*** End Patch"}]. '
         "Do not edit files through workspace_run, shell redirection, sed, python scripts, or git commands; "
         "those edits lack unified-editor provenance and submit-time review will reject them. "
-        "Before editing, briefly check for CONTRIBUTING.md, .github guidance, or PR templates when they are easy to inspect, and follow them when present. "
+        "Call aci_memory_get_context(scope='run') early; it returns guidance availability, the guidance entry path when available, and prior run facts. "
+        "If guidance is available, read the returned path relative to the workspace root, not repo/. "
+        "Before editing, check repository-local guidance such as AGENTS.md, CONTRIBUTING.md, or .github templates when present. "
         "If a tool output is truncated or too broad, narrow the query. If a command is missing or the environment is blocked, "
         "record the blocker instead of making broad setup changes."
         "\n\nRecovery templates:\n"
@@ -167,7 +169,8 @@ def _build_issue_solving_prompt(config: RunConfig) -> str:
         "12. Return the final structured ContribArena result with problem_statement_summary, reproduction_notes, verification_summary, and blockers.\n\n"
         "Completion rule: status may be completed only if the submitted patch directly addresses "
         "the problem statement and at least one local verification command succeeded. Otherwise "
-        "return blocked or failed with explicit reasons. Briefly check and follow repository contribution guidance when it is easy to inspect. Shadow mode means no GitHub writes."
+        "return blocked or failed with explicit reasons. Call aci_memory_get_context(scope='run') early; it returns guidance availability, the guidance entry path when available, and prior run facts. "
+        "If guidance is available, read the returned path relative to the workspace root, not repo/. Then check and follow repository-local guidance such as AGENTS.md, CONTRIBUTING.md, or .github templates when present. Shadow mode means no GitHub writes."
         "\n\nRecovery templates:\n"
         f"{_recovery_template_text()}"
     )

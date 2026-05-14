@@ -13,6 +13,7 @@ from contribarena.memory.redact import redact_payload, redact_text
 from contribarena.memory.schema import (
     MemoryContext,
     MemoryEvent,
+    MemoryHint,
     MemorySearchItem,
     MemorySearchResult,
     MemoryWriteReport,
@@ -79,7 +80,23 @@ class MemoryService:
                 self._failures.append(
                     {"error_kind": "history_index_unavailable", "error_message": str(exc)}
                 )
+        self.context.memory_hints = _memory_hints_from_history(self.context.history_results)
+        self.working.memory_hints = list(self.context.memory_hints)
         return self.context
+
+    def set_guidance_status(
+        self,
+        *,
+        available: bool,
+        skipped_reason: str = "",
+        error: str = "",
+    ) -> None:
+        self.working.guidance.available = available
+        self.working.guidance.skipped_reason = skipped_reason
+        self.working.guidance.error = error
+        self.context.guidance.available = available
+        self.context.guidance.skipped_reason = skipped_reason
+        self.context.guidance.error = error
 
     def record_tool_observation(
         self,
@@ -127,6 +144,19 @@ class MemoryService:
             source_ref=source_ref,
             confidence=_confidence(confidence),
         )
+        if scope != "run":
+            return MemoryWriteResult(
+                success=True,
+                event_ids=[event_id] if event_id else [],
+                degraded=True,
+                skipped_reason="l2_l3_not_implemented",
+                error_kind="l2_l3_not_implemented",
+                error_message=(
+                    "M0.6.1 only updates run-local working memory; repo/global notes "
+                    "are written to the memory event log but are not yet retrievable in "
+                    "future runs."
+                ),
+            )
         return MemoryWriteResult(success=True, event_ids=[event_id] if event_id else [])
 
     def plan_update(
@@ -188,6 +218,7 @@ class MemoryService:
                 results.extend(
                     self._history.search(
                         query,
+                        intent=intent,
                         repo_full_name=self.repo_full_name,
                         limit=max_results - len(results),
                     )
@@ -376,6 +407,60 @@ def _search_working_memory(
                 )
             )
     return results[:max_results]
+
+
+def _memory_hints_from_history(results: list[MemorySearchItem]) -> list[MemoryHint]:
+    hints: list[MemoryHint] = []
+    seen: set[str] = set()
+    for item in results:
+        category = _hint_category(item.record_type)
+        if category is None or category in seen:
+            continue
+        seen.add(category)
+        hints.append(
+            MemoryHint(
+                category=category,
+                summary_line=_hint_summary(category, item),
+                suggested_query=_hint_query(category),
+                suggested_intent=category,
+            )
+        )
+        if len(hints) >= 5:
+            break
+    return hints
+
+
+def _hint_category(record_type: str) -> str | None:
+    if record_type in {"repo_guidance", "working_memory", "memory_event", "memory_context"}:
+        return "repo_context"
+    if record_type in {"verification", "quality_report", "ci_status"}:
+        return "verification"
+    if record_type in {"postmortem", "quality_gate", "tool_result", "trace_event"}:
+        return "failure"
+    if record_type in {"live_action", "review_event", "governance_decision"}:
+        return "external_write"
+    return None
+
+
+def _hint_summary(category: str, item: MemorySearchItem) -> str:
+    labels = {
+        "repo_context": "Prior repository-context evidence is available",
+        "verification": "Prior verification evidence is available",
+        "failure": "Prior failure or recovery evidence is available",
+        "external_write": "Prior external-write or lifecycle evidence is available",
+    }
+    source = item.source_ref or item.record_type or "history"
+    return f"{labels[category]} from {source}."
+
+
+def _hint_query(category: str) -> str:
+    queries = {
+        "repo_context": "repository guidance contribution conventions verification",
+        "verification": "verification test command quality report",
+        "failure": "failure blocker recovery verification error",
+        "external_write": "pull request lifecycle CI review live action",
+    }
+    return queries[category]
 
 
 def _fact_key(value: str) -> str:

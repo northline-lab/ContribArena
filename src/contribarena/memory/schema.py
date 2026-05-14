@@ -29,10 +29,41 @@ class WorkingMemoryNote(BaseModel):
     created_at: str
 
 
+class GuidanceContext(BaseModel):
+    available: bool = True
+    entry_path: str = ".contribarena/guidance/guidance_entry.md"
+    manifest_path: str = ".contribarena/guidance/guidance_manifest.json"
+    path_relative_to: Literal["workspace_root"] = Field(
+        default="workspace_root",
+        description="Guidance paths are relative to the workspace root, not repo/.",
+    )
+    skipped_reason: str = ""
+    error: str = ""
+
+
+class MemoryHint(BaseModel):
+    category: Literal["repo_context", "verification", "failure", "external_write"]
+    summary_line: str = Field(max_length=200)
+    suggested_query: str = Field(max_length=200)
+    suggested_intent: Literal["repo_context", "verification", "failure", "external_write"]
+
+
+class MemoryCapabilities(BaseModel):
+    run_scope_notes: bool = True
+    repo_scope_persistent: bool = False
+    global_scope_persistent: bool = False
+    note: str = (
+        "scope='repo' and scope='global' notes are event-log-only until L2/L3 memory is enabled."
+    )
+
+
 class WorkingMemory(BaseModel):
     schema_version: Literal["1"] = "1"
     run_id: str
     repo_full_name: str = ""
+    guidance: GuidanceContext = Field(default_factory=GuidanceContext)
+    memory_hints: list[MemoryHint] = Field(default_factory=list)
+    memory_capabilities: MemoryCapabilities = Field(default_factory=MemoryCapabilities)
     facts: dict[str, WorkingMemoryFact] = Field(default_factory=dict)
     plan: list[WorkingMemoryPlanItem] = Field(default_factory=list)
     notes: list[WorkingMemoryNote] = Field(default_factory=list)
@@ -46,6 +77,9 @@ class MemoryContext(BaseModel):
     enabled: bool = True
     degraded: bool = False
     backend: str = "noop"
+    guidance: GuidanceContext = Field(default_factory=GuidanceContext)
+    memory_hints: list[MemoryHint] = Field(default_factory=list)
+    memory_capabilities: MemoryCapabilities = Field(default_factory=MemoryCapabilities)
     history_results: list["MemorySearchItem"] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
@@ -69,6 +103,7 @@ class MemoryWriteResult(BaseModel):
     event_ids: list[str] = Field(default_factory=list)
     graphiti_episode_ids: list[str] = Field(default_factory=list)
     history_index_updated: bool = False
+    degraded: bool = False
     skipped_reason: str = ""
     error_kind: str = ""
     error_message: str = ""
@@ -78,6 +113,9 @@ class MemorySearchItem(BaseModel):
     text: str
     source: Literal["graphiti", "history_index", "working_memory"]
     source_ref: str = ""
+    title: str = ""
+    record_type: str = ""
+    reason: str = ""
     score: float = 0.0
     confidence: str = "medium"
     created_at: str = ""

@@ -13,6 +13,7 @@ from contribarena.config.schema import (
     BotIdentityConfig,
     ContributionClassesConfig,
     DiscoveryConfig,
+    GuidanceConfig,
     GovernanceConfig,
     GovernanceRateLimits,
     IssueConfig,
@@ -113,6 +114,10 @@ class FakeMemoryAgent:
         model_provider: object = None,
     ) -> AgentFinalResult:
         self.prompt = prompt
+        memory_context = tools.aci_memory_get_context("run")  # type: ignore[attr-defined]
+        self.memory_context = (
+            json.loads(memory_context.output) if memory_context.success else {}
+        )
         command = tools.workspace_run(  # type: ignore[attr-defined]
             "git clone https://github.com/example/repo.git repo && cd repo && git status --short"
         )
@@ -1475,8 +1480,27 @@ class RunnerM02Test(unittest.TestCase):
 
             guidance = json.loads((result.run_dir / "repo_guidance.json").read_text())
             self.assertTrue(guidance["installed"])
-            self.assertIn(".contribarena/guidance/guidance_entry.md", agent.prompt)
+            self.assertIn("AGENTS.md", guidance["manifest"]["expected_repo_sources"])
+            self.assertIn("aci_memory_get_context(scope='run')", agent.prompt)
+            self.assertIn("AGENTS.md", agent.prompt)
+            self.assertEqual(
+                ".contribarena/guidance/guidance_entry.md",
+                agent.memory_context["guidance"]["entry_path"],
+            )
+            self.assertEqual(
+                "workspace_root",
+                agent.memory_context["guidance"]["path_relative_to"],
+            )
+            memory_context = json.loads((result.run_dir / "memory_context.json").read_text())
+            self.assertEqual(
+                ".contribarena/guidance/guidance_entry.md",
+                memory_context["guidance"]["entry_path"],
+            )
             working = json.loads((result.run_dir / "working_memory.json").read_text())
+            self.assertEqual(
+                ".contribarena/guidance/guidance_entry.md",
+                working["guidance"]["entry_path"],
+            )
             self.assertEqual(
                 "repo/CONTRIBUTING.md",
                 working["facts"]["contributing_checked"]["value"],
@@ -1490,6 +1514,51 @@ class RunnerM02Test(unittest.TestCase):
             self.assertIn("working_memory.json", manifest_names)
             self.assertIn("memory_events.jsonl", manifest_names)
             self.assertIn("memory_write_report.json", manifest_names)
+
+    def test_guidance_disabled_skips_sidecar_and_marks_memory_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _issue_config(tmp_path / "runs")
+            config.memory = MemoryConfig(root=tmp_path / "memory")
+            config.guidance = GuidanceConfig(enabled=False)
+            agent = FakeMemoryAgent()
+
+            result = _run_with_fake_docker(agent, config, tmp_path)
+
+            guidance = json.loads((result.run_dir / "repo_guidance.json").read_text())
+            self.assertFalse(guidance["enabled"])
+            self.assertFalse(guidance["installed"])
+            self.assertFalse(guidance["available"])
+            self.assertEqual("guidance_disabled", guidance["skipped_reason"])
+            self.assertEqual("guidance_disabled", agent.memory_context["guidance"]["skipped_reason"])
+            self.assertFalse(agent.memory_context["guidance"]["available"])
+            memory_context = json.loads((result.run_dir / "memory_context.json").read_text())
+            self.assertFalse(memory_context["guidance"]["available"])
+
+    def test_guidance_install_failure_is_nonfatal_and_marks_memory_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _issue_config(tmp_path / "runs")
+            config.memory = MemoryConfig(root=tmp_path / "memory")
+            agent = FakeIssueAgent()
+
+            result = _run_with_fake_docker(
+                agent,
+                config,
+                tmp_path,
+                guidance_failure=True,
+            )
+
+            self.assertEqual("completed", result.status)
+            guidance = json.loads((result.run_dir / "repo_guidance.json").read_text())
+            self.assertTrue(guidance["enabled"])
+            self.assertFalse(guidance["installed"])
+            self.assertFalse(guidance["available"])
+            self.assertTrue(guidance["degraded"])
+            self.assertIn("guidance write failed", guidance["error"])
+            memory_context = json.loads((result.run_dir / "memory_context.json").read_text())
+            self.assertFalse(memory_context["guidance"]["available"])
+            self.assertIn("guidance write failed", memory_context["guidance"]["error"])
 
     def test_memory_disabled_returns_tool_recovery_and_writes_no_memory_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1696,6 +1765,7 @@ def _run_with_fake_docker(
     pr_client: object | None = None,
     push_failure_stderr: str = "",
     push_success_stdout: str = "",
+    guidance_failure: bool = False,
 ):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
@@ -1712,6 +1782,12 @@ def _run_with_fake_docker(
         if push_success_stdout
         else ""
     )
+    guidance_failure_case = (
+        '    *".contribarena/guidance"*) '
+        'printf "guidance write failed" >&2; exit 1 ;;\n'
+        if guidance_failure
+        else ""
+    )
     docker.write_text(
         "#!/usr/bin/env sh\n"
         'args="$*"\n'
@@ -1724,6 +1800,7 @@ def _run_with_fake_docker(
         f"    *\"cat -- {diff_path}\"*) printf \"def marker():\\n    return 'old'\\n\"; exit 0 ;;\n"
         f"    *\"nl -ba {diff_path}\"*) printf \"     1\\tdef marker():\\n     2\\t    return 'old'\\n\"; exit 0 ;;\n"
         '    *"python3 -m compileall ."*) printf "compile ok\\n"; exit 0 ;;\n'
+        f"{guidance_failure_case}"
         f"{push_failure_case}"
         f"{push_success_case}"
         '    *"git diff --binary -- ."*) '

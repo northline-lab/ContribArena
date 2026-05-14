@@ -22,6 +22,83 @@ TEXT_SUFFIXES = {
     ".patch",
 }
 
+TRACE_RECORD_TYPES = {"trace_event"}
+
+INTENT_ALIASES = {
+    "ci": "verification",
+    "test": "verification",
+    "tests": "verification",
+    "verify": "verification",
+    "verification": "verification",
+    "guidance": "repo_context",
+    "repo": "repo_context",
+    "repo_context": "repo_context",
+    "failure": "failure",
+    "error": "failure",
+    "tool_error": "failure",
+    "provider_error": "failure",
+    "external": "external_write",
+    "external_write": "external_write",
+    "lifecycle": "external_write",
+    "pr": "external_write",
+    "unknown": "unknown",
+}
+
+DEFAULT_PRIORITIES = {
+    "quality_report": 95,
+    "postmortem": 90,
+    "memory_event": 85,
+    "working_memory": 80,
+    "repo_guidance": 75,
+    "memory_context": 70,
+    "verification": 65,
+    "quality_gate": 60,
+    "governance_decision": 55,
+    "ci_status": 50,
+    "live_action": 45,
+    "review_event": 45,
+    "tool_result": 35,
+    "artifact": 25,
+    "trace_event": 0,
+}
+
+INTENT_PRIORITIES = {
+    "verification": {
+        "verification": 100,
+        "quality_report": 95,
+        "ci_status": 90,
+        "quality_gate": 80,
+        "postmortem": 60,
+        "artifact": 35,
+    },
+    "repo_context": {
+        "repo_guidance": 100,
+        "working_memory": 95,
+        "memory_event": 90,
+        "memory_context": 80,
+        "quality_report": 55,
+        "artifact": 35,
+    },
+    "failure": {
+        "postmortem": 100,
+        "quality_gate": 95,
+        "quality_report": 85,
+        "tool_result": 75,
+        "verification": 70,
+        "trace_event": 20,
+        "artifact": 30,
+    },
+    "external_write": {
+        "live_action": 100,
+        "review_event": 95,
+        "governance_decision": 90,
+        "ci_status": 80,
+        "repo_guidance": 45,
+        "quality_report": 40,
+        "artifact": 25,
+    },
+}
+
 
 @dataclass
 class HistoryIndexResult:
@@ -97,6 +174,7 @@ class HistoryIndex:
         self,
         query: str,
         *,
+        intent: str = "unknown",
         repo_full_name: str = "",
         limit: int = 5,
     ) -> list[MemorySearchItem]:
@@ -104,18 +182,20 @@ class HistoryIndex:
         if not terms:
             return []
         match = " OR ".join(terms)
+        resolved_intent = _resolve_intent(intent, query)
         params: list[object] = [match]
         repo_clause = ""
         if repo_full_name:
             repo_clause = "AND (h.repo_full_name = ? OR h.repo_full_name = '')"
             params.append(repo_full_name)
-        params.append(limit)
+        params.append(max(limit * 6, limit))
         with closing(sqlite3.connect(self.db_path)) as conn:
             conn.row_factory = sqlite3.Row
             try:
                 rows = conn.execute(
                     f"""
-                    SELECT h.text, h.source_path, h.created_at, bm25(history_fts) AS score
+                    SELECT h.text, h.source_path, h.record_type, h.created_at,
+                           bm25(history_fts) AS score
                     FROM history_fts
                     JOIN history_records h ON h.record_id = history_fts.record_id
                     WHERE history_fts MATCH ? {repo_clause}
@@ -126,15 +206,30 @@ class HistoryIndex:
                 ).fetchall()
             except sqlite3.OperationalError:
                 rows = []
+        ranked_rows = sorted(
+            (
+                row
+                for row in rows
+                if _include_record_type(str(row["record_type"]), resolved_intent)
+            ),
+            key=lambda row: (
+                -_record_priority(str(row["record_type"]), resolved_intent),
+                float(row["score"] or 0.0),
+                str(row["source_path"]),
+            ),
+        )
         return [
             MemorySearchItem(
                 text=_snippet(str(row["text"])),
                 source="history_index",
                 source_ref=str(row["source_path"]),
+                title=_title_for_record(str(row["source_path"]), str(row["record_type"])),
+                record_type=str(row["record_type"]),
+                reason=_reason_for_record(str(row["record_type"]), resolved_intent),
                 score=float(row["score"] or 0.0),
                 created_at=str(row["created_at"] or ""),
             )
-            for row in rows
+            for row in ranked_rows[:limit]
         ]
 
     def _ensure_schema(self) -> None:
@@ -196,8 +291,12 @@ def _record_type(path: Path) -> str:
         return "tool_result"
     if name == "quality_gate.json":
         return "quality_gate"
+    if name == "quality_report.md":
+        return "quality_report"
     if name == "test_log.txt":
         return "verification"
+    if name == "ci_status.json":
+        return "ci_status"
     if name == "live_action_log.jsonl":
         return "live_action"
     if name == "pr_review_log.jsonl":
@@ -206,6 +305,14 @@ def _record_type(path: Path) -> str:
         return "postmortem"
     if name == "memory_events.jsonl":
         return "memory_event"
+    if name == "working_memory.json":
+        return "working_memory"
+    if name == "memory_context.json":
+        return "memory_context"
+    if name == "repo_guidance.json":
+        return "repo_guidance"
+    if name == "governance_decision.json":
+        return "governance_decision"
     return "artifact"
 
 
@@ -221,6 +328,68 @@ def _query_terms(query: str) -> list[str]:
         if cleaned:
             terms.append(f'"{cleaned}"')
     return terms[:8]
+
+
+def _resolve_intent(intent: str, query: str) -> str:
+    normalized = INTENT_ALIASES.get(intent.strip().lower(), "unknown")
+    if normalized != "unknown":
+        return normalized
+    lowered = query.lower()
+    if any(term in lowered for term in ("test", "pytest", "verify", "ci", "compileall")):
+        return "verification"
+    if any(term in lowered for term in ("guidance", "contributing", "agents.md", "template")):
+        return "repo_context"
+    if any(term in lowered for term in ("fail", "error", "blocked", "exception", "warning")):
+        return "failure"
+    if any(term in lowered for term in ("pr", "push", "fork", "label", "lifecycle", "review")):
+        return "external_write"
+    return "unknown"
+
+
+def _include_record_type(record_type: str, intent: str) -> bool:
+    if record_type not in TRACE_RECORD_TYPES:
+        return True
+    return intent == "failure"
+
+
+def _record_priority(record_type: str, intent: str) -> int:
+    return INTENT_PRIORITIES.get(intent, {}).get(
+        record_type,
+        DEFAULT_PRIORITIES.get(record_type, DEFAULT_PRIORITIES["artifact"]),
+    )
+
+
+def _title_for_record(source_path: str, record_type: str) -> str:
+    labels = {
+        "quality_report": "Quality report",
+        "postmortem": "Postmortem",
+        "memory_event": "Memory event",
+        "working_memory": "Working memory",
+        "repo_guidance": "Repository guidance artifact",
+        "memory_context": "Memory context",
+        "verification": "Verification log",
+        "quality_gate": "Quality gate",
+        "governance_decision": "Governance decision",
+        "ci_status": "CI status",
+        "live_action": "Live action log",
+        "review_event": "PR review log",
+        "tool_result": "Tool result",
+        "trace_event": "Trace event",
+        "artifact": "Run artifact",
+    }
+    return f"{labels.get(record_type, 'Run artifact')}: {source_path}"
+
+
+def _reason_for_record(record_type: str, intent: str) -> str:
+    if intent == "verification":
+        return f"matched verification query; {record_type} is a relevant evidence source"
+    if intent == "repo_context":
+        return f"matched repository-context query; {record_type} can carry guidance or memory facts"
+    if intent == "failure":
+        return f"matched failure query; {record_type} can explain prior failures or recovery"
+    if intent == "external_write":
+        return f"matched external-write query; {record_type} can describe PR, CI, or lifecycle state"
+    return f"matched query; {record_type} is indexed run evidence"
 
 
 def _snippet(text: str, limit: int = 800) -> str:

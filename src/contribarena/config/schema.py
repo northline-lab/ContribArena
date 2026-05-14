@@ -98,6 +98,10 @@ class MemoryConfig(BaseModel):
     schema_version: Literal["1"] = "1"
 
 
+class GuidanceConfig(BaseModel):
+    enabled: bool = True
+
+
 class PrSubmissionConfig(BaseModel):
     strategy: Literal["fork", "upstream_branch"] = "fork"
     fork_owner: str | None = None
@@ -257,6 +261,7 @@ class RunConfig(BaseModel):
     workspace: WorkspaceConfig
     artifacts: ArtifactConfig = Field(default_factory=ArtifactConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    guidance: GuidanceConfig = Field(default_factory=GuidanceConfig)
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     governance: GovernanceConfig = Field(default_factory=GovernanceConfig)
     controller: ControllerConfig = Field(default_factory=ControllerConfig)

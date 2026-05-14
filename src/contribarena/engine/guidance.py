@@ -13,7 +13,9 @@ class GuidanceInstallResult:
     installed: bool
     command: CommandResult | None
     manifest: dict[str, object]
+    enabled: bool = True
     error: str = ""
+    skipped_reason: str = ""
 
 
 def install_guidance_sidecar(
@@ -24,6 +26,14 @@ def install_guidance_sidecar(
     repo_full_name: str,
 ) -> GuidanceInstallResult:
     manifest = _guidance_manifest(config, run_id, repo_full_name)
+    if not config.guidance.enabled:
+        return GuidanceInstallResult(
+            False,
+            None,
+            manifest,
+            enabled=False,
+            skipped_reason="guidance_disabled",
+        )
     entry = _guidance_entry(config)
     manifest_text = json.dumps(manifest, indent=2, ensure_ascii=True) + "\n"
     command = (
@@ -34,11 +44,18 @@ def install_guidance_sidecar(
     try:
         result = workspace.run(command)  # type: ignore[attr-defined]
     except Exception as exc:  # pragma: no cover - defensive fail-soft path
-        return GuidanceInstallResult(False, None, manifest, error=str(exc))
+        return GuidanceInstallResult(
+            False,
+            None,
+            manifest,
+            enabled=config.guidance.enabled,
+            error=str(exc),
+        )
     return GuidanceInstallResult(
         installed=result.exit_code == 0,
         command=result,
         manifest=manifest,
+        enabled=config.guidance.enabled,
         error="" if result.exit_code == 0 else result.stderr or result.stdout,
     )
 
@@ -46,7 +63,11 @@ def install_guidance_sidecar(
 def guidance_artifact_payload(result: GuidanceInstallResult) -> dict[str, object]:
     return {
         "schema_version": "1",
+        "enabled": result.enabled,
         "installed": result.installed,
+        "available": result.installed,
+        "degraded": bool(result.error),
+        "skipped_reason": result.skipped_reason,
         "sidecar_path": ".contribarena/guidance",
         "entry_path": ".contribarena/guidance/guidance_entry.md",
         "manifest_path": ".contribarena/guidance/guidance_manifest.json",
@@ -65,14 +86,16 @@ def _guidance_manifest(
         "run_id": run_id,
         "repo_full_name": repo_full_name,
         "run_mode": config.run.mode,
+        "enabled": config.guidance.enabled,
         "sources": [
             {
                 "kind": "guidance_entry",
                 "path": ".contribarena/guidance/guidance_entry.md",
-                "present": True,
+                "present": config.guidance.enabled,
             }
         ],
         "expected_repo_sources": [
+            "AGENTS.md",
             "CONTRIBUTING.md",
             ".github/PULL_REQUEST_TEMPLATE.md",
             ".github/PULL_REQUEST_TEMPLATE/",

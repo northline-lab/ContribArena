@@ -180,6 +180,17 @@ class Runner:
                 run_id=run_id,
                 repo_full_name=repo_slug,
             )
+            if memory.enabled:
+                memory.set_guidance_status(
+                    available=guidance.installed,
+                    skipped_reason=guidance.skipped_reason,
+                    error=guidance.error,
+                )
+                # Rewrite the initial context after guidance availability is known.
+                artifacts.write_json(
+                    "memory_context.json",
+                    memory.context.model_dump(mode="json"),
+                )
             artifacts.write_json(
                 "repo_guidance.json",
                 guidance_artifact_payload(guidance),
@@ -188,7 +199,11 @@ class Runner:
             trace.write(
                 RunState.AGENT_CONTEXT_LOADED,
                 "guidance.sidecar_installed",
-                {"installed": guidance.installed, "error": guidance.error},
+                {
+                    "installed": guidance.installed,
+                    "skipped_reason": guidance.skipped_reason,
+                    "error": guidance.error,
+                },
             )
             registry = ToolRegistry(
                 config=config,
@@ -481,12 +496,6 @@ def _write_memory_artifacts(
     artifacts.write_json(
         "working_memory.json",
         memory.working.model_dump(mode="json"),
-        required=False,
-    )
-    artifacts.write_text(
-        "memory_events.jsonl",
-        memory.events_text(),
-        kind="jsonl",
         required=False,
     )
     report = memory.finalize_run(terminal.model_dump(mode="json"), artifacts.run_dir)

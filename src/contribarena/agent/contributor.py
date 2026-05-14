@@ -181,7 +181,7 @@ class ContributorAgent:
             tags_json: str = "[]",
             confidence: str = "medium",
         ) -> str:
-            """Record a concrete memory note for this run or future retrieval."""
+            """Record a concrete memory note. In M0.6.1, only scope='run' updates working memory; repo/global notes are event-log only."""
             return _to_json(tools.aci_memory_note(scope, text, tags_json, confidence))
 
         @function_tool
@@ -348,14 +348,15 @@ def build_agent_instructions(config: RunConfig) -> str:
         "aci_submit_patch, then finish with the structured ContribArena result. Use "
         "operator_report_progress at phase boundaries or when discovery, selection, "
         "verification, governance, or PR work would otherwise look silent; keep it short, "
-        "evidence-linked, and do not expose hidden chain-of-thought. Read "
-        ".contribarena/guidance/guidance_entry.md early when available; it is fixed "
-        "system guidance, while repository CONTRIBUTING and PR templates remain the "
-        "target repo's source of truth. You have a working memory scratchpad for this "
-        "run: use aci_memory_get_context(scope='run') to remind yourself what you have "
-        "checked, aci_memory_note(scope='run', ...) for concrete observations, and "
-        "aci_memory_plan_update for multi-step plans. Memory is optional; use it when "
-        "the task spans many tool calls. Do not "
+        "evidence-linked, and do not expose hidden chain-of-thought. Call "
+        "aci_memory_get_context(scope='run') early; it returns guidance availability, "
+        "the guidance entry path when available, and prior run facts. If guidance is "
+        "available, read the returned path relative to the workspace root, not repo/. "
+        "Then inspect repository-local guidance such as AGENTS.md, CONTRIBUTING.md, "
+        "and .github templates when present. You have a working "
+        "memory scratchpad for this run: use aci_memory_note(scope='run', ...) for "
+        "concrete observations, and aci_memory_plan_update for multi-step plans. "
+        "Memory is optional; use it when the task spans many tool calls. Do not "
         "continue exploring after the expected shadow patch and verification summary "
         "are complete."
     )
