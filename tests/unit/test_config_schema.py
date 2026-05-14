@@ -37,6 +37,31 @@ class ConfigSchemaTest(unittest.TestCase):
             self.assertFalse(config.controller.enabled)
             self.assertTrue(config.memory.enabled)
             self.assertEqual("noop", config.memory.backend)
+            self.assertFalse(config.memory.graphiti_enabled)
+            self.assertEqual("falkordb", config.memory.graphiti_graph_backend)
+            self.assertEqual("localhost", config.memory.falkordb_host)
+            self.assertEqual(6379, config.memory.falkordb_port)
+            self.assertEqual("FALKORDB_PASSWORD", config.memory.falkordb_password_env)
+            self.assertEqual("contribarena", config.memory.graphiti_group_prefix)
+            self.assertEqual(
+                "CONTRIBARENA_GRAPHITI_LLM_API_KEY",
+                config.memory.graphiti_llm_api_key_env,
+            )
+            self.assertEqual(
+                "CONTRIBARENA_GRAPHITI_LLM_BASE_URL",
+                config.memory.graphiti_llm_base_url_env,
+            )
+            self.assertEqual("gpt-4.1", config.memory.graphiti_llm_model)
+            self.assertEqual(
+                "CONTRIBARENA_GRAPHITI_EMBEDDING_API_KEY",
+                config.memory.graphiti_embedding_api_key_env,
+            )
+            self.assertEqual(
+                "CONTRIBARENA_GRAPHITI_EMBEDDING_BASE_URL",
+                config.memory.graphiti_embedding_base_url_env,
+            )
+            self.assertEqual("text-embedding-3-small", config.memory.graphiti_embedding_model)
+            self.assertEqual(1024, config.memory.graphiti_embedding_dim)
             self.assertTrue(config.memory.history_index_enabled)
             self.assertTrue(config.guidance.enabled)
             self.assertEqual(

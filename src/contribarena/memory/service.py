@@ -8,6 +8,12 @@ from typing import Any, Mapping
 
 from contribarena.config.schema import MemoryConfig
 from contribarena.memory.event_log import MemoryEventLog
+from contribarena.memory.graphiti_backend import (
+    GraphitiBackend,
+    GraphitiSearchResult,
+    GraphitiWriteResult,
+    make_graphiti_backend,
+)
 from contribarena.memory.history_index import HistoryIndex
 from contribarena.memory.redact import redact_payload, redact_text
 from contribarena.memory.schema import (
@@ -32,6 +38,7 @@ class MemoryService:
         *,
         run_id: str,
         repo_full_name: str = "",
+        graphiti_backend: GraphitiBackend | None = None,
     ) -> None:
         self.config = config
         self.run_id = run_id
@@ -49,9 +56,29 @@ class MemoryService:
             if config.enabled and config.history_index_enabled
             else None
         )
+        self._graphiti = (
+            graphiti_backend
+            if graphiti_backend is not None
+            else make_graphiti_backend(config)
+        )
         self._failures: list[dict[str, str]] = []
         self._last_index_entries = 0
         self._last_indexed_sources: list[str] = []
+        self._graphiti_episode_ids: list[str] = []
+        self._graphiti_available = bool(self._graphiti)
+        self._memory_searches = 0
+        self._graphiti_searches = 0
+        self._history_index_searches = 0
+        repo_memory_enabled = config.enabled and config.backend == "graphiti" and config.graphiti_enabled
+        self.working.memory_capabilities.repo_scope_persistent = repo_memory_enabled
+        self.context.memory_capabilities.repo_scope_persistent = repo_memory_enabled
+        if repo_memory_enabled:
+            note = (
+                "scope='repo' notes are written to Graphiti-backed L2 memory when available; "
+                "scope='global' notes remain event-log-only."
+            )
+            self.working.memory_capabilities.note = note
+            self.context.memory_capabilities.note = note
 
     @property
     def enabled(self) -> bool:
@@ -67,13 +94,20 @@ class MemoryService:
             self.context.notes = ["memory disabled"]
             return self.context
         self.context.history_results = []
+        if self._graphiti is not None and self.repo_full_name:
+            graphiti_context = self._search_graphiti_repo(
+                f"prior run lessons for {self.repo_full_name}: guidance conventions verification",
+                5,
+            )
+            self.context.history_results.extend(graphiti_context.results)
         if self._history is not None:
             try:
+                self._history_index_searches += 1
                 self.context.history_results = self._history.search(
                     "terminal failed blocked guidance verification",
                     repo_full_name=self.repo_full_name,
                     limit=5,
-                )
+                ) + self.context.history_results
             except Exception as exc:  # pragma: no cover - defensive fail-soft path
                 self.context.degraded = True
                 self.context.notes.append("history index unavailable")
@@ -115,6 +149,17 @@ class MemoryService:
                 source="harness",
                 derived_from=f"{tool_name} step={step_id}",
             )
+        if facts and self.repo_full_name:
+            self._write_repo_episode(
+                event_type="harness_repo_fact_observed",
+                payload={
+                    "text": _repo_fact_text(tool_name, facts),
+                    "tool": tool_name,
+                    "facts": facts,
+                },
+                source_ref=f"{tool_name} step={step_id}",
+                confidence="medium",
+            )
         return MemoryWriteResult(success=True)
 
     def note_agent_memory(
@@ -144,6 +189,34 @@ class MemoryService:
             source_ref=source_ref,
             confidence=_confidence(confidence),
         )
+        if scope == "repo":
+            if self._graphiti is None:
+                return MemoryWriteResult(
+                    success=True,
+                    event_ids=[event_id] if event_id else [],
+                    degraded=True,
+                    skipped_reason="graphiti_disabled",
+                    error_kind="graphiti_disabled",
+                    error_message=(
+                        "Repo memory was written to the local memory event log, but "
+                        "Graphiti-backed L2 retrieval is not enabled."
+                    ),
+                )
+            graphiti_result = self._write_graphiti_repo_episode(
+                event_id=event_id,
+                event_type="agent_lesson_proposed",
+                payload={"text": clean_text, "tags": clean_tags, "scope": scope},
+                source_ref=source_ref,
+                confidence=_confidence(confidence),
+            )
+            return MemoryWriteResult(
+                success=True,
+                event_ids=[event_id] if event_id else [],
+                graphiti_episode_ids=graphiti_result.episode_ids,
+                degraded=graphiti_result.degraded,
+                error_kind=graphiti_result.error_kind,
+                error_message=graphiti_result.error_message,
+            )
         if scope != "run":
             return MemoryWriteResult(
                 success=True,
@@ -212,9 +285,19 @@ class MemoryService:
                 repo_full_name=self.repo_full_name,
                 error_kind="memory_disabled",
             )
+        self._memory_searches += 1
         results = _search_working_memory(self.working, query, max_results)
+        degraded = False
+        error_kind = ""
+        if self._graphiti is not None and intent in {"repo_context", "guidance_check"}:
+            graphiti_result = self._search_graphiti_repo(query, max_results - len(results))
+            results.extend(graphiti_result.results)
+            if graphiti_result.degraded:
+                degraded = True
+                error_kind = graphiti_result.error_kind
         if self._history is not None and len(results) < max_results:
             try:
+                self._history_index_searches += 1
                 results.extend(
                     self._history.search(
                         query,
@@ -242,6 +325,8 @@ class MemoryService:
             query=query,
             repo_full_name=self.repo_full_name,
             results=results[:max_results],
+            degraded=degraded,
+            error_kind=error_kind,
         )
 
     def finalize_run(self, terminal: Mapping[str, Any], run_dir: Path) -> MemoryWriteReport:
@@ -270,10 +355,15 @@ class MemoryService:
                 self._failures.append(
                     {"error_kind": "history_index_write_failed", "error_message": str(exc)}
                 )
+        self._close_graphiti()
         return MemoryWriteReport(
-            graphiti_enabled=False,
-            graphiti_available=False,
+            graphiti_enabled=self.config.graphiti_enabled,
+            graphiti_available=self._graphiti_available,
             events_written=len(self.events_text().splitlines()),
+            graphiti_episodes_written=len(self._graphiti_episode_ids),
+            memory_searches=self._memory_searches,
+            graphiti_searches=self._graphiti_searches,
+            history_index_searches=self._history_index_searches,
             history_index_entries_written=self._last_index_entries,
             degraded=bool(self._failures),
             failures=self._failures,
@@ -334,6 +424,110 @@ class MemoryService:
         self._event_log.append(event)
         return event.event_id
 
+    def _write_repo_episode(
+        self,
+        *,
+        event_type: str,
+        payload: dict[str, Any],
+        source_ref: str,
+        confidence: str,
+    ) -> MemoryWriteResult:
+        event_id = self._append_event(
+            event_type,
+            payload=payload,
+            source_ref=source_ref,
+            confidence=confidence,
+        )
+        if self._graphiti is None:
+            return MemoryWriteResult(
+                success=True,
+                event_ids=[event_id] if event_id else [],
+                degraded=True,
+                skipped_reason="graphiti_disabled",
+                error_kind="graphiti_disabled",
+                error_message="Repo memory event was written locally; Graphiti-backed L2 is not enabled.",
+            )
+        graphiti_result = self._write_graphiti_repo_episode(
+            event_id=event_id,
+            event_type=event_type,
+            payload=payload,
+            source_ref=source_ref,
+            confidence=confidence,
+        )
+        return MemoryWriteResult(
+            success=True,
+            event_ids=[event_id] if event_id else [],
+            graphiti_episode_ids=graphiti_result.episode_ids,
+            degraded=graphiti_result.degraded,
+            error_kind=graphiti_result.error_kind,
+            error_message=graphiti_result.error_message,
+        )
+
+    def _write_graphiti_repo_episode(
+        self,
+        *,
+        event_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+        source_ref: str,
+        confidence: str,
+    ) -> GraphitiWriteResult:
+        if self._graphiti is None:
+            return GraphitiWriteResult(
+                success=False,
+                degraded=True,
+                error_kind="graphiti_disabled",
+                error_message="Graphiti-backed L2 retrieval is not enabled.",
+            )
+        graphiti_result = self._graphiti.add_repo_episode(
+            repo_full_name=self.repo_full_name,
+            run_id=self.run_id,
+            event_id=event_id,
+            event_type=event_type,
+            payload=payload,
+            source_ref=source_ref,
+            confidence=confidence,
+        )
+        self._record_graphiti_write_result(graphiti_result.error_kind, graphiti_result.error_message)
+        self._graphiti_episode_ids.extend(graphiti_result.episode_ids)
+        return graphiti_result
+
+    def _record_graphiti_write_result(self, error_kind: str, error_message: str) -> None:
+        if not error_kind:
+            self._graphiti_available = True
+            return
+        self._graphiti_available = False
+        self._failures.append({"error_kind": error_kind, "error_message": error_message})
+
+    def _search_graphiti_repo(self, query: str, limit: int) -> GraphitiSearchResult:
+        if self._graphiti is None or limit <= 0:
+            return GraphitiSearchResult(success=True, results=[])
+        self._graphiti_searches += 1
+        result = self._graphiti.search_repo(
+            repo_full_name=self.repo_full_name,
+            query=query,
+            limit=limit,
+        )
+        if result.degraded:
+            self._graphiti_available = False
+            self._failures.append(
+                {"error_kind": result.error_kind, "error_message": result.error_message}
+            )
+        else:
+            self._graphiti_available = True
+        return result
+
+    def _close_graphiti(self) -> None:
+        close = getattr(self._graphiti, "close", None)
+        if close is None:
+            return
+        try:
+            close()
+        except Exception as exc:  # pragma: no cover - memory cleanup must fail soft
+            self._failures.append(
+                {"error_kind": "graphiti_close_failed", "error_message": redact_text(str(exc))}
+            )
+
 
 def _derive_facts(
     tool_name: str,
@@ -373,6 +567,11 @@ def _derive_facts(
         if isinstance(paths, list) and paths:
             facts["last_edit_paths"] = ", ".join(str(item) for item in paths[:5])
     return facts
+
+
+def _repo_fact_text(tool_name: str, facts: dict[str, str]) -> str:
+    pairs = "; ".join(f"{key}={value}" for key, value in sorted(facts.items()))
+    return f"Harness observed repository facts via {tool_name}: {pairs}"
 
 
 def _search_working_memory(
@@ -431,7 +630,13 @@ def _memory_hints_from_history(results: list[MemorySearchItem]) -> list[MemoryHi
 
 
 def _hint_category(record_type: str) -> str | None:
-    if record_type in {"repo_guidance", "working_memory", "memory_event", "memory_context"}:
+    if record_type in {
+        "repo_guidance",
+        "working_memory",
+        "memory_event",
+        "memory_context",
+        "repo_memory",
+    }:
         return "repo_context"
     if record_type in {"verification", "quality_report", "ci_status"}:
         return "verification"

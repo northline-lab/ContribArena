@@ -47,6 +47,18 @@ memory:
   root: .contribarena/memory
   backend: noop
   graphiti_enabled: false
+  graphiti_graph_backend: falkordb
+  falkordb_host: localhost
+  falkordb_port: 6379
+  falkordb_password_env: FALKORDB_PASSWORD
+  graphiti_group_prefix: contribarena
+  graphiti_llm_api_key_env: CONTRIBARENA_GRAPHITI_LLM_API_KEY
+  graphiti_llm_base_url_env: CONTRIBARENA_GRAPHITI_LLM_BASE_URL
+  graphiti_llm_model: gpt-4.1
+  graphiti_embedding_api_key_env: CONTRIBARENA_GRAPHITI_EMBEDDING_API_KEY
+  graphiti_embedding_base_url_env: CONTRIBARENA_GRAPHITI_EMBEDDING_BASE_URL
+  graphiti_embedding_model: text-embedding-3-small
+  graphiti_embedding_dim: 1024
   history_index_enabled: true
 
 guidance:

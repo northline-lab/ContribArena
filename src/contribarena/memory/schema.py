@@ -136,6 +136,9 @@ class MemoryWriteReport(BaseModel):
     graphiti_available: bool
     events_written: int
     graphiti_episodes_written: int = 0
+    memory_searches: int = 0
+    graphiti_searches: int = 0
+    history_index_searches: int = 0
     history_index_entries_written: int = 0
     degraded: bool = False
     failures: list[dict[str, str]] = Field(default_factory=list)

@@ -93,6 +93,27 @@ class MemoryConfig(BaseModel):
     root: Path = Path(".contribarena/memory")
     backend: Literal["noop", "graphiti"] = "noop"
     graphiti_enabled: bool = False
+    graphiti_graph_backend: Literal["falkordb"] = "falkordb"
+    falkordb_host: str = "localhost"
+    falkordb_port: int = Field(default=6379, ge=1)
+    falkordb_username: str = ""
+    falkordb_password_env: str = "FALKORDB_PASSWORD"
+    graphiti_group_prefix: str = "contribarena"
+    graphiti_llm_api_key_env: str = "CONTRIBARENA_GRAPHITI_LLM_API_KEY"
+    graphiti_llm_base_url: str | None = None
+    graphiti_llm_base_url_env: str | None = "CONTRIBARENA_GRAPHITI_LLM_BASE_URL"
+    graphiti_llm_model: str = "gpt-4.1"
+    graphiti_llm_small_model: str = ""
+    graphiti_llm_temperature: float = Field(default=0.1, ge=0)
+    graphiti_embedding_api_key_env: str = "CONTRIBARENA_GRAPHITI_EMBEDDING_API_KEY"
+    graphiti_embedding_base_url: str | None = None
+    graphiti_embedding_base_url_env: str | None = "CONTRIBARENA_GRAPHITI_EMBEDDING_BASE_URL"
+    graphiti_embedding_model: str = "text-embedding-3-small"
+    graphiti_embedding_dim: int = Field(default=1024, ge=1)
+    graphiti_timeout_seconds: int = Field(default=30, ge=1)
+    graphiti_max_episode_chars: int = Field(default=12_000, ge=1)
+    graphiti_update_communities: bool = False
+    graphiti_telemetry_enabled: bool = False
     history_index_enabled: bool = True
     max_history_record_chars: int = Field(default=16_000, ge=1)
     schema_version: Literal["1"] = "1"
