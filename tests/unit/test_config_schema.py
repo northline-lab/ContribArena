@@ -64,6 +64,9 @@ class ConfigSchemaTest(unittest.TestCase):
             self.assertEqual(1024, config.memory.graphiti_embedding_dim)
             self.assertTrue(config.memory.history_index_enabled)
             self.assertTrue(config.guidance.enabled)
+            self.assertTrue(config.goal.enabled)
+            self.assertEqual(3, config.goal.max_abandoned_goals_per_run)
+            self.assertIn("meaningful engineering contributions", config.goal.long_term_objective)
             self.assertEqual(
                 "openai/openai-agents-python", config.discovery.candidates[0].full_name
             )

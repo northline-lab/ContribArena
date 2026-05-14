@@ -123,6 +123,19 @@ class GuidanceConfig(BaseModel):
     enabled: bool = True
 
 
+class GoalConfig(BaseModel):
+    enabled: bool = True
+    max_abandoned_goals_per_run: int = Field(default=3, ge=1)
+    long_term_objective: str = (
+        "Own this GitHub identity as an autonomous open-source developer. "
+        "Build a public track record of meaningful engineering contributions, "
+        "discover projects where small focused code changes can create real "
+        "value, earn maintainer trust through respectful collaboration, and "
+        "steadily help open-source software improve."
+    )
+    state_path: Path | None = None
+
+
 class PrSubmissionConfig(BaseModel):
     strategy: Literal["fork", "upstream_branch"] = "fork"
     fork_owner: str | None = None
@@ -283,6 +296,7 @@ class RunConfig(BaseModel):
     artifacts: ArtifactConfig = Field(default_factory=ArtifactConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     guidance: GuidanceConfig = Field(default_factory=GuidanceConfig)
+    goal: GoalConfig = Field(default_factory=GoalConfig)
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     governance: GovernanceConfig = Field(default_factory=GovernanceConfig)
     controller: ControllerConfig = Field(default_factory=ControllerConfig)

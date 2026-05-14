@@ -4,6 +4,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from contribarena.models.goals import GoalContext
+
 
 class WorkingMemoryFact(BaseModel):
     key: str
@@ -62,8 +64,10 @@ class WorkingMemory(BaseModel):
     run_id: str
     repo_full_name: str = ""
     guidance: GuidanceContext = Field(default_factory=GuidanceContext)
+    goals: GoalContext = Field(default_factory=GoalContext)
     memory_hints: list[MemoryHint] = Field(default_factory=list)
     memory_capabilities: MemoryCapabilities = Field(default_factory=MemoryCapabilities)
+    tracked_prs: list[TrackedPullRequestContext] = Field(default_factory=list)
     facts: dict[str, WorkingMemoryFact] = Field(default_factory=dict)
     plan: list[WorkingMemoryPlanItem] = Field(default_factory=list)
     notes: list[WorkingMemoryNote] = Field(default_factory=list)
@@ -72,14 +76,21 @@ class WorkingMemory(BaseModel):
 
 class MemoryContext(BaseModel):
     schema_version: Literal["1"] = "1"
+    snapshot_phase: Literal["run_start_context"] = "run_start_context"
+    snapshot_note: str = (
+        "This context is captured when run context is prepared and guidance status is known. "
+        "Final goal state is recorded in goal_context.json."
+    )
     run_id: str
     repo_full_name: str = ""
     enabled: bool = True
     degraded: bool = False
     backend: str = "noop"
     guidance: GuidanceContext = Field(default_factory=GuidanceContext)
+    goals: GoalContext = Field(default_factory=GoalContext)
     memory_hints: list[MemoryHint] = Field(default_factory=list)
     memory_capabilities: MemoryCapabilities = Field(default_factory=MemoryCapabilities)
+    tracked_prs: list[TrackedPullRequestContext] = Field(default_factory=list)
     history_results: list["MemorySearchItem"] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
@@ -129,6 +140,20 @@ class MemorySearchResult(BaseModel):
     results: list[MemorySearchItem] = Field(default_factory=list)
     degraded: bool = False
     error_kind: str = ""
+
+
+class TrackedPullRequestContext(BaseModel):
+    schema_version: Literal["1"] = "1"
+    repository: str
+    number: int
+    url: str = ""
+    state: Literal["open", "closed", "merged"] = "open"
+    lifecycle_status: str = "tracking"
+    ci_status: str = "not_run"
+    last_observed_at: str = ""
+    next_poll_at: str = ""
+    summary: str = ""
+    detail_queries: list[MemoryHint] = Field(default_factory=list)
 
 
 class MemoryWriteReport(BaseModel):

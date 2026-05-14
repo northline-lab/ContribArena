@@ -117,8 +117,10 @@ def build_goal_prompt(config: RunConfig) -> str:
         'Minimal aci_apply_patch example: operations_json=[{"type":"update_file","path":"repo/app.py","diff":"*** Begin Patch\\n*** Update File: repo/app.py\\n@@\\n old context\\n-old line\\n+new line\\n*** End Patch"}]. '
         "Do not edit files through workspace_run, shell redirection, sed, python scripts, or git commands; "
         "those edits lack unified-editor provenance and submit-time review will reject them. "
-        "Call aci_memory_get_context(scope='run') early; it returns guidance availability, the guidance entry path when available, and prior run facts. "
+        "Call aci_runtime_get_context(scope='run') early; it returns guidance availability, goal context, memory hints, and tracked PR summaries. "
+        "Treat the long-term goal as direction, not as permission to ignore this run's concrete task. Use aci_goal_update only for the single short-term goal; mark it complete only after current evidence proves the objective is done. If aci_goal_update returns terminal_status=goal_abandon_limit, end this run with a final structured blocked result. "
         "If guidance is available, read the returned path relative to the workspace root, not repo/. "
+        "If tracked PRs or external-write memory hints are present, inspect them before opening duplicate or conflicting work. "
         "Before editing, check repository-local guidance such as AGENTS.md, CONTRIBUTING.md, or .github templates when present. "
         "If a tool output is truncated or too broad, narrow the query. If a command is missing or the environment is blocked, "
         "record the blocker instead of making broad setup changes."
@@ -169,8 +171,9 @@ def _build_issue_solving_prompt(config: RunConfig) -> str:
         "12. Return the final structured ContribArena result with problem_statement_summary, reproduction_notes, verification_summary, and blockers.\n\n"
         "Completion rule: status may be completed only if the submitted patch directly addresses "
         "the problem statement and at least one local verification command succeeded. Otherwise "
-        "return blocked or failed with explicit reasons. Call aci_memory_get_context(scope='run') early; it returns guidance availability, the guidance entry path when available, and prior run facts. "
-        "If guidance is available, read the returned path relative to the workspace root, not repo/. Then check and follow repository-local guidance such as AGENTS.md, CONTRIBUTING.md, or .github templates when present. Shadow mode means no GitHub writes."
+        "return blocked or failed with explicit reasons. Call aci_runtime_get_context(scope='run') early; it returns guidance availability, goal context, memory hints, and tracked PR summaries. "
+        "Treat the long-term goal as direction, not as permission to ignore this issue. Use aci_goal_update only for the single short-term goal; mark it complete only after current evidence proves the objective is done. If aci_goal_update returns terminal_status=goal_abandon_limit, end this run with a final structured blocked result. "
+        "If guidance is available, read the returned path relative to the workspace root, not repo/. If tracked PRs or external-write memory hints are present, inspect them before opening duplicate or conflicting work. Then check and follow repository-local guidance such as AGENTS.md, CONTRIBUTING.md, or .github templates when present. Shadow mode means no GitHub writes."
         "\n\nRecovery templates:\n"
         f"{_recovery_template_text()}"
     )

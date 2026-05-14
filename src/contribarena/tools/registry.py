@@ -6,6 +6,7 @@ import time
 from typing import Any, Callable, TypeVar, cast
 
 from contribarena.config.schema import RunConfig
+from contribarena.engine.goals import GoalService
 from contribarena.engine.middleware.artifact import ArtifactCapture
 from contribarena.engine.middleware.budget import BudgetTracker
 from contribarena.engine.operator_events import (
@@ -14,6 +15,7 @@ from contribarena.engine.operator_events import (
 )
 from contribarena.engine.workspace import DockerWorkspaceManager
 from contribarena.memory import MemoryService
+from contribarena.memory.schema import GuidanceContext, MemoryCapabilities
 from contribarena.models import AciResult, AgentStep, CommandResult, PatchResult, RunState
 from contribarena.trace import TraceWriter
 from contribarena.tools.aci import (
@@ -50,6 +52,7 @@ class ToolRegistry:
     capture: ArtifactCapture
     operator: OperatorProgressWriter | None = None
     memory: MemoryService | None = None
+    goals: GoalService | None = None
 
     def repo_search(self, query: str = "", filters: object | None = None) -> object:
         return self._record(
@@ -344,6 +347,71 @@ class ToolRegistry:
             fn=run,
         )
 
+    def aci_runtime_get_context(self, scope: str = "run") -> AciResult:
+        def run() -> AciResult:
+            if scope != "run":
+                return AciResult(
+                    tool="aci_runtime_get_context",
+                    success=False,
+                    output="invalid_runtime_scope",
+                    error="invalid_runtime_scope",
+                    recovery_kind="invalid_runtime_scope",
+                )
+            memory_working = self.memory.working if self.memory is not None else None
+            memory_enabled = bool(self.memory is not None and self.memory.enabled)
+            goals = self.goals.context if self.goals is not None else None
+            memory_capabilities = (
+                memory_working.memory_capabilities
+                if memory_enabled and memory_working is not None
+                else MemoryCapabilities(
+                    run_scope_notes=False,
+                    repo_scope_persistent=False,
+                    global_scope_persistent=False,
+                    note="memory disabled or unavailable",
+                )
+            )
+            payload = {
+                "schema_version": "1",
+                "run_id": self.trace.run_id,
+                "run_mode": self.config.run.mode,
+                "repo_full_name": (
+                    self.memory.repo_full_name
+                    if self.memory is not None
+                    else _configured_repo_full_name(self.config)
+                ),
+                "goals": goals.model_dump(mode="json") if goals is not None else None,
+                "guidance": (
+                    memory_working.guidance.model_dump(mode="json")
+                    if memory_working is not None
+                    else GuidanceContext().model_dump(mode="json")
+                ),
+                "memory_enabled": memory_enabled,
+                "memory_capabilities": memory_capabilities.model_dump(mode="json"),
+                "memory_hints": (
+                    [hint.model_dump(mode="json") for hint in memory_working.memory_hints]
+                    if memory_enabled and memory_working is not None
+                    else []
+                ),
+                "tracked_prs": (
+                    [tracked.model_dump(mode="json") for tracked in memory_working.tracked_prs]
+                    if memory_working is not None
+                    else []
+                ),
+            }
+            return AciResult(
+                tool="aci_runtime_get_context",
+                success=True,
+                output=json.dumps(payload, ensure_ascii=True),
+            )
+
+        return self._record_memory(
+            event="aci.runtime_get_context",
+            tool="aci_runtime_get_context",
+            payload={"scope": scope},
+            fn=run,
+            phase="runtime",
+        )
+
     def aci_memory_search(
         self,
         query: str,
@@ -434,6 +502,55 @@ class ToolRegistry:
             event="aci.memory_plan_update",
             tool="aci_memory_plan_update",
             payload={"action": action, "item_id": item_id, "status": status},
+            fn=run,
+        )
+
+    def aci_goal_update(
+        self,
+        objective: str = "",
+        status: str = "active",
+        evidence: str = "",
+    ) -> AciResult:
+        def run() -> AciResult:
+            if self.goals is None or not self.goals.enabled:
+                return _goal_error("goal_disabled", "Goal tracking is disabled for this run.")
+            if (
+                status == "active"
+                and self.goals.abandoned_count >= self.config.goal.max_abandoned_goals_per_run
+            ):
+                return _goal_error(
+                    "goal_abandon_limit",
+                    "This run has reached the short-term goal abandon limit.",
+                    terminal_status="goal_abandon_limit",
+                )
+            update = self.goals.update(objective=objective, status=status, evidence=evidence)
+            if self.memory is not None:
+                self.memory.set_goal_context(self.goals.context)
+            terminal_status = None
+            if (
+                update.success
+                and update.event is not None
+                and update.event.event_type == "goal_abandoned"
+                and self.goals.abandoned_count >= self.config.goal.max_abandoned_goals_per_run
+            ):
+                terminal_status = "goal_abandon_limit"
+            return AciResult(
+                tool="aci_goal_update",
+                success=update.success,
+                output=update.model_dump_json(),
+                error=update.error_message or None if not update.success else None,
+                recovery_kind=update.error_kind or None if not update.success else None,
+                terminal_status=terminal_status,
+            )
+
+        return self._record_memory(
+            event="aci.goal_update",
+            tool="aci_goal_update",
+            payload={
+                "status": status,
+                "objective_bytes": len(objective.encode("utf-8")),
+                "evidence_bytes": len(evidence.encode("utf-8")),
+            },
             fn=run,
         )
 
@@ -693,6 +810,7 @@ class ToolRegistry:
         tool: str,
         payload: dict[str, Any],
         fn: Callable[[], AciResult],
+        phase: str = "memory",
     ) -> AciResult:
         self.budget.record_step()
         start = time.monotonic()
@@ -701,11 +819,11 @@ class ToolRegistry:
         duration = time.monotonic() - start
         self.capture.record_aci_result(result)
         self.trace.write(RunState.AGENT_ACTING, f"{event}.finished", {"result": _safe_result(result)})
-        self._write_operator_event(event, "finished", result, payload, phase="memory", tool=tool)
+        self._write_operator_event(event, "finished", result, payload, phase=phase, tool=tool)
         self.capture.record_step(
             AgentStep(
                 step=len(self.capture.steps) + 1,
-                phase="memory",
+                phase=phase,
                 tool=tool,
                 input_summary=_summary(payload),
                 result_summary=_result_summary(result),
@@ -800,6 +918,10 @@ def _operator_status(result: object, fallback: str) -> str:
 
 
 def _operator_summary(tool: str, result: object, payload: dict[str, Any]) -> str:
+    if tool == "aci_runtime_get_context":
+        return "queried runtime context"
+    if tool == "aci_goal_update":
+        return "updated runtime goal"
     if tool.startswith("aci_memory_"):
         return f"updated or queried run memory with {tool}"
     if tool in {"aci_view", "aci_search", "aci_find_files"}:
@@ -874,6 +996,12 @@ def _parse_evidence_refs(value: str) -> list[str]:
     return [truncate_for_operator(parsed, 180)]
 
 
+def _configured_repo_full_name(config: RunConfig) -> str:
+    if config.discovery.candidates:
+        return config.discovery.candidates[0].full_name
+    return config.discovery.query or ""
+
+
 def _summary(payload: dict[str, Any], max_chars: int = 300) -> str:
     text = str(payload)
     if len(text) <= max_chars:
@@ -914,6 +1042,17 @@ def _memory_error(tool: str, message: str) -> AciResult:
         output=message,
         error=message,
         recovery_kind="memory_tool_error",
+    )
+
+
+def _goal_error(kind: str, message: str, terminal_status: str | None = None) -> AciResult:
+    return AciResult(
+        tool="aci_goal_update",
+        success=False,
+        output=message,
+        error=message,
+        recovery_kind=kind,
+        terminal_status=terminal_status,
     )
 
 

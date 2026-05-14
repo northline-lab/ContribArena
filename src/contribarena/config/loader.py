@@ -64,6 +64,16 @@ memory:
 guidance:
   enabled: true
 
+goal:
+  enabled: true
+  max_abandoned_goals_per_run: 3
+  long_term_objective: >-
+    Own this GitHub identity as an autonomous open-source developer. Build a
+    public track record of meaningful engineering contributions, discover
+    projects where small focused code changes can create real value, earn
+    maintainer trust through respectful collaboration, and steadily help
+    open-source software improve.
+
 governance:
   live_enabled: false
   owned_repositories: []

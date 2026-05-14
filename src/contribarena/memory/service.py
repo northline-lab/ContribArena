@@ -4,7 +4,7 @@ import re
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from contribarena.config.schema import MemoryConfig
 from contribarena.memory.event_log import MemoryEventLog
@@ -17,6 +17,7 @@ from contribarena.memory.graphiti_backend import (
 from contribarena.memory.history_index import HistoryIndex
 from contribarena.memory.redact import redact_payload, redact_text
 from contribarena.memory.schema import (
+    GoalContext,
     MemoryContext,
     MemoryEvent,
     MemoryHint,
@@ -24,11 +25,13 @@ from contribarena.memory.schema import (
     MemorySearchResult,
     MemoryWriteReport,
     MemoryWriteResult,
+    TrackedPullRequestContext,
     WorkingMemory,
     WorkingMemoryFact,
     WorkingMemoryNote,
     WorkingMemoryPlanItem,
 )
+from contribarena.models import PrLifecycleRecord
 
 
 class MemoryService:
@@ -84,11 +87,17 @@ class MemoryService:
     def enabled(self) -> bool:
         return self.config.enabled
 
-    def start_run_context(self, repo_full_name: str = "") -> MemoryContext:
+    def start_run_context(
+        self,
+        repo_full_name: str = "",
+        tracked_prs: Sequence[PrLifecycleRecord] | None = None,
+    ) -> MemoryContext:
         if repo_full_name:
             self.repo_full_name = repo_full_name
             self.working.repo_full_name = repo_full_name
             self.context.repo_full_name = repo_full_name
+        if tracked_prs is not None:
+            self.set_tracked_prs(tracked_prs)
         if not self.enabled:
             self.context.enabled = False
             self.context.notes = ["memory disabled"]
@@ -117,6 +126,15 @@ class MemoryService:
         self.context.memory_hints = _memory_hints_from_history(self.context.history_results)
         self.working.memory_hints = list(self.context.memory_hints)
         return self.context
+
+    def set_tracked_prs(self, records: Sequence[PrLifecycleRecord]) -> None:
+        tracked = [_tracked_pr_context(record) for record in records[:10]]
+        self.working.tracked_prs = tracked
+        self.context.tracked_prs = tracked
+
+    def set_goal_context(self, goals: GoalContext) -> None:
+        self.working.goals = goals
+        self.context.goals = goals
 
     def set_guidance_status(
         self,
@@ -327,6 +345,35 @@ class MemoryService:
             results=results[:max_results],
             degraded=degraded,
             error_kind=error_kind,
+        )
+
+    def record_lifecycle_observation(
+        self,
+        record: PrLifecycleRecord,
+        *,
+        review_count: int = 0,
+        source_ref: str = "",
+    ) -> MemoryWriteResult:
+        if not self.enabled:
+            return _skipped("memory_disabled")
+        payload = {
+            "text": (
+                f"PR #{record.number} lifecycle status is {record.lifecycle_status}; "
+                f"CI status is {record.ci_status}; reviews observed: {review_count}."
+            ),
+            "pr_number": record.number,
+            "pr_url": record.url,
+            "lifecycle_status": record.lifecycle_status,
+            "ci_status": record.ci_status,
+            "review_count": review_count,
+            "state": record.state,
+            "summary": record.summary,
+        }
+        return self._write_repo_episode(
+            event_type="lifecycle_observed",
+            payload=payload,
+            source_ref=source_ref or f"pr#{record.number}",
+            confidence="medium",
         )
 
     def finalize_run(self, terminal: Mapping[str, Any], run_dir: Path) -> MemoryWriteReport:
@@ -627,6 +674,32 @@ def _memory_hints_from_history(results: list[MemorySearchItem]) -> list[MemoryHi
         if len(hints) >= 5:
             break
     return hints
+
+
+def _tracked_pr_context(record: PrLifecycleRecord) -> TrackedPullRequestContext:
+    query = f"pull request {record.number} lifecycle CI review {record.repository}"
+    return TrackedPullRequestContext(
+        repository=record.repository,
+        number=record.number,
+        url=record.url,
+        state=record.state,
+        lifecycle_status=record.lifecycle_status,
+        ci_status=record.ci_status,
+        last_observed_at=record.last_observed_at,
+        next_poll_at=record.next_poll_at,
+        summary=redact_text(record.summary, max_chars=200),
+        detail_queries=[
+            MemoryHint(
+                category="external_write",
+                summary_line=(
+                    f"Tracked PR #{record.number} in {record.repository} has "
+                    f"lifecycle_status={record.lifecycle_status} and ci_status={record.ci_status}."
+                )[:200],
+                suggested_query=query,
+                suggested_intent="external_write",
+            )
+        ],
+    )
 
 
 def _hint_category(record_type: str) -> str | None:

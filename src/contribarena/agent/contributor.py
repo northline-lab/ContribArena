@@ -161,6 +161,11 @@ class ContributorAgent:
             return _to_json(tools.operator_report_progress(phase, status, summary, evidence_refs))
 
         @function_tool
+        def aci_runtime_get_context(scope: str = "run") -> str:
+            """Return the run runtime context: goals, guidance, memory handles, and tracked PR summaries."""
+            return _to_json(tools.aci_runtime_get_context(scope))
+
+        @function_tool
         def aci_memory_get_context(scope: str = "run") -> str:
             """Return bounded run/repo/global memory context for this run."""
             return _to_json(tools.aci_memory_get_context(scope))
@@ -193,6 +198,15 @@ class ContributorAgent:
         ) -> str:
             """Add or update a run-local memory plan item."""
             return _to_json(tools.aci_memory_plan_update(action, item_id, text, status))
+
+        @function_tool
+        def aci_goal_update(
+            objective: str = "",
+            status: str = "active",
+            evidence: str = "",
+        ) -> str:
+            """Create or update the single short-term runtime goal. status must be exactly "active", "complete", or "abandoned"; complete/abandoned require evidence."""
+            return _to_json(tools.aci_goal_update(objective, status, evidence))
 
         @function_tool(name_override=RECOVERY_TOOL_NAME)
         def aci_recover_invalid_action(
@@ -231,10 +245,12 @@ class ContributorAgent:
                 aci_suggest_verification,
                 aci_clean_generated,
                 operator_report_progress,
+                aci_runtime_get_context,
                 aci_memory_get_context,
                 aci_memory_search,
                 aci_memory_note,
                 aci_memory_plan_update,
+                aci_goal_update,
                 aci_recover_invalid_action,
                 aci_submit_patch,
             ],
@@ -349,9 +365,14 @@ def build_agent_instructions(config: RunConfig) -> str:
         "operator_report_progress at phase boundaries or when discovery, selection, "
         "verification, governance, or PR work would otherwise look silent; keep it short, "
         "evidence-linked, and do not expose hidden chain-of-thought. Call "
-        "aci_memory_get_context(scope='run') early; it returns guidance availability, "
-        "the guidance entry path when available, and prior run facts. If guidance is "
-        "available, read the returned path relative to the workspace root, not repo/. "
+        "aci_runtime_get_context(scope='run') early; it returns guidance availability, "
+        "goal context, memory hints, and tracked PR summaries. Treat "
+        "the long-term goal as direction, not a replacement for this run's concrete task. "
+        "Use aci_goal_update only for the single short-term goal, and mark it complete "
+        "only after evidence proves the objective is done. If aci_goal_update returns "
+        "terminal_status=goal_abandon_limit, end this run with a final structured "
+        "blocked result. If guidance is available, "
+        "read the returned path relative to the workspace root, not repo/. "
         "Then inspect repository-local guidance such as AGENTS.md, CONTRIBUTING.md, "
         "and .github templates when present. You have a working "
         "memory scratchpad for this run: use aci_memory_note(scope='run', ...) for "

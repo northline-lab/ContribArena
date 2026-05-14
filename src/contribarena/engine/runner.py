@@ -16,6 +16,7 @@ from contribarena.engine.artifacts import ArtifactWriter
 from contribarena.engine.context import ContextBuilder
 from contribarena.engine.external_lifecycle import lifecycle_record_for_opened_pr
 from contribarena.engine.guidance import guidance_artifact_payload, install_guidance_sidecar
+from contribarena.engine.goals import GoalService
 from contribarena.engine.lifecycle import (
     apply_quality_gate_to_result,
     build_ci_status,
@@ -47,6 +48,7 @@ from contribarena.models import (
     CiStatus,
     CommandResult,
     GovernanceDecision,
+    PrLifecycleRecord,
     PullRequestDraft,
     QualityGateResult,
     RunState,
@@ -142,8 +144,13 @@ class Runner:
         budget = BudgetTracker(config.run.budget)
         capture = ArtifactCapture()
         memory = MemoryService(config.memory, run_id=run_id, repo_full_name=repo_slug)
+        goals = GoalService(config, run_id=run_id)
+        memory.set_goal_context(goals.context)
         if memory.enabled:
-            memory_context = memory.start_run_context(repo_slug)
+            memory_context = memory.start_run_context(
+                repo_slug,
+                tracked_prs=_tracked_lifecycle_records_for_runtime(config, repo_slug),
+            )
             artifacts.write_json(
                 "memory_context.json",
                 memory_context.model_dump(mode="json"),
@@ -180,12 +187,12 @@ class Runner:
                 run_id=run_id,
                 repo_full_name=repo_slug,
             )
+            memory.set_guidance_status(
+                available=guidance.installed,
+                skipped_reason=guidance.skipped_reason,
+                error=guidance.error,
+            )
             if memory.enabled:
-                memory.set_guidance_status(
-                    available=guidance.installed,
-                    skipped_reason=guidance.skipped_reason,
-                    error=guidance.error,
-                )
                 # Rewrite the initial context after guidance availability is known.
                 artifacts.write_json(
                     "memory_context.json",
@@ -213,6 +220,7 @@ class Runner:
                 capture=capture,
                 operator=operator,
                 memory=memory,
+                goals=goals,
             )
             trace.write(RunState.AGENT_INITIALIZED, "agent.initialized", {"agent": "builtin"})
             operator.write(
@@ -320,6 +328,7 @@ class Runner:
                 required=False,
             )
             _write_memory_artifacts(artifacts, memory, terminal)
+            _write_goal_artifacts(artifacts, goals)
             trace.write(
                 RunState.ARTIFACTS_WRITTEN,
                 "artifacts.written",
@@ -394,6 +403,7 @@ class Runner:
                 required=False,
             )
             _write_memory_artifacts(artifacts, memory, terminal)
+            _write_goal_artifacts(artifacts, goals)
             trace.write(
                 RunState.RUN_TERMINAL,
                 "run.terminal",
@@ -508,6 +518,18 @@ def _write_memory_artifacts(
     artifacts.write_json(
         "memory_write_report.json",
         report.model_dump(mode="json"),
+        required=False,
+    )
+
+
+def _write_goal_artifacts(artifacts: ArtifactWriter, goals: GoalService) -> None:
+    if not goals.enabled:
+        return
+    artifacts.write_json("goal_context.json", goals.context.model_dump(mode="json"), required=False)
+    artifacts.write_text(
+        "goal_events.jsonl",
+        goals.events_text(),
+        kind="jsonl",
         required=False,
     )
 
@@ -1220,6 +1242,24 @@ def _live_target_candidate(config: RunConfig, result: AgentFinalResult) -> RepoC
         branch=default_branch or "main",
         notes="selected by external_live agent result",
     )
+
+
+def _tracked_lifecycle_records_for_runtime(
+    config: RunConfig,
+    repo_slug: str,
+) -> list[PrLifecycleRecord]:
+    try:
+        state = load_governance_state(config)
+    except Exception:
+        return []
+    active_statuses = {"tracking", "needs_response", "stale", "blocked"}
+    records = [
+        record
+        for record in state.lifecycle_records
+        if record.lifecycle_status in active_statuses
+        and (not config.discovery.candidates or record.repository == repo_slug)
+    ]
+    return records[:10]
 
 
 def _metadata_default_branch(target: RepoCandidate) -> str:

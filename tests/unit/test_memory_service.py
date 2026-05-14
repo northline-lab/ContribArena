@@ -10,6 +10,7 @@ from contribarena.memory.graphiti_backend import GraphitiSearchResult, GraphitiW
 from contribarena.memory.history_index import HistoryIndex
 from contribarena.memory.schema import MemorySearchItem
 from contribarena.memory.service import MemoryService
+from contribarena.models import PrLifecycleRecord
 
 
 class FakeGraphitiBackend:
@@ -625,6 +626,46 @@ class MemoryServiceTest(unittest.TestCase):
             self.assertTrue(result.degraded)
             self.assertEqual("l2_l3_not_implemented", result.error_kind)
             self.assertIn("agent_lesson_proposed", service.events_text())
+
+    def test_lifecycle_observation_writes_repo_episode_and_tracked_pr_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake = FakeGraphitiBackend()
+            service = MemoryService(
+                MemoryConfig(
+                    root=root / "memory",
+                    backend="graphiti",
+                    graphiti_enabled=True,
+                ),
+                run_id="lifecycle-run",
+                repo_full_name="example/repo",
+                graphiti_backend=fake,
+            )
+            record = PrLifecycleRecord(
+                repository="example/repo",
+                number=12,
+                url="https://github.com/example/repo/pull/12",
+                originating_run_dir=str(root / "run"),
+                lifecycle_status="needs_response",
+                ci_status="failure",
+                summary="external PR needs agent follow-up",
+            )
+
+            write = service.record_lifecycle_observation(record, review_count=2)
+            context = service.start_run_context("example/repo", tracked_prs=[record])
+
+            self.assertTrue(write.success)
+            self.assertEqual("lifecycle_observed", fake.episodes[0]["event_type"])
+            self.assertEqual(1, len(context.tracked_prs))
+            tracked = context.tracked_prs[0]
+            self.assertEqual("example/repo", tracked.repository)
+            self.assertEqual(12, tracked.number)
+            self.assertEqual("failure", tracked.ci_status)
+            self.assertEqual("needs_response", tracked.lifecycle_status)
+            self.assertIn("agent follow-up", tracked.summary)
+            self.assertEqual("external_write", tracked.detail_queries[0].category)
+            self.assertIn("pull request 12", tracked.detail_queries[0].suggested_query)
+            self.assertEqual(context.tracked_prs, service.working.tracked_prs)
 
 
 if __name__ == "__main__":

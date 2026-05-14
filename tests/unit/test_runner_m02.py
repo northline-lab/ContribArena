@@ -26,13 +26,16 @@ from contribarena.config.schema import (
     WorkspaceConfig,
 )
 from contribarena.agent.contributor import build_agent_instructions
+from contribarena.engine.goals import GoalService, goal_state_path
 from contribarena.engine.runner import Runner, _owned_live_push_command
-from contribarena.engine.middleware.governance import load_governance_state
+from contribarena.engine.middleware.governance import load_governance_state, save_governance_state
 from contribarena.errors import AgentError
 from contribarena.models import (
     AgentFinalResult,
     EligibilityResult,
     OpportunitySummary,
+    GovernanceState,
+    PrLifecycleRecord,
     RepoMetadata,
     RepoSummary,
     SelectedTask,
@@ -114,9 +117,14 @@ class FakeMemoryAgent:
         model_provider: object = None,
     ) -> AgentFinalResult:
         self.prompt = prompt
-        memory_context = tools.aci_memory_get_context("run")  # type: ignore[attr-defined]
+        memory_context = tools.aci_runtime_get_context("run")  # type: ignore[attr-defined]
         self.memory_context = (
             json.loads(memory_context.output) if memory_context.success else {}
+        )
+        tools.aci_goal_update(  # type: ignore[attr-defined]
+            "Submit a verified small code patch for example/repo.",
+            "active",
+            "",
         )
         command = tools.workspace_run(  # type: ignore[attr-defined]
             "git clone https://github.com/example/repo.git repo && cd repo && git status --short"
@@ -131,6 +139,11 @@ class FakeMemoryAgent:
         tools.aci_replace("repo/app.py", "old", "new")  # type: ignore[attr-defined]
         tools.aci_verify("python3 -m compileall .", "repo")  # type: ignore[attr-defined]
         tools.aci_submit_patch()  # type: ignore[attr-defined]
+        tools.aci_goal_update(  # type: ignore[attr-defined]
+            "",
+            "complete",
+            "Submitted patch and compileall verification succeeded.",
+        )
         return AgentFinalResult(
             status="completed",
             repo=RepoSummary(owner="example", name="repo", url="https://github.com/example/repo"),
@@ -154,6 +167,105 @@ class FakeMemoryAgent:
                 patch_applied=True,
                 notes="M0.6 memory path submitted.",
             ),
+        )
+
+
+class FakeGoalHalfRunAgent:
+    def run(
+        self,
+        config: RunConfig,
+        tools: object,
+        prompt: str,
+        model_provider: object = None,
+    ) -> AgentFinalResult:
+        self.prompt = prompt
+        runtime_context = tools.aci_runtime_get_context("run")  # type: ignore[attr-defined]
+        self.runtime_context = (
+            json.loads(runtime_context.output) if runtime_context.success else {}
+        )
+        tools.aci_memory_note(  # type: ignore[attr-defined]
+            "run",
+            "Saw the active goal, but this run stopped before editing.",
+            '["goal-continuation"]',
+            "medium",
+        )
+        return AgentFinalResult(
+            status="blocked",
+            repo=RepoSummary(owner="example", name="repo", url="https://github.com/example/repo"),
+            repo_profile="# Repo Profile\n\nSmall test repository.",
+            opportunities=[
+                OpportunitySummary(
+                    title="Replace old marker",
+                    rationale="Goal continuation candidate.",
+                    risk="low",
+                    source="test",
+                )
+            ],
+            selected_task=SelectedTask(
+                title="Replace old marker",
+                rationale="The active goal still needs a code change.",
+                expected_change="old -> new",
+                risk="low",
+            ),
+            workspace_summary=WorkspaceSummary(
+                notes="Stopped before patching to simulate an incomplete run.",
+            ),
+            blockers=["continuation required"],
+        )
+
+
+class FakeGoalCompletingAgent:
+    def run(
+        self,
+        config: RunConfig,
+        tools: object,
+        prompt: str,
+        model_provider: object = None,
+    ) -> AgentFinalResult:
+        self.prompt = prompt
+        runtime_context = tools.aci_runtime_get_context("run")  # type: ignore[attr-defined]
+        self.runtime_context = (
+            json.loads(runtime_context.output) if runtime_context.success else {}
+        )
+        command = tools.workspace_run(  # type: ignore[attr-defined]
+            "git clone https://github.com/example/repo.git repo && cd repo && git status --short"
+        )
+        tools.aci_view("repo/CONTRIBUTING.md")  # type: ignore[attr-defined]
+        tools.aci_replace("repo/app.py", "old", "new")  # type: ignore[attr-defined]
+        tools.aci_verify("python3 -m compileall .", "repo")  # type: ignore[attr-defined]
+        tools.aci_submit_patch()  # type: ignore[attr-defined]
+        goal = tools.aci_goal_update(  # type: ignore[attr-defined]
+            "",
+            "complete",
+            "Submitted patch and compileall verification succeeded.",
+        )
+        self.goal_update = json.loads(goal.output) if goal.success else {}
+        return AgentFinalResult(
+            status="completed",
+            repo=RepoSummary(owner="example", name="repo", url="https://github.com/example/repo"),
+            repo_profile="# Repo Profile\n\nSmall test repository.",
+            opportunities=[
+                OpportunitySummary(
+                    title="Replace old marker",
+                    rationale="Goal continuation candidate.",
+                    risk="low",
+                    source="test",
+                )
+            ],
+            selected_task=SelectedTask(
+                title="Replace old marker",
+                rationale="Complete the active short-term goal.",
+                expected_change="old -> new",
+                risk="low",
+            ),
+            workspace_summary=WorkspaceSummary(
+                commands_run=[command],
+                patch_applied=True,
+                notes="Goal continuation completed.",
+            ),
+            problem_statement_summary="Return old marker now becomes new marker.",
+            reproduction_notes="Inspected repo/app.py and confirmed the old marker.",
+            verification_summary="python3 -m compileall . passed.",
         )
 
 
@@ -1473,6 +1585,7 @@ class RunnerM02Test(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             config = _issue_config(tmp_path / "runs")
+            config.run.id = "goal-half"
             config.memory = MemoryConfig(root=tmp_path / "memory")
             agent = FakeMemoryAgent()
 
@@ -1481,8 +1594,10 @@ class RunnerM02Test(unittest.TestCase):
             guidance = json.loads((result.run_dir / "repo_guidance.json").read_text())
             self.assertTrue(guidance["installed"])
             self.assertIn("AGENTS.md", guidance["manifest"]["expected_repo_sources"])
-            self.assertIn("aci_memory_get_context(scope='run')", agent.prompt)
+            self.assertIn("aci_runtime_get_context(scope='run')", agent.prompt)
+            self.assertIn("aci_goal_update", agent.prompt)
             self.assertIn("AGENTS.md", agent.prompt)
+            self.assertIn("meaningful engineering contributions", agent.memory_context["goals"]["long_term_objective"])
             self.assertEqual(
                 ".contribarena/guidance/guidance_entry.md",
                 agent.memory_context["guidance"]["entry_path"],
@@ -1492,6 +1607,8 @@ class RunnerM02Test(unittest.TestCase):
                 agent.memory_context["guidance"]["path_relative_to"],
             )
             memory_context = json.loads((result.run_dir / "memory_context.json").read_text())
+            self.assertEqual("run_start_context", memory_context["snapshot_phase"])
+            self.assertIn("Final goal state", memory_context["snapshot_note"])
             self.assertEqual(
                 ".contribarena/guidance/guidance_entry.md",
                 memory_context["guidance"]["entry_path"],
@@ -1506,6 +1623,12 @@ class RunnerM02Test(unittest.TestCase):
                 working["facts"]["contributing_checked"]["value"],
             )
             self.assertEqual("agent", working["facts"]["contributing"]["source"])
+            self.assertEqual("complete", working["goals"]["short_term"]["status"])
+            goal_context = json.loads((result.run_dir / "goal_context.json").read_text())
+            self.assertEqual("complete", goal_context["short_term"]["status"])
+            goal_events = (result.run_dir / "goal_events.jsonl").read_text()
+            self.assertIn("goal_created", goal_events)
+            self.assertIn("goal_completed", goal_events)
             report = json.loads((result.run_dir / "memory_write_report.json").read_text())
             self.assertGreater(report["history_index_entries_written"], 0)
             manifest = json.loads((result.run_dir / "artifact_manifest.json").read_text())
@@ -1514,6 +1637,90 @@ class RunnerM02Test(unittest.TestCase):
             self.assertIn("working_memory.json", manifest_names)
             self.assertIn("memory_events.jsonl", manifest_names)
             self.assertIn("memory_write_report.json", manifest_names)
+            self.assertIn("goal_context.json", manifest_names)
+            self.assertIn("goal_events.jsonl", manifest_names)
+
+    def test_goal_continuation_two_runs_finishes_active_goal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _issue_config(tmp_path / "runs")
+            config.memory = MemoryConfig(root=tmp_path / "memory")
+            GoalService(config, run_id="seed").update(
+                objective="Finish a meaningful small code improvement in example/repo.",
+                status="active",
+            )
+            first_agent = FakeGoalHalfRunAgent()
+
+            first = _run_with_fake_docker(first_agent, config, tmp_path)
+
+            self.assertEqual("blocked", first.status)
+            self.assertEqual("active", first_agent.runtime_context["goals"]["short_term"]["status"])
+            self.assertEqual(
+                "active",
+                json.loads(goal_state_path(config).read_text())["short_term"]["status"],
+            )
+            first_trajectory = json.loads((first.run_dir / "trajectory.json").read_text())
+            self.assertIn("aci_runtime_get_context", {step["tool"] for step in first_trajectory})
+            self.assertFalse((first.run_dir / "patch.diff").read_text().strip())
+
+            second_agent = FakeGoalCompletingAgent()
+            config.run.id = "goal-complete"
+            config.run.model = "local-stub-continuation"
+            second = _run_with_fake_docker(second_agent, config, tmp_path)
+
+            self.assertEqual("completed", second.status)
+            self.assertEqual("active", second_agent.runtime_context["goals"]["short_term"]["status"])
+            self.assertEqual("complete", second_agent.goal_update["goals"]["short_term"]["status"])
+            self.assertEqual(
+                "complete",
+                json.loads(goal_state_path(config).read_text())["short_term"]["status"],
+            )
+            second_trajectory = json.loads((second.run_dir / "trajectory.json").read_text())
+            tools = {step["tool"] for step in second_trajectory}
+            self.assertIn("aci_runtime_get_context", tools)
+            self.assertIn("aci_goal_update", tools)
+            self.assertIn("aci_submit_patch", tools)
+            goal_events = (second.run_dir / "goal_events.jsonl").read_text()
+            self.assertIn("goal_completed", goal_events)
+
+    def test_runner_exposes_tracked_prs_in_runtime_memory_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _issue_config(tmp_path / "runs")
+            config.memory = MemoryConfig(root=tmp_path / "memory")
+            save_governance_state(
+                config,
+                GovernanceState(
+                    lifecycle_records=[
+                        PrLifecycleRecord(
+                            repository="example/repo",
+                            number=17,
+                            url="https://github.com/example/repo/pull/17",
+                            lifecycle_status="needs_response",
+                            ci_status="failure",
+                            summary="tracked PR needs a small follow-up",
+                        ),
+                        PrLifecycleRecord(
+                            repository="other/repo",
+                            number=99,
+                            lifecycle_status="needs_response",
+                        ),
+                    ]
+                ),
+            )
+            agent = FakeMemoryAgent()
+
+            result = _run_with_fake_docker(agent, config, tmp_path)
+
+            self.assertEqual(1, len(agent.memory_context["tracked_prs"]))
+            tracked = agent.memory_context["tracked_prs"][0]
+            self.assertEqual("example/repo", tracked["repository"])
+            self.assertEqual(17, tracked["number"])
+            self.assertEqual("needs_response", tracked["lifecycle_status"])
+            self.assertEqual("external_write", tracked["detail_queries"][0]["category"])
+            memory_context = json.loads((result.run_dir / "memory_context.json").read_text())
+            self.assertEqual(agent.memory_context["tracked_prs"], memory_context["tracked_prs"])
+            self.assertFalse((result.run_dir / "resume_context.json").exists())
 
     def test_guidance_disabled_skips_sidecar_and_marks_memory_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

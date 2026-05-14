@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import os
 import tempfile
 import unittest
@@ -20,6 +19,7 @@ from contribarena.config.schema import (
     WorkspaceConfig,
 )
 from contribarena.engine.controller import LocalController
+from contribarena.engine.goals import GoalService
 from contribarena.engine.middleware.governance import (
     GovernanceMiddleware,
     load_governance_state,
@@ -285,7 +285,46 @@ class GovernanceM04Test(unittest.TestCase):
             review_log = (run_dir / "pr_review_log.jsonl").read_text()
             self.assertIn('"event": "lifecycle_observed"', review_log)
             self.assertIn('"lifecycle_status": "merged"', review_log)
+            memory_events = (run_dir / "memory_events.jsonl").read_text()
+            self.assertIn("lifecycle_observed", memory_events)
+            self.assertFalse((run_dir / "resume_context.json").exists())
             self.assertFalse((config.artifacts.output_root / "pr_review_log.jsonl").exists())
+
+    def test_external_lifecycle_tick_allows_active_goal_continuation_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "runs" / "fake-run"
+            run_dir.mkdir(parents=True)
+            config = _external_config(live_enabled=True, output_root=Path(tmp) / "runs")
+            GoalService(config, run_id="seed").update(
+                objective="Continue the current PR until it is resolved.",
+                status="active",
+            )
+            state = GovernanceState(
+                lifecycle_records=[
+                    PrLifecycleRecord(
+                        repository="external/repo",
+                        number=7,
+                        url="https://github.com/external/repo/pull/7",
+                        originating_run_dir=str(run_dir),
+                        branch="contribarena/test",
+                        head_sha="abc123",
+                        next_poll_at="2000-01-01T00:00:00+00:00",
+                    )
+                ]
+            )
+            save_governance_state(config, state)
+            launcher = FakeLauncher()
+
+            with patch.dict(os.environ, {"GITHUB_TOKEN": "test-token"}):
+                result = LocalController(
+                    launcher=launcher,
+                    pr_client=FakeLifecycleClient(actor="contribarena-bot"),
+                ).run_once(config)
+
+            self.assertEqual("run_completed", result.status)
+            self.assertEqual(1, launcher.calls)
+            review_log = (run_dir / "pr_review_log.jsonl").read_text()
+            self.assertIn('"event": "lifecycle_observed"', review_log)
 
     def test_external_lifecycle_tick_backs_off_transient_observe_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

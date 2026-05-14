@@ -14,6 +14,7 @@ from contribarena.engine.external_lifecycle import (
     mark_lifecycle_observation_failed,
     observe_lifecycle_record,
 )
+from contribarena.engine.goals import GoalService
 from contribarena.engine.middleware.governance import (
     GovernanceMiddleware,
     load_governance_state,
@@ -24,7 +25,13 @@ from contribarena.engine.middleware.governance import (
 )
 from contribarena.engine.runtime_config import apply_output_dir
 from contribarena.engine.runner import RunResult, Runner
-from contribarena.models import GovernanceDecision, GovernanceState, MaintainerSignal
+from contribarena.memory import MemoryService
+from contribarena.models import (
+    GovernanceDecision,
+    GovernanceState,
+    MaintainerSignal,
+    PrLifecycleRecord,
+)
 from contribarena.tools.github_pr import GitHubPullRequestClient
 
 
@@ -99,7 +106,7 @@ class LocalController:
     ) -> ControllerTickResult:
         if config.run.mode == "external_live":
             lifecycle_tick = self._run_external_lifecycle_tick(config)
-            if lifecycle_tick is not None:
+            if lifecycle_tick is not None and not _active_short_term_goal(config):
                 return lifecycle_tick
             state = load_governance_state(config)
             decision = self.governance.evaluate_run_start(
@@ -255,6 +262,11 @@ class LocalController:
                     "next_poll_at": observation.record.next_poll_at,
                 },
             )
+            _record_lifecycle_memory_artifacts(
+                config,
+                observation.record,
+                review_count=len(reviews),
+            )
             terminal_seen = terminal_seen or observation.action == "terminal"
         save_governance_state(config, state)
         return ControllerTickResult(
@@ -268,6 +280,13 @@ def _authenticated_actor(config: RunConfig, pr_client: object | None) -> str:
     if authenticated_actor is None:
         return ""
     return str(authenticated_actor() or "")
+
+
+def _active_short_term_goal(config: RunConfig) -> bool:
+    if not config.goal.enabled:
+        return False
+    goal = GoalService(config, run_id="controller").context.short_term
+    return goal is not None and goal.status == "active"
 
 
 def _append_external_lifecycle_log(
@@ -285,6 +304,64 @@ def _append_external_lifecycle_log(
     # with the later SQLite or hosted state backend.
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry, ensure_ascii=True) + "\n")
+
+
+def _record_lifecycle_memory_artifacts(
+    config: RunConfig,
+    record: PrLifecycleRecord,
+    *,
+    review_count: int,
+) -> None:
+    if not config.memory.enabled:
+        return
+    run_dir = (
+        Path(getattr(record, "originating_run_dir", ""))
+        if getattr(record, "originating_run_dir", "")
+        else config.artifacts.output_root
+    )
+    run_dir.mkdir(parents=True, exist_ok=True)
+    memory: MemoryService | None = None
+    try:
+        memory = MemoryService(
+            config.memory,
+            run_id=_lifecycle_memory_run_id(record),
+            repo_full_name=getattr(record, "repository", ""),
+        )
+        memory.record_lifecycle_observation(
+            record,
+            review_count=review_count,
+            source_ref=f"pr#{getattr(record, 'number', '')} lifecycle tick",
+        )
+        events = memory.events_text()
+        if events:
+            with (run_dir / "memory_events.jsonl").open("a", encoding="utf-8") as handle:
+                handle.write(events)
+    except Exception as exc:
+        _append_external_lifecycle_log(
+            config,
+            record.originating_run_dir,
+            {
+                "ts": datetime.now(UTC).isoformat(),
+                "event": "lifecycle_memory_record_failed",
+                "repository": record.repository,
+                "number": record.number,
+                "error": _safe_log_error(str(exc)),
+            },
+        )
+    finally:
+        if memory is not None:
+            close = getattr(memory, "_close_graphiti", None)
+        else:
+            close = None
+        if close is not None:
+            close()
+
+
+def _lifecycle_memory_run_id(record: object) -> str:
+    repo = str(getattr(record, "repository", "repo")).replace("/", "_")
+    number = str(getattr(record, "number", "unknown"))
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    return f"lifecycle-{repo}-{number}-{timestamp}"
 
 
 def _safe_log_error(message: str) -> str:

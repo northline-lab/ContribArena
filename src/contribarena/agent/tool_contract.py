@@ -55,6 +55,8 @@ class ContributorTools(Protocol):
         evidence_refs: str = "",
     ) -> AciResult: ...
 
+    def aci_runtime_get_context(self, scope: str = "run") -> AciResult: ...
+
     def aci_memory_get_context(self, scope: str = "run") -> AciResult: ...
 
     def aci_memory_search(
@@ -78,6 +80,13 @@ class ContributorTools(Protocol):
         item_id: str = "",
         text: str = "",
         status: str = "",
+    ) -> AciResult: ...
+
+    def aci_goal_update(
+        self,
+        objective: str = "",
+        status: str = "active",
+        evidence: str = "",
     ) -> AciResult: ...
 
     def aci_recover_invalid_action(

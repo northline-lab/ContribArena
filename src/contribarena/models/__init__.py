@@ -8,6 +8,7 @@ from .governance import (
     MaintainerSignal,
     PrLifecycleRecord,
 )
+from .goals import GoalContext, GoalEvent, GoalState, GoalUpdateResult, ShortTermGoal
 from .lifecycle import (
     CiCheck,
     CiStatus,
@@ -42,6 +43,10 @@ __all__ = [
     "GovernanceDecision",
     "GovernancePrRef",
     "GovernanceState",
+    "GoalContext",
+    "GoalEvent",
+    "GoalState",
+    "GoalUpdateResult",
     "MaintainerSignal",
     "PrLifecycleRecord",
     "IssueCandidate",
@@ -55,5 +60,6 @@ __all__ = [
     "RepoSummary",
     "RunState",
     "SelectedTask",
+    "ShortTermGoal",
     "TerminalState",
 ]
