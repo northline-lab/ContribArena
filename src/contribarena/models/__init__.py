@@ -18,6 +18,7 @@ from .lifecycle import (
     TerminalState,
 )
 from .run_state import RunState
+from .surface import RunSummary
 from .tool_results import (
     AciResult,
     AgentStep,
@@ -59,6 +60,7 @@ __all__ = [
     "RepoMetadata",
     "RepoSummary",
     "RunState",
+    "RunSummary",
     "SelectedTask",
     "ShortTermGoal",
     "TerminalState",

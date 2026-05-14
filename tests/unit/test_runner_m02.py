@@ -1559,6 +1559,63 @@ class RunnerM02Test(unittest.TestCase):
             manifest_names = {entry["name"] for entry in manifest["artifacts"]}
             self.assertIn("operator_events.jsonl", manifest_names)
 
+    def test_runner_writes_surface_run_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            result = _run_with_fake_docker(
+                FakeIssueAgent(),
+                _issue_config(tmp_path / "runs"),
+                tmp_path,
+            )
+
+            summary = json.loads((result.run_dir / "run_summary.json").read_text())
+            self.assertEqual("1", summary["schema_version"])
+            self.assertEqual(result.run_id, summary["run_id"])
+            self.assertEqual("completed", summary["run_status"])
+            self.assertEqual("run_completed", summary["terminal_reason"])
+            self.assertEqual("example/repo", summary["repository"]["full_name"])
+            self.assertEqual("discovery_event_id", summary["opportunity_source"])
+            self.assertEqual("low_risk_code", summary["contribution_class"])
+            self.assertEqual("pass", summary["quality_gate"]["status"])
+            stage_statuses = {
+                stage["stage_id"]: stage["status"] for stage in summary["pipeline"]
+            }
+            self.assertEqual("passed", stage_statuses["agent"])
+            self.assertEqual("passed", stage_statuses["patch_diff"])
+            self.assertEqual("passed", stage_statuses["quality_gate"])
+            self.assertEqual("skipped", stage_statuses["pull_request"])
+            artifacts = {artifact["name"]: artifact for artifact in summary["artifacts"]}
+            self.assertEqual("public", artifacts["run_summary.json"]["visibility"])
+            self.assertEqual("public", artifacts["patch.diff"]["visibility"])
+            self.assertEqual("internal", artifacts["trace.jsonl"]["visibility"])
+            manifest = json.loads((result.run_dir / "artifact_manifest.json").read_text())
+            manifest_names = {entry["name"] for entry in manifest["artifacts"]}
+            self.assertIn("run_summary.json", manifest_names)
+
+    def test_surface_run_summary_written_for_agent_exception(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _config(tmp_path / "runs")
+            config.workspace.cleanup_policy = "retain_on_failure"
+
+            with self.assertRaises(AgentError):
+                _run_with_fake_docker(FakeFailingAgent(), config, tmp_path)
+
+            run_dirs = list(config.artifacts.output_root.iterdir())
+            self.assertEqual(1, len(run_dirs))
+            summary = json.loads((run_dirs[0] / "run_summary.json").read_text())
+            self.assertEqual("failed", summary["run_status"])
+            self.assertEqual("agent_error", summary["terminal_reason"])
+            self.assertEqual("agent", summary["terminal_layer"])
+            stage_statuses = {
+                stage["stage_id"]: stage["status"] for stage in summary["pipeline"]
+            }
+            self.assertEqual("failed", stage_statuses["agent"])
+            self.assertEqual("skipped", stage_statuses["patch_diff"])
+            manifest = json.loads((run_dirs[0] / "artifact_manifest.json").read_text())
+            manifest_names = {entry["name"] for entry in manifest["artifacts"]}
+            self.assertIn("run_summary.json", manifest_names)
+
     def test_agent_reported_progress_tool_writes_agent_source_event(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

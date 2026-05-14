@@ -39,6 +39,7 @@ from contribarena.engine.middleware.governance import (
 )
 from contribarena.engine.operator_events import OperatorProgressWriter, truncate_for_operator
 from contribarena.engine.runtime_config import apply_output_dir
+from contribarena.engine.surface_summary import build_run_summary
 from contribarena.engine.workspace import DockerWorkspaceManager
 from contribarena.errors import AgentError, BudgetExhausted, InfrastructureError
 from contribarena.memory import MemoryService
@@ -330,11 +331,6 @@ class Runner:
             _write_memory_artifacts(artifacts, memory, terminal)
             _write_goal_artifacts(artifacts, goals)
             trace.write(
-                RunState.ARTIFACTS_WRITTEN,
-                "artifacts.written",
-                {"count": len(artifacts.entries) + 1},
-            )
-            trace.write(
                 RunState.RUN_TERMINAL,
                 "run.terminal",
                 terminal.model_dump(mode="json"),
@@ -354,6 +350,12 @@ class Runner:
                     "terminal_reason": terminal.reason,
                     "terminal_layer": terminal.layer,
                 },
+            )
+            _write_run_summary_artifact(artifacts, config, run_id, repo_slug, terminal)
+            trace.write(
+                RunState.ARTIFACTS_WRITTEN,
+                "artifacts.written",
+                {"count": len(artifacts.entries) + 1},
             )
             artifacts.finalize_manifest()
             return RunResult(
@@ -409,6 +411,7 @@ class Runner:
                 "run.terminal",
                 terminal.model_dump(mode="json"),
             )
+            _write_run_summary_artifact(artifacts, config, run_id, repo_slug, terminal)
             artifacts.finalize_manifest()
             raise
         finally:
@@ -532,6 +535,24 @@ def _write_goal_artifacts(artifacts: ArtifactWriter, goals: GoalService) -> None
         kind="jsonl",
         required=False,
     )
+
+
+def _write_run_summary_artifact(
+    artifacts: ArtifactWriter,
+    config: RunConfig,
+    run_id: str,
+    repo_slug: str,
+    terminal: TerminalState,
+) -> None:
+    summary = build_run_summary(
+        config=config,
+        run_id=run_id,
+        run_dir=artifacts.run_dir,
+        artifact_entries=artifacts.entries,
+        terminal=terminal,
+        repo_slug=repo_slug,
+    )
+    artifacts.write_json("run_summary.json", summary.model_dump(mode="json"), required=False)
 
 
 def _write_pr_lifecycle_artifacts(
