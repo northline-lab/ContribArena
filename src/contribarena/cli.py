@@ -11,9 +11,11 @@ import typer
 from contribarena import __version__
 from contribarena.config import load_run_config, write_starter_config
 from contribarena.engine import LocalController, Runner
+from contribarena.engine.surface_indexer import index_surface_data
 from contribarena.errors import ContribArenaError
 
 app = typer.Typer(help="ContribArena control plane commands.")
+surface_app = typer.Typer(help="Build public read-only surface data.")
 
 
 @app.command()
@@ -82,6 +84,30 @@ def controller(
             typer.echo(f"    Status: {tick.run_result.status}")
 
 
+@surface_app.command("index")
+def surface_index(
+    input_dir: Path = typer.Option(..., "--input-dir", "-i"),
+    output_dir: Path = typer.Option(..., "--output-dir", "-o"),
+    public_base_url: str = typer.Option("", "--public-base-url"),
+) -> None:
+    """Index run artifacts into sanitized JSON for the public surface."""
+    try:
+        result = index_surface_data(
+            input_dir=input_dir,
+            output_dir=output_dir,
+            public_base_url=public_base_url,
+        )
+    except ContribArenaError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(exc.exit_code) from exc
+    typer.echo(f"Surface data written: {result.output_dir}")
+    typer.echo(f"  Runs indexed: {result.runs_indexed}")
+    typer.echo(f"  Files written: {len(result.files_written)}")
+    typer.echo(f"  Public artifacts copied: {result.artifacts_copied}")
+    if result.skipped:
+        typer.echo(f"  Skipped: {len(result.skipped)}")
+
+
 @app.command()
 def version() -> None:
     """Print version and runtime availability."""
@@ -113,3 +139,6 @@ def _command_status(name: str, command: list[str]) -> str:
     lines = (result.stderr or result.stdout).strip().splitlines()
     detail = lines[0] if lines else f"{name} returned exit code {result.returncode}"
     return f"unusable: {detail}"
+
+
+app.add_typer(surface_app, name="surface")
