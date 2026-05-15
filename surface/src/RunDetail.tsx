@@ -1,0 +1,257 @@
+import type { RunSummary } from "./types";
+
+const STAGE_LABELS: Record<string, string> = {
+  agent: "Planning",
+  repo_discovery: "Repo Found",
+  workspace: "Workspace",
+  patch_diff: "Patch Diff",
+  quality_gate: "Quality Gate",
+  pull_request: "PR Created",
+  maintainer_outcome: "Maintainer",
+};
+
+const ARTIFACT_ICONS: Record<string, React.ReactNode> = {
+  json: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <path d="M14 2v6h6" />
+      <path d="M10 13l-1 4 1 4M14 13l1 4-1 4" />
+    </svg>
+  ),
+  diff: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <path d="M14 2v6h6" />
+      <path d="M12 18v-6M9 15h6" />
+    </svg>
+  ),
+  md: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <path d="M14 2v6h6" />
+      <path d="M9 13l2 2 4-4" />
+    </svg>
+  ),
+  default: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <path d="M14 2v6h6M16 13H8M16 17H8M10 9H8" />
+    </svg>
+  ),
+};
+
+function getArtifactIcon(name: string) {
+  if (name.endsWith(".json")) return ARTIFACT_ICONS.json;
+  if (name.endsWith(".diff") || name.endsWith(".patch")) return ARTIFACT_ICONS.diff;
+  if (name.endsWith(".md")) return ARTIFACT_ICONS.md;
+  return ARTIFACT_ICONS.default;
+}
+
+function fmt(iso: string) {
+  if (!iso) return "";
+  return new Date(iso).toLocaleString(undefined, {
+    month: "short", day: "numeric",
+    hour: "2-digit", minute: "2-digit",
+  });
+}
+
+function fmtTime(iso: string) {
+  if (!iso) return "";
+  return new Date(iso).toLocaleTimeString(undefined, {
+    hour: "2-digit", minute: "2-digit",
+  });
+}
+
+function dur(s: number) {
+  if (!s) return "";
+  const m = Math.floor(s / 60);
+  return m > 0 ? `${m}m ${s % 60}s` : `${s}s`;
+}
+
+function formatBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+const DOT_STATUS_COLOR: Record<string, string> = {
+  passed: "var(--accent-blue)",
+  running: "var(--accent-orange)",
+  failed: "var(--accent-red)",
+  pending: "var(--border)",
+  blocked: "var(--ink-faint)",
+};
+
+export function RunDetail({ run }: { run: RunSummary }) {
+  const pr = run.pull_request;
+  const mo = run.maintainer_outcome;
+  const publicArtifacts = run.artifacts.filter((a) => a.visibility === "public");
+  const isMerged = mo.status === "merged";
+
+  return (
+    <div className="run-detail-card">
+      {/* Header */}
+      <div className="run-detail-header">
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6" />
+            <path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18" />
+            <path d="M4 22h16" />
+            <path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22" />
+            <path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22" />
+            <path d="M18 2H6v7a6 6 0 0 0 12 0V2z" />
+          </svg>
+          <span className="run-detail-title">Run Detail</span>
+          <span className="run-id-badge">
+            Run #{run.run_id.slice(0, 8)}
+          </span>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ cursor: "pointer", opacity: 0.5 }}>
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+          </svg>
+        </div>
+        {isMerged ? (
+          <span className="badge badge-merged" style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            Merged
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <path d="M20 6L9 17l-5-5" />
+            </svg>
+          </span>
+        ) : (
+          <span className={`badge badge-${mo.status}`}>{mo.status}</span>
+        )}
+      </div>
+
+      {/* Meta row */}
+      <div className="run-meta-row">
+        <span>Agent <strong>{run.agent.name}</strong></span>
+        <span className="sep">·</span>
+        <span>Repo <a href={run.repository.url} target="_blank" rel="noreferrer">{run.repository.full_name}</a></span>
+        {run.contribution_class !== "unknown" && (
+          <>
+            <span className="sep">·</span>
+            <span>Issue #{run.run_id.slice(-4)}</span>
+          </>
+        )}
+        <span className="sep">·</span>
+        <span>Started {fmt(run.started_at)}</span>
+        <span className="sep">·</span>
+        <span>Duration {dur(run.duration_seconds)}</span>
+      </div>
+
+      {/* Mini pipeline timeline with timestamps */}
+      <div className="run-timeline">
+        {run.pipeline.map((stage, idx) => {
+          const color = DOT_STATUS_COLOR[stage.status] ?? "var(--border)";
+          return (
+            <div key={stage.stage_id} style={{ display: "contents" }}>
+              <div className="timeline-stage-wrap">
+                <div
+                  className="timeline-dot"
+                  style={{ background: color, borderColor: color }}
+                  title={`${STAGE_LABELS[stage.stage_id] ?? stage.stage_id}: ${stage.status}`}
+                />
+                <div className="timeline-stage-label">{STAGE_LABELS[stage.stage_id] ?? stage.stage_id}</div>
+                {stage.started_at && (
+                  <div className="timeline-stage-time">{fmtTime(stage.started_at)}</div>
+                )}
+              </div>
+              {idx < run.pipeline.length - 1 && (
+                <div className={`timeline-line ${stage.status === "passed" ? "passed" : ""}`} />
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Artifacts */}
+      {publicArtifacts.length > 0 && (
+        <div className="artifacts-section">
+          <div className="artifacts-title">Artifacts</div>
+          <div className="artifact-grid">
+            {publicArtifacts.map((a) => (
+              <div key={a.name} className="artifact-card">
+                <svg className="artifact-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  {getArtifactIcon(a.name)}
+                </svg>
+                <span className="artifact-name">
+                  {a.url ? (
+                    <a href={a.url} target="_blank" rel="noreferrer">{a.name}</a>
+                  ) : a.name}
+                </span>
+                <span className="artifact-size">{formatBytes(a.size_bytes)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Log + Maintainer comment side by side */}
+      <div className="run-bottom-row">
+        {run.terminal_reason && (
+          <div className="log-snippet" style={{ flex: 1 }}>
+            <div style={{ marginBottom: 4, fontSize: 10, color: "#6a9955", fontWeight: 600 }}>Log Snippet</div>
+            <div>
+              <span className="log-time">[{fmtTime(run.started_at)}]</span>{" "}
+              <span className="log-level">INFO</span> {run.terminal_reason}
+            </div>
+            {run.quality_gate.warnings.map((w, i) => (
+              <div key={i}>
+                <span className="log-time">[{fmtTime(run.completed_at)}]</span>{" "}
+                <span style={{ color: "#ce9178" }}>WARN</span> {w}
+              </div>
+            ))}
+            {pr.url && (
+              <div>
+                <span className="log-time">[{fmtTime(run.completed_at)}]</span>{" "}
+                <span className="log-level">INFO</span> PR{pr.number ? ` #${pr.number}` : ""} created
+              </div>
+            )}
+            {isMerged && (
+              <div>
+                <span className="log-time">[{fmtTime(run.completed_at)}]</span>{" "}
+                <span className="log-level">INFO</span> Merged by @maintainer
+              </div>
+            )}
+          </div>
+        )}
+
+        {mo.status !== "pending" && mo.status !== "unknown" && (
+          <div style={{ position: "relative", flex: "0 0 auto", minWidth: 160 }}>
+            <span className="annotation" style={{ top: -22, left: 0, transform: "rotate(-3deg)", fontSize: 15, position: "absolute" }}>
+              human reviewed
+            </span>
+            <div className="maintainer-comment">
+              <div className="comment-author">Maintainer Comment</div>
+              <div style={{ marginTop: 4 }}>
+                Status: <span className={`badge badge-${mo.status}`}>{mo.status}</span>
+              </div>
+              {mo.observed_at && (
+                <div style={{ marginTop: 4, fontSize: 10, color: "var(--ink-faint)" }}>
+                  {fmt(mo.observed_at)}
+                </div>
+              )}
+            </div>
+            <div style={{ marginTop: 6, fontSize: 11 }}>
+              <span className="annotation-inline" style={{ fontSize: 14, transform: "rotate(-1deg)", display: "inline-block" }}>
+                real repo:
+              </span>{" "}
+              <a href={run.repository.url} target="_blank" rel="noreferrer" style={{ fontWeight: 600, fontSize: 12 }}>
+                {run.repository.full_name}
+              </a>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* PR link */}
+      {pr.url && (
+        <div style={{ marginTop: 10, fontSize: 11 }}>
+          <a href={pr.url} target="_blank" rel="noreferrer">
+            View PR #{pr.number} on GitHub →
+          </a>
+        </div>
+      )}
+    </div>
+  );
+}
