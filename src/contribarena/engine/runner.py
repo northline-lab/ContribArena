@@ -17,6 +17,11 @@ from contribarena.engine.context import ContextBuilder
 from contribarena.engine.external_lifecycle import lifecycle_record_for_opened_pr
 from contribarena.engine.guidance import guidance_artifact_payload, install_guidance_sidecar
 from contribarena.engine.goals import GoalService
+from contribarena.engine.judgement import (
+    build_judge_dimension_packets,
+    build_judge_packet,
+    judge_run,
+)
 from contribarena.engine.lifecycle import (
     apply_quality_gate_to_result,
     build_ci_status,
@@ -352,6 +357,8 @@ class Runner:
                 },
             )
             _write_run_summary_artifact(artifacts, config, run_id, repo_slug, terminal)
+            _write_judgement_artifacts(artifacts, config, run_id)
+            _write_run_summary_artifact(artifacts, config, run_id, repo_slug, terminal)
             trace.write(
                 RunState.ARTIFACTS_WRITTEN,
                 "artifacts.written",
@@ -411,6 +418,8 @@ class Runner:
                 "run.terminal",
                 terminal.model_dump(mode="json"),
             )
+            _write_run_summary_artifact(artifacts, config, run_id, repo_slug, terminal)
+            _write_judgement_artifacts(artifacts, config, run_id)
             _write_run_summary_artifact(artifacts, config, run_id, repo_slug, terminal)
             artifacts.finalize_manifest()
             raise
@@ -553,6 +562,29 @@ def _write_run_summary_artifact(
         repo_slug=repo_slug,
     )
     artifacts.write_json("run_summary.json", summary.model_dump(mode="json"), required=False)
+
+
+def _write_judgement_artifacts(
+    artifacts: ArtifactWriter,
+    config: RunConfig,
+    run_id: str,
+) -> None:
+    if not config.judgement.enabled:
+        return
+    packet = build_judge_packet(config=config, run_id=run_id, run_dir=artifacts.run_dir)
+    artifacts.write_json("judge_packet.json", packet.model_dump(mode="json"), required=False)
+    artifacts.write_json(
+        "judge_dimension_packets.json",
+        build_judge_dimension_packets(packet),
+        required=False,
+    )
+    judgement = judge_run(
+        config=config,
+        run_id=run_id,
+        run_dir=artifacts.run_dir,
+        packet=packet,
+    )
+    artifacts.write_json("judgement.json", judgement.model_dump(mode="json"), required=False)
 
 
 def _write_pr_lifecycle_artifacts(

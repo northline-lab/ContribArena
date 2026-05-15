@@ -12,11 +12,14 @@ from contribarena.models.lifecycle import TerminalState
 from contribarena.models.surface import (
     RunSummary,
     SurfaceArtifact,
+    SurfaceJudgement,
     SurfaceMaintainerOutcome,
     SurfacePipelineStage,
     SurfacePullRequest,
     SurfaceQualityGate,
     SurfaceRepository,
+    SurfaceRubricScore,
+    SurfaceSeason,
 )
 
 
@@ -24,6 +27,9 @@ PUBLIC_ARTIFACTS = {
     "run_summary.json",
     "patch.diff",
     "quality_gate.json",
+    "judgement.json",
+    "judge_packet.json",
+    "judge_dimension_packets.json",
     "pr_description.md",
     "postmortem.md",
     "ci_status.json",
@@ -57,11 +63,17 @@ def build_run_summary(
     pr = _pull_request(run_dir)
     maintainer = _maintainer_outcome(run_dir, pr)
     repository = _repository(config, repo_slug)
+    judgement = _judgement(run_dir)
     return RunSummary(
         run_id=run_id,
         run_mode=config.run.mode,
         model=config.run.model,
         repository=repository,
+        season=SurfaceSeason(
+            id=config.judgement.season_id,
+            name=config.judgement.season_name,
+            phase=config.judgement.season_phase,
+        ),
         opportunity_source=_opportunity_source(config),
         opportunity_source_ref=_opportunity_source_ref(config),
         started_at=trace_times["started_at"],
@@ -75,6 +87,7 @@ def build_run_summary(
         quality_gate=quality_gate,
         pull_request=pr,
         maintainer_outcome=maintainer,
+        judgement=judgement,
         artifacts=_surface_artifacts(run_dir, artifact_entries),
     )
 
@@ -181,6 +194,34 @@ def _maintainer_outcome(
                         source="github_review",
                     )
     return SurfaceMaintainerOutcome(status="pending" if pr.state == "open" else "unknown")
+
+
+def _judgement(run_dir: Path) -> SurfaceJudgement:
+    payload = _read_json(run_dir / "judgement.json")
+    if not isinstance(payload, dict):
+        return SurfaceJudgement()
+    rubric = payload.get("aggregate_rubric", [])
+    return SurfaceJudgement(
+        status=str(payload.get("status", "judged")),  # type: ignore[arg-type]
+        judge_score=_float_or_none(payload.get("judge_score")),
+        real_world_adjustment=int(payload.get("real_world_adjustment", 0) or 0),
+        arena_score=_float_or_none(payload.get("arena_score")),
+        rubric_summary=[
+            SurfaceRubricScore(
+                dimension=str(item.get("dimension", "")),
+                score=float(item.get("mean_score", 0) or 0),
+                max_score=int(item.get("max_score", 5) or 5),
+                weight=float(item.get("weight", 0) or 0),
+            )
+            for item in rubric
+            if isinstance(item, dict)
+        ],
+        source_artifacts=[
+            name
+            for name in ("judgement.json", "judge_packet.json", "judge_dimension_packets.json")
+            if (run_dir / name).exists()
+        ],
+    )
 
 
 def _repository(config: RunConfig, repo_slug: str) -> SurfaceRepository:
@@ -348,6 +389,15 @@ def _file_size(path: Path) -> int:
         return path.stat().st_size
     except OSError:
         return 0
+
+
+def _float_or_none(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _contribution_class(patch: str) -> str:

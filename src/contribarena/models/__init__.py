@@ -9,6 +9,17 @@ from .governance import (
     PrLifecycleRecord,
 )
 from .goals import GoalContext, GoalEvent, GoalState, GoalUpdateResult, ShortTermGoal
+from .judgement import (
+    JudgePacket,
+    JudgementAggregateRubricScore,
+    JudgementArtifact,
+    JudgementJudgeResult,
+    JudgementMaintainerOutcome,
+    JudgementPanel,
+    JudgementRubricScore,
+    JudgementSeason,
+    JudgementTarget,
+)
 from .lifecycle import (
     CiCheck,
     CiStatus,
@@ -48,6 +59,15 @@ __all__ = [
     "GoalEvent",
     "GoalState",
     "GoalUpdateResult",
+    "JudgePacket",
+    "JudgementAggregateRubricScore",
+    "JudgementArtifact",
+    "JudgementJudgeResult",
+    "JudgementMaintainerOutcome",
+    "JudgementPanel",
+    "JudgementRubricScore",
+    "JudgementSeason",
+    "JudgementTarget",
     "MaintainerSignal",
     "PrLifecycleRecord",
     "IssueCandidate",

@@ -79,6 +79,38 @@ class SurfaceMaintainerOutcome(BaseModel):
     ] = "none"
 
 
+class SurfaceSeason(BaseModel):
+    id: str = ""
+    name: str = ""
+    phase: Literal["owned_repo_calibration", "external_live", "archived", "unknown"] = (
+        "unknown"
+    )
+
+
+class SurfaceRubricScore(BaseModel):
+    dimension: str
+    score: float = 0
+    max_score: int = 5
+    weight: float = 0
+
+
+class SurfaceJudgement(BaseModel):
+    status: Literal[
+        "not_judged",
+        "judged",
+        "partial_fallback",
+        "fallback",
+        "deferred",
+        "failed",
+        "unknown",
+    ] = "not_judged"
+    judge_score: float | None = None
+    real_world_adjustment: int = 0
+    arena_score: float | None = None
+    rubric_summary: list[SurfaceRubricScore] = Field(default_factory=list)
+    source_artifacts: list[str] = Field(default_factory=list)
+
+
 class SurfaceArtifact(BaseModel):
     name: str
     kind: str
@@ -95,6 +127,7 @@ class RunSummary(BaseModel):
     model: str
     agent: SurfaceAgent = Field(default_factory=SurfaceAgent)
     repository: SurfaceRepository = Field(default_factory=SurfaceRepository)
+    season: SurfaceSeason = Field(default_factory=SurfaceSeason)
     opportunity_source: Literal["issue_url", "discovery_event_id", "none"] = "none"
     opportunity_source_ref: str = ""
     started_at: str = ""
@@ -110,4 +143,5 @@ class RunSummary(BaseModel):
     maintainer_outcome: SurfaceMaintainerOutcome = Field(
         default_factory=SurfaceMaintainerOutcome
     )
+    judgement: SurfaceJudgement = Field(default_factory=SurfaceJudgement)
     artifacts: list[SurfaceArtifact] = Field(default_factory=list)

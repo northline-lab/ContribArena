@@ -136,6 +136,49 @@ class GoalConfig(BaseModel):
     state_path: Path | None = None
 
 
+class JudgementJudgeConfig(BaseModel):
+    id: str
+    model: str
+
+
+class JudgementOutcomeAdjustments(BaseModel):
+    opened: int = 2
+    reviewed: int = 8
+    merged: int = 30
+    changes_requested: int = -8
+    closed: int = -20
+    spam_or_opt_out: int = -50
+
+
+def _default_judgement_dimension_weights() -> dict[str, float]:
+    return {
+        "project_selection_quality": 0.10,
+        "opportunity_identification_quality": 0.15,
+        "repository_understanding_and_plan": 0.15,
+        "solution_correctness": 0.25,
+        "verification_evidence_quality": 0.15,
+        "maintainer_acceptability": 0.20,
+    }
+
+
+class JudgementConfig(BaseModel):
+    enabled: bool = True
+    season_id: str = "season_0"
+    season_name: str = "Season 0"
+    season_phase: Literal["owned_repo_calibration", "external_live", "archived", "unknown"] = (
+        "owned_repo_calibration"
+    )
+    rubric_version: str = "m0.7"
+    panel_id: str = "m0_7_default"
+    judges: list[JudgementJudgeConfig] = Field(default_factory=list)
+    dimension_weights: dict[str, float] = Field(
+        default_factory=_default_judgement_dimension_weights
+    )
+    outcome_adjustments: JudgementOutcomeAdjustments = Field(
+        default_factory=JudgementOutcomeAdjustments
+    )
+
+
 class PrSubmissionConfig(BaseModel):
     strategy: Literal["fork", "upstream_branch"] = "fork"
     fork_owner: str | None = None
@@ -297,6 +340,7 @@ class RunConfig(BaseModel):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     guidance: GuidanceConfig = Field(default_factory=GuidanceConfig)
     goal: GoalConfig = Field(default_factory=GoalConfig)
+    judgement: JudgementConfig = Field(default_factory=JudgementConfig)
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     governance: GovernanceConfig = Field(default_factory=GovernanceConfig)
     controller: ControllerConfig = Field(default_factory=ControllerConfig)

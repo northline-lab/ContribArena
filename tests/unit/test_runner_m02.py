@@ -17,6 +17,7 @@ from contribarena.config.schema import (
     GovernanceConfig,
     GovernanceRateLimits,
     IssueConfig,
+    JudgementJudgeConfig,
     MemoryConfig,
     OwnedRepositoryPolicy,
     PrSubmissionConfig,
@@ -1587,10 +1588,80 @@ class RunnerM02Test(unittest.TestCase):
             artifacts = {artifact["name"]: artifact for artifact in summary["artifacts"]}
             self.assertEqual("public", artifacts["run_summary.json"]["visibility"])
             self.assertEqual("public", artifacts["patch.diff"]["visibility"])
+            self.assertEqual("public", artifacts["judgement.json"]["visibility"])
+            self.assertEqual("public", artifacts["judge_packet.json"]["visibility"])
+            self.assertEqual("public", artifacts["judge_dimension_packets.json"]["visibility"])
             self.assertEqual("internal", artifacts["trace.jsonl"]["visibility"])
+            self.assertEqual("season_0", summary["season"]["id"])
+            self.assertEqual("fallback", summary["judgement"]["status"])
+            self.assertGreater(summary["judgement"]["judge_score"], 0)
+            self.assertEqual(0, summary["judgement"]["real_world_adjustment"])
+            self.assertEqual(
+                summary["judgement"]["judge_score"],
+                summary["judgement"]["arena_score"],
+            )
             manifest = json.loads((result.run_dir / "artifact_manifest.json").read_text())
             manifest_names = {entry["name"] for entry in manifest["artifacts"]}
             self.assertIn("run_summary.json", manifest_names)
+            self.assertIn("judge_packet.json", manifest_names)
+            self.assertIn("judge_dimension_packets.json", manifest_names)
+            self.assertIn("judgement.json", manifest_names)
+
+    def test_runner_writes_anonymized_judgement_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _issue_config(tmp_path / "runs")
+            config.run.model = "compatible/worker-model"
+            config.judgement.judges = [
+                JudgementJudgeConfig(id="judge_a", model="compatible/judge-a"),
+                JudgementJudgeConfig(id="judge_b", model="compatible/judge-b"),
+            ]
+            result = _run_with_fake_docker(FakeIssueAgent(), config, tmp_path)
+
+            packet = json.loads((result.run_dir / "judge_packet.json").read_text())
+            self.assertEqual(result.run_id, packet["run_id"])
+            self.assertNotIn("model", packet)
+            self.assertNotIn("agent", packet)
+            self.assertEqual("example/repo", packet["repository"]["full_name"])
+            dimension_packets = json.loads(
+                (result.run_dir / "judge_dimension_packets.json").read_text()
+            )
+            self.assertIn("solution_correctness", dimension_packets)
+            self.assertIn("patch_excerpt", dimension_packets["solution_correctness"])
+            self.assertNotIn("model", dimension_packets["solution_correctness"])
+
+            judgement = json.loads((result.run_dir / "judgement.json").read_text())
+            self.assertEqual("fallback", judgement["status"])
+            self.assertEqual("season_0", judgement["season_id"])
+            self.assertEqual("judge_dimension_packets.json", judgement["judge_dimension_packets"])
+            self.assertEqual("mean", judgement["judge_panel"]["aggregation"])
+            self.assertEqual(["judge_a", "judge_b"], [j["judge_id"] for j in judgement["judges"]])
+            self.assertEqual(6, len(judgement["aggregate_rubric"]))
+            self.assertAlmostEqual(
+                1.0,
+                sum(score["weight"] for score in judgement["aggregate_rubric"]),
+            )
+            self.assertEqual(
+                0.25,
+                next(
+                    score["weight"]
+                    for score in judgement["aggregate_rubric"]
+                    if score["dimension"] == "solution_correctness"
+                ),
+            )
+            self.assertGreater(judgement["judge_score"], 0)
+            self.assertGreaterEqual(judgement["arena_score"], 0)
+            self.assertTrue(
+                all(
+                    0 <= score["score"] <= 5
+                    and "weight" in score
+                    and score["source"] == "fallback"
+                    for judge in judgement["judges"]
+                    for score in judge["rubric"]
+                )
+            )
+            self.assertIn("judge_packet.json", judgement["evidence"])
+            self.assertIn("judge_dimension_packets.json", judgement["evidence"])
 
     def test_surface_run_summary_written_for_agent_exception(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1612,9 +1683,18 @@ class RunnerM02Test(unittest.TestCase):
             }
             self.assertEqual("failed", stage_statuses["agent"])
             self.assertEqual("skipped", stage_statuses["patch_diff"])
+            self.assertTrue((run_dirs[0] / "judge_packet.json").exists())
+            self.assertTrue((run_dirs[0] / "judge_dimension_packets.json").exists())
+            self.assertTrue((run_dirs[0] / "judgement.json").exists())
+            judgement = json.loads((run_dirs[0] / "judgement.json").read_text())
+            self.assertEqual("fallback", judgement["status"])
+            self.assertEqual("unknown", judgement["maintainer_outcome"]["status"])
+            self.assertEqual(0, judgement["aggregate_rubric"][0]["mean_score"])
             manifest = json.loads((run_dirs[0] / "artifact_manifest.json").read_text())
             manifest_names = {entry["name"] for entry in manifest["artifacts"]}
             self.assertIn("run_summary.json", manifest_names)
+            self.assertIn("judge_dimension_packets.json", manifest_names)
+            self.assertIn("judgement.json", manifest_names)
 
     def test_agent_reported_progress_tool_writes_agent_source_event(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
