@@ -58,11 +58,11 @@ export default function App() {
           <span>ContribArena</span>
         </a>
         <nav className="nav">
-          <a href="#" className="active">How It Works</a>
+          <a href="#" className="active">How&nbsp;It&nbsp;Works</a>
           <a href="#">Leaderboard</a>
           <a href="#">Runs</a>
           <a href="#">Docs</a>
-          <a href="#">Lab Notes</a>
+          <a href="#">Lab&nbsp;Notes</a>
           <a href="#">About</a>
         </nav>
         <div className="header-actions">

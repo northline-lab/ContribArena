@@ -81,24 +81,30 @@ button {
 
 .site-header {
   position: sticky;
-  top: 0;
+  top: 10px;
   z-index: 20;
+  width: min(1240px, calc(100% - 24px));
+  max-width: 1240px;
   display: flex;
   align-items: center;
-  gap: 36px;
-  padding: 10px 40px;
-  border-bottom: 1px solid var(--line);
-  background: rgba(250, 247, 239, 0.92);
+  gap: 24px;
+  margin: 10px auto 0;
+  padding: 10px 18px 10px 20px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 253, 247, 0.88);
   backdrop-filter: blur(12px);
+  box-shadow: 2px 3px 0 rgba(30, 26, 19, 0.05);
 }
 
 .logo {
   display: flex;
   align-items: center;
+  flex: 0 0 auto;
   gap: 10px;
   color: var(--ink);
-  font-size: 26px;
-  font-weight: 800;
+  font-size: 24px;
+  font-weight: 900;
   letter-spacing: -0.05em;
 }
 
@@ -125,16 +131,30 @@ button {
 }
 
 .nav {
-  flex: 1;
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: clamp(18px, 2vw, 40px);
+  justify-content: center;
+  gap: clamp(14px, 1.7vw, 30px);
 }
 
 .nav a {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  min-width: max-content;
   color: var(--ink-soft);
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 650;
+  white-space: nowrap !important;
+}
+
+.nav a:nth-child(1) {
+  min-width: 90px;
+}
+
+.nav a:nth-child(5) {
+  min-width: 68px;
 }
 
 .nav a:hover,
@@ -150,15 +170,17 @@ button {
 .header-actions {
   display: flex;
   align-items: center;
-  gap: 22px;
+  flex: 0 0 auto;
+  margin-left: auto;
+  gap: 14px;
 }
 
 .github-star {
   display: inline-flex;
   align-items: center;
   gap: 9px;
-  min-height: 43px;
-  padding: 0 14px;
+  min-height: 38px;
+  padding: 0 12px;
   border: 1px solid var(--line-strong);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.5);
@@ -182,9 +204,9 @@ button {
 
 .btn-primary,
 .btn-outline {
-  min-height: 45px;
+  min-height: 40px;
   border-radius: 8px;
-  padding: 0 21px;
+  padding: 0 18px;
   cursor: pointer;
   font-weight: 800;
   letter-spacing: -0.01em;
@@ -216,9 +238,9 @@ button {
   max-width: 1240px;
   margin: 0 auto;
   display: grid;
-  grid-template-columns: 340px 1fr;
-  gap: 32px;
-  padding: 36px 40px 24px;
+  grid-template-columns: 460px 1fr;
+  gap: 40px;
+  padding: 32px 40px 20px;
   align-items: start;
 }
 
@@ -230,7 +252,7 @@ button {
 .hero-brand {
   margin: 0 0 16px;
   font-family: var(--font-display);
-  font-size: 68px;
+  font-size: 70px;
   line-height: 0.95;
   letter-spacing: -0.05em;
   font-weight: 900;
@@ -570,9 +592,9 @@ button {
 .main-content {
   position: relative;
   max-width: 1240px;
-  margin: 32px auto 0;
+  margin: 28px auto 0;
   display: grid;
-  grid-template-columns: minmax(400px, 0.46fr) minmax(480px, 0.54fr);
+  grid-template-columns: minmax(420px, 0.47fr) minmax(500px, 0.53fr);
   gap: 24px;
   padding: 0 40px 22px;
 }
@@ -705,7 +727,7 @@ button {
 .lb-name {
   font-weight: 900;
   line-height: 1.15;
-  max-width: 120px;
+  max-width: 180px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -733,11 +755,16 @@ button {
   font-size: 11px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
+  min-width: 48px;
 }
 
 .lb-merged-num {
   color: var(--green);
-  margin-right: 4px;
+}
+
+.lb-outcome-sep {
+  color: var(--line-strong);
+  margin: 0 1px;
 }
 
 .lb-reviewed-num {
@@ -766,7 +793,7 @@ button {
 }
 
 .featured-run-card {
-  padding: 15px 17px 17px;
+  padding: 12px 14px 14px;
   border: 1.3px solid var(--line-strong);
   border-radius: 10px;
   background: rgba(255, 253, 248, 0.72);
@@ -1325,6 +1352,7 @@ button {
 
 @media (max-width: 1100px) {
   .site-header {
+    width: calc(100% - 56px);
     padding: 14px 28px;
     gap: 22px;
   }
@@ -1424,6 +1452,10 @@ button {
   .site-footer {
     padding-left: 16px;
     padding-right: 16px;
+  }
+
+  .site-header {
+    width: calc(100% - 32px);
   }
 
   .logo {

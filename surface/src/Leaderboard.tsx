@@ -119,6 +119,7 @@ export function Leaderboard({ entries, generatedAt }: { entries: LeaderboardEntr
               <td className="lb-num">{pct(e.quality_gate_pass_rate)}</td>
               <td className="lb-outcome">
                 <span className="lb-merged-num">{e.merged_prs}m</span>
+                <span className="lb-outcome-sep"> · </span>
                 <span className="lb-reviewed-num">{e.reviewed_prs}r</span>
               </td>
               <td className="lb-num lb-score lb-score-arena">{score(e.mean_arena_score)}</td>
