@@ -1,5 +1,3 @@
-import type { PipelineStage } from "./types";
-
 const STAGE_ICONS: Record<string, React.ReactNode> = {
   agent: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
@@ -49,99 +47,54 @@ const STAGE_ICONS: Record<string, React.ReactNode> = {
   ),
 };
 
-const STAGE_META: Record<string, { label: string; desc: string; tag: string; tagColor: string }> = {
-  agent:              { label: "AI Agent",          desc: "Plans and acts\nwith tools",                  tag: "LLM + Tools",        tagColor: "blue" },
-  repo_discovery:     { label: "Repo\nDiscovery",   desc: "Finds real issues\n& opportunities",          tag: "GitHub API",         tagColor: "default" },
-  workspace:          { label: "Docker\nWorkspace", desc: "Reproducible env\nper repository",            tag: "Isolated · Ephemeral", tagColor: "teal" },
-  patch_diff:         { label: "Patch Diff",        desc: "Implements\nchange",                          tag: "git diff",           tagColor: "orange" },
-  quality_gate:       { label: "Quality Gate",      desc: "Tests, lint, build,\npolicy checks",          tag: "Gated",              tagColor: "default" },
-  pull_request:       { label: "Pull Request",      desc: "Creates PR with\ncontext & trace",            tag: "GitHub PR",          tagColor: "purple" },
-  maintainer_outcome: { label: "Maintainer\nOutcome", desc: "Human reviewed.\nOutcome recorded.",        tag: "",                   tagColor: "default" },
-};
-
-const STAGE_ORDER = [
-  "agent", "repo_discovery", "workspace", "patch_diff",
-  "quality_gate", "pull_request", "maintainer_outcome",
+const STATIC_STAGES = [
+  { id: "agent", title: "AI Agent", desc: "Picks up issue", tag: "LLM", tagColor: "blue" },
+  { id: "repo_discovery", title: "Discovery", desc: "Finds repos", tag: "API", tagColor: "purple" },
+  { id: "workspace", title: "Workspace", desc: "Isolated env", tag: "Docker", tagColor: "teal" },
+  { id: "patch_diff", title: "Patch", desc: "Code changes", tag: "diff", tagColor: "default" },
+  { id: "quality_gate", title: "Quality", desc: "Lint & test", tag: "Gate", tagColor: "orange" },
+  { id: "pull_request", title: "PR", desc: "Opens PR", tag: "GitHub", tagColor: "blue" },
+  { id: "maintainer_outcome", title: "Maintainer", desc: "Reviews", tag: "", tagColor: "default" },
 ];
 
-const DOT_COLORS: Record<string, string> = {
-  passed:  "#2563eb",
-  running: "#d97706",
-  failed:  "#dc2626",
-  pending: "#d1d5db",
-  blocked: "#9ca3af",
-};
+const STATUS_LABELS = [
+  { key: "merged", label: "Merged" },
+  { key: "reviewed", label: "Reviewed" },
+  { key: "changes_requested", label: "Changes" },
+  { key: "closed", label: "Closed" },
+];
 
-export function Pipeline({ stages }: { stages: PipelineStage[] }) {
-  const byId = new Map(stages.map((s) => [s.stage_id, s]));
-
+export function Pipeline() {
   return (
-    <div style={{ position: "relative" }}>
-      {/* Stage boxes row */}
-      <div className="pipeline">
-        {STAGE_ORDER.map((id, idx) => {
-          const meta = STAGE_META[id];
-          const stage = byId.get(id);
-          const isActive = stage?.status === "passed" || stage?.status === "running";
-          const isFinal = id === "maintainer_outcome";
-          const tagColorClass = `stage-tag-${meta.tagColor}`;
-
-          return (
-            <div key={id} className="pipeline-stage">
-              <div className="stage-number">{idx + 1}</div>
-              <div className={`stage-icon-box ${isActive ? "active" : ""}`}>
-                {STAGE_ICONS[id]}
-              </div>
-              <div className="stage-title">
-                {meta.label.split("\n").map((line, i) => (
-                  <span key={i}>{line}{i < meta.label.split("\n").length - 1 && <br />}</span>
-                ))}
-              </div>
-              <div className="stage-desc">
-                {meta.desc.split("\n").map((line, i) => (
-                  <span key={i}>{line}{i < meta.desc.split("\n").length - 1 && <br />}</span>
-                ))}
-              </div>
-              {meta.tag && (
-                <div className={`stage-tag ${tagColorClass}`}>{meta.tag}</div>
-              )}
-              {isFinal && (
+    <div className="pipeline">
+      {STATIC_STAGES.map((stage, i) => {
+        const icon = STAGE_ICONS[stage.id];
+        const isLast = i === STATIC_STAGES.length - 1;
+        return (
+          <div key={stage.id} className="pipeline-stage">
+            <div className="stage-card">
+              <span className="stage-number">{i + 1}</span>
+              <span className="stage-icon-box">{icon}</span>
+              <span className="stage-title">{stage.title}</span>
+              <span className="stage-desc">{stage.desc}</span>
+              {stage.id === "maintainer_outcome" ? (
                 <div className="status-dots">
-                  <span className="status-dot merged">Merged</span>
-                  <span className="status-dot reviewed">Reviewed</span>
-                  <span className="status-dot changes_requested">Changes Requested</span>
-                  <span className="status-dot closed">Closed</span>
+                  {STATUS_LABELS.map((s) => (
+                    <span key={s.key} className={`status-dot ${s.key}`}>{s.label}</span>
+                  ))}
                 </div>
-              )}
-              {idx < STAGE_ORDER.length - 1 && (
-                <>
-                  <div className="stage-connector" />
-                  <div className="stage-arrow">
-                    <svg viewBox="0 0 14 14"><path d="M2 7h10M8 3l4 4-4 4" /></svg>
-                  </div>
-                </>
-              )}
+              ) : stage.tag ? (
+                <span className={`stage-tag stage-tag-${stage.tagColor}`}>{stage.tag}</span>
+              ) : null}
             </div>
-          );
-        })}
-      </div>
-
-      {/* Dashed timeline row below stages */}
-      <div className="pipeline-timeline">
-        <div className="pipeline-timeline-track" />
-        {STAGE_ORDER.map((id) => {
-          const stage = byId.get(id);
-          const color = DOT_COLORS[stage?.status ?? "pending"];
-          return (
-            <div key={id} className="pipeline-timeline-dot-wrap">
-              <div
-                className="pipeline-timeline-dot"
-                style={{ background: color, borderColor: color === "#d1d5db" ? "#9ca3af" : color }}
-              />
-            </div>
-          );
-        })}
-      </div>
+            {!isLast && (
+              <span className="stage-arrow">
+                <svg viewBox="0 0 12 12"><path d="M2 6h8M7 3l3 3-3 3" /></svg>
+              </span>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

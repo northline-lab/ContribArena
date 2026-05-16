@@ -86,7 +86,6 @@ export function RunDetail({ run }: { run: RunSummary }) {
   const pr = run.pull_request;
   const mo = run.maintainer_outcome;
   const publicArtifacts = run.artifacts.filter((a) => a.visibility === "public");
-  const isMerged = mo.status === "merged";
 
   return (
     <div className="run-detail-card">
@@ -110,7 +109,7 @@ export function RunDetail({ run }: { run: RunSummary }) {
             <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
           </svg>
         </div>
-        {isMerged ? (
+        {mo.status === "merged" ? (
           <span className="badge badge-merged" style={{ display: "flex", alignItems: "center", gap: 4 }}>
             Merged
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
@@ -127,12 +126,6 @@ export function RunDetail({ run }: { run: RunSummary }) {
         <span>Agent <strong>{run.agent.name}</strong></span>
         <span className="sep">·</span>
         <span>Repo <a href={run.repository.url} target="_blank" rel="noreferrer">{run.repository.full_name}</a></span>
-        {run.contribution_class !== "unknown" && (
-          <>
-            <span className="sep">·</span>
-            <span>Issue #{run.run_id.slice(-4)}</span>
-          </>
-        )}
         <span className="sep">·</span>
         <span>Started {fmt(run.started_at)}</span>
         <span className="sep">·</span>
@@ -207,12 +200,6 @@ export function RunDetail({ run }: { run: RunSummary }) {
                 <span className="log-level">INFO</span> PR{pr.number ? ` #${pr.number}` : ""} created
               </div>
             )}
-            {isMerged && (
-              <div>
-                <span className="log-time">[{fmtTime(run.completed_at)}]</span>{" "}
-                <span className="log-level">INFO</span> Merged by @maintainer
-              </div>
-            )}
           </div>
         )}
 
@@ -222,7 +209,7 @@ export function RunDetail({ run }: { run: RunSummary }) {
               human reviewed
             </span>
             <div className="maintainer-comment">
-              <div className="comment-author">Maintainer Comment</div>
+              <div className="comment-author">Maintainer Outcome</div>
               <div style={{ marginTop: 4 }}>
                 Status: <span className={`badge badge-${mo.status}`}>{mo.status}</span>
               </div>

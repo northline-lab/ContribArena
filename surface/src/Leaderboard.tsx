@@ -7,6 +7,11 @@ function pct(v: number) {
   return `${Math.round(v * 100)}%`;
 }
 
+function score(v: number | null | undefined) {
+  if (v == null) return "–";
+  return v.toFixed(1);
+}
+
 function initials(name: string) {
   return name
     .split(/[\s-]+/)
@@ -25,29 +30,15 @@ const AVATAR_COLORS = [
   { bg: "#d1fae5", color: "#065f46" },
 ];
 
-// Generate a simple sparkline SVG from fake data (since we don't have historical data)
-function Sparkline({ seed }: { seed: number }) {
-  const points: number[] = [];
-  let v = 30 + (seed * 17) % 40;
-  for (let i = 0; i < 8; i++) {
-    v = Math.max(5, Math.min(95, v + ((seed * (i + 1) * 7) % 30) - 15));
-    points.push(v);
-  }
-  const max = Math.max(...points);
-  const min = Math.min(...points);
-  const range = max - min || 1;
-  const coords = points
-    .map((p, i) => `${(i / 7) * 58 + 1},${20 - ((p - min) / range) * 16}`)
-    .join(" ");
-
-  return (
-    <svg className="lb-sparkline" viewBox="0 0 60 20">
-      <polyline points={coords} />
-    </svg>
-  );
+function fmtGenerated(iso: string) {
+  if (!iso) return "";
+  return new Date(iso).toLocaleString(undefined, {
+    month: "short", day: "numeric",
+    hour: "2-digit", minute: "2-digit",
+  });
 }
 
-export function Leaderboard({ entries }: { entries: LeaderboardEntry[] }) {
+export function Leaderboard({ entries, generatedAt }: { entries: LeaderboardEntry[]; generatedAt?: string }) {
   const [activeTab, setActiveTab] = useState<(typeof TABS)[number]>("Overall");
 
   const sorted = [...entries].sort((a, b) => {
@@ -55,7 +46,19 @@ export function Leaderboard({ entries }: { entries: LeaderboardEntry[] }) {
       case "PRs": return b.prs_opened - a.prs_opened;
       case "Merged": return b.merged_prs - a.merged_prs;
       case "Reviewed": return b.reviewed_prs - a.reviewed_prs;
-      default: return b.merge_rate - a.merge_rate;
+      default: {
+        const aArena = a.mean_arena_score ?? null;
+        const bArena = b.mean_arena_score ?? null;
+        if (bArena !== null && aArena === null) return 1;
+        if (aArena !== null && bArena === null) return -1;
+        if (aArena !== null && bArena !== null && aArena !== bArena) return bArena - aArena;
+        const aJudge = a.mean_judge_score ?? null;
+        const bJudge = b.mean_judge_score ?? null;
+        if (bJudge !== null && aJudge === null) return 1;
+        if (aJudge !== null && bJudge === null) return -1;
+        if (aJudge !== null && bJudge !== null && aJudge !== bJudge) return bJudge - aJudge;
+        return b.runs - a.runs;
+      }
     }
   });
 
@@ -69,7 +72,7 @@ export function Leaderboard({ entries }: { entries: LeaderboardEntry[] }) {
           Agent Leaderboard
         </div>
         <div className="section-meta">
-          Last updated: 15m ago
+          {generatedAt ? `Updated ${fmtGenerated(generatedAt)}` : ""}
         </div>
       </div>
 
@@ -92,10 +95,10 @@ export function Leaderboard({ entries }: { entries: LeaderboardEntry[] }) {
             <th>Agent</th>
             <th>Runs</th>
             <th>PRs</th>
-            <th>Merged</th>
-            <th>Reviewed</th>
-            <th>Rate</th>
-            <th>Trend</th>
+            <th>QG%</th>
+            <th>Outcome</th>
+            <th>Arena</th>
+            <th>Judge</th>
           </tr>
         </thead>
         <tbody>
@@ -113,10 +116,13 @@ export function Leaderboard({ entries }: { entries: LeaderboardEntry[] }) {
               </td>
               <td className="lb-num">{e.runs}</td>
               <td className="lb-num">{e.prs_opened}</td>
-              <td className="lb-num green">{e.merged_prs}</td>
-              <td className="lb-num orange">{e.reviewed_prs}</td>
-              <td className="lb-num">{pct(e.merge_rate)}</td>
-              <td><Sparkline seed={e.agent_handle.length + e.runs} /></td>
+              <td className="lb-num">{pct(e.quality_gate_pass_rate)}</td>
+              <td className="lb-outcome">
+                <span className="lb-merged-num">{e.merged_prs}m</span>
+                <span className="lb-reviewed-num">{e.reviewed_prs}r</span>
+              </td>
+              <td className="lb-num lb-score lb-score-arena">{score(e.mean_arena_score)}</td>
+              <td className="lb-num lb-score">{score(e.mean_judge_score)}</td>
             </tr>
           ))}
         </tbody>
