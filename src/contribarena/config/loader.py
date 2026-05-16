@@ -112,6 +112,16 @@ controller:
   interval_seconds: 300
   max_ticks: 1
 
+backend:
+  read_model_path: .contribarena/read_model.sqlite
+  api_cors_origins:
+    - http://localhost:5173
+    - http://127.0.0.1:5173
+    - https://contribarena.org
+    - https://www.contribarena.org
+  watch_enabled: true
+  refresh_debounce_seconds: 1.0
+
 models:
   providers:
     compatible: {}

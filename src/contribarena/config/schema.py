@@ -264,6 +264,20 @@ class ControllerConfig(BaseModel):
     max_ticks: int | None = Field(default=1, ge=1)
 
 
+class BackendConfig(BaseModel):
+    read_model_path: Path = Path(".contribarena/read_model.sqlite")
+    api_cors_origins: list[str] = Field(
+        default_factory=lambda: [
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "https://contribarena.org",
+            "https://www.contribarena.org",
+        ]
+    )
+    watch_enabled: bool = True
+    refresh_debounce_seconds: float = Field(default=1.0, ge=0.1)
+
+
 class CompatibleModelConfig(BaseModel):
     base_url: str | None = None
     base_url_env: str | None = None
@@ -344,6 +358,7 @@ class RunConfig(BaseModel):
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     governance: GovernanceConfig = Field(default_factory=GovernanceConfig)
     controller: ControllerConfig = Field(default_factory=ControllerConfig)
+    backend: BackendConfig = Field(default_factory=BackendConfig)
 
     @model_validator(mode="after")
     def validate_issue_solving_target(self) -> RunConfig:

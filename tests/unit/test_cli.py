@@ -128,6 +128,21 @@ class CliTest(unittest.TestCase):
             self.assertIn("Controller completed: disabled", result.output)
             self.assertIn("Tick 1: disabled", result.output)
 
+    def test_status_reports_empty_backend_state(self) -> None:
+        runner = CliRunner()
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.yaml"
+            self.assertEqual(
+                0,
+                runner.invoke(app, ["init", "--output", str(config_path)]).exit_code,
+            )
+
+            result = runner.invoke(app, ["status", "--config", str(config_path)])
+
+            self.assertEqual(0, result.exit_code, result.output)
+            self.assertIn("Benchmark status:", result.output)
+            self.assertIn("Runs:        0", result.output)
+
 
 if __name__ == "__main__":
     unittest.main()

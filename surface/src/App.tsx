@@ -1,9 +1,10 @@
 import { useState, useEffect } from "react";
-import type { SurfaceData, RunSummary } from "./types";
-import { loadSurfaceData } from "./data";
+import type { LeaderboardEntry, SurfaceData, RunSummary } from "./types";
+import { dataSourceLabel, loadSurfaceData } from "./data";
 import { Pipeline } from "./Pipeline";
 import { Leaderboard } from "./Leaderboard";
 import { FeaturedRun } from "./FeaturedRun";
+import { RunDetail } from "./RunDetail";
 
 function pickFeaturedRun(runs: RunSummary[]): RunSummary | null {
   if (!runs.length) return null;
@@ -37,9 +38,132 @@ function FooterPillar({ icon, title, desc }: { icon: React.ReactNode; title: str
   );
 }
 
+type Route =
+  | { page: "home" }
+  | { page: "leaderboard" }
+  | { page: "runs" }
+  | { page: "agents" }
+  | { page: "methodology" }
+  | { page: "run"; runId: string };
+
+function parseRoute(hash: string): Route {
+  const path = hash.replace(/^#\/?/, "");
+  if (path.startsWith("runs/")) return { page: "run", runId: decodeURIComponent(path.slice(5)) };
+  if (path === "leaderboard") return { page: "leaderboard" };
+  if (path === "runs") return { page: "runs" };
+  if (path === "agents") return { page: "agents" };
+  if (path === "methodology") return { page: "methodology" };
+  return { page: "home" };
+}
+
+function useHashRoute(): Route {
+  const [route, setRoute] = useState<Route>(() => parseRoute(window.location.hash));
+  useEffect(() => {
+    const onHashChange = () => setRoute(parseRoute(window.location.hash));
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
+  return route;
+}
+
+function compactDate(value: string): string {
+  if (!value) return "unknown";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function RunsPage({ runs }: { runs: RunSummary[] }) {
+  return (
+    <section className="subpage">
+      <div className="subpage-head">
+        <p className="eyebrow">Run evidence</p>
+        <h2>Runs</h2>
+        <p>Every row is generated from benchmark artifacts and judgement output.</p>
+      </div>
+      <div className="run-list">
+        {runs.map((run) => (
+          <a className="run-row" href={`#/runs/${encodeURIComponent(run.run_id)}`} key={run.run_id}>
+            <span>
+              <strong>{run.repository.full_name || "unknown repo"}</strong>
+              <em>{run.agent.handle || run.agent.name} · {run.contribution_class}</em>
+            </span>
+            <span>{run.judgement.arena_score ?? "–"}</span>
+            <span>{run.quality_gate.status}</span>
+            <span>{compactDate(run.started_at)}</span>
+          </a>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function AgentsPage({ leaderboard }: { leaderboard: LeaderboardEntry[] }) {
+  const agents = leaderboard.reduce<Record<string, LeaderboardEntry[]>>((acc, row) => {
+    const key = row.agent_handle || row.agent_name;
+    acc[key] = [...(acc[key] ?? []), row];
+    return acc;
+  }, {});
+  return (
+    <section className="subpage">
+      <div className="subpage-head">
+        <p className="eyebrow">Agent performance</p>
+        <h2>Agents</h2>
+        <p>Aggregates stay season-scoped so score changes remain explainable.</p>
+      </div>
+      <div className="agent-grid">
+        {Object.entries(agents).map(([handle, rows]) => {
+          const runs = rows.reduce((sum, row) => sum + row.runs, 0);
+          const merged = rows.reduce((sum, row) => sum + row.merged_prs, 0);
+          const best = rows[0];
+          return (
+            <article className="agent-card" key={handle}>
+              <h3>{best.agent_name}</h3>
+              <p>{handle}</p>
+              <div className="agent-metrics">
+                <span>{runs}<em>runs</em></span>
+                <span>{merged}<em>merged</em></span>
+                <span>{best.mean_arena_score ?? "–"}<em>arena</em></span>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function MethodologyPage() {
+  return (
+    <section className="subpage methodology-page">
+      <div className="subpage-head">
+        <p className="eyebrow">Methodology</p>
+        <h2>Judged contributions, not synthetic tasks</h2>
+        <p>
+          ContribArena scores the full contribution chain: repository selection,
+          opportunity quality, implementation, verification, and maintainer fit.
+        </p>
+      </div>
+      <div className="method-grid">
+        {[
+          "Project selection",
+          "Opportunity identification",
+          "Repository understanding",
+          "Solution correctness",
+          "Verification evidence",
+          "Maintainer acceptability",
+        ].map((item) => (
+          <div className="method-card" key={item}>{item}</div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 export default function App() {
   const [data, setData] = useState<SurfaceData | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const route = useHashRoute();
 
   useEffect(() => {
     loadSurfaceData()
@@ -48,6 +172,9 @@ export default function App() {
   }, []);
 
   const featuredRun = data ? pickFeaturedRun(data.runs) : null;
+  const routeRun = data && route.page === "run"
+    ? data.runs.find((run) => run.run_id === route.runId)
+    : null;
 
   return (
     <>
@@ -58,12 +185,11 @@ export default function App() {
           <span>ContribArena</span>
         </a>
         <nav className="nav">
-          <a href="#" className="active">How&nbsp;It&nbsp;Works</a>
-          <a href="#">Leaderboard</a>
-          <a href="#">Runs</a>
-          <a href="#">Docs</a>
-          <a href="#">Lab&nbsp;Notes</a>
-          <a href="#">About</a>
+          <a href="#" className={route.page === "home" ? "active" : ""}>How&nbsp;It&nbsp;Works</a>
+          <a href="#/leaderboard" className={route.page === "leaderboard" ? "active" : ""}>Leaderboard</a>
+          <a href="#/runs" className={route.page === "runs" || route.page === "run" ? "active" : ""}>Runs</a>
+          <a href="#/agents" className={route.page === "agents" ? "active" : ""}>Agents</a>
+          <a href="#/methodology" className={route.page === "methodology" ? "active" : ""}>Methodology</a>
         </nav>
         <div className="header-actions">
           <a className="github-star" href="https://github.com" target="_blank" rel="noreferrer">
@@ -122,17 +248,31 @@ export default function App() {
 
       {/* ── Main Content ── */}
       {data && (
-        <div className="main-content">
-          <span className="annotation rankings-note">transparent<br />rankings</span>
-          <span className="annotation artifacts-note">real repo</span>
-          <div>
-            <Leaderboard entries={data.leaderboard} generatedAt={data.generated_at} />
-          </div>
+        <>
+          <div className="data-source">Data source: {dataSourceLabel()} · Generated {data.generated_at || "unknown"}</div>
+          <div className={route.page === "home" ? "main-content" : "page-content"}>
+            {route.page === "home" && (
+              <>
+                <span className="annotation rankings-note">transparent<br />rankings</span>
+                <span className="annotation artifacts-note">real repo</span>
+                <div>
+                  <Leaderboard entries={data.leaderboard} generatedAt={data.generated_at} />
+                </div>
 
-          <div className="detail-column">
-            {featuredRun && <FeaturedRun run={featuredRun} />}
+                <div className="detail-column">
+                  {featuredRun && <FeaturedRun run={featuredRun} />}
+                </div>
+              </>
+            )}
+            {route.page === "leaderboard" && <Leaderboard entries={data.leaderboard} generatedAt={data.generated_at} />}
+            {route.page === "runs" && <RunsPage runs={data.runs} />}
+            {route.page === "agents" && <AgentsPage leaderboard={data.leaderboard} />}
+            {route.page === "methodology" && <MethodologyPage />}
+            {route.page === "run" && (
+              routeRun ? <RunDetail run={routeRun} /> : <div className="empty-state">Run not found: {route.runId}</div>
+            )}
           </div>
-        </div>
+        </>
       )}
 
       {/* ── Footer ── */}

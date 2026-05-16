@@ -11,6 +11,9 @@ import typer
 from contribarena import __version__
 from contribarena.config import load_run_config, write_starter_config
 from contribarena.engine import LocalController, Runner
+from contribarena.engine.api import create_app
+from contribarena.engine.judge_refresh import refresh_judgement
+from contribarena.engine.read_model import SurfaceReadModel
 from contribarena.engine.surface_indexer import index_surface_data
 from contribarena.errors import ContribArenaError
 
@@ -82,6 +85,86 @@ def controller(
         if tick.run_result:
             typer.echo(f"    Run: {tick.run_result.run_dir}")
             typer.echo(f"    Status: {tick.run_result.status}")
+
+
+@app.command()
+def status(
+    config: Path = typer.Option(..., "--config", "-c"),
+    input_dir: Path | None = typer.Option(None, "--input-dir"),
+) -> None:
+    """Inspect benchmark backend state without starting new work."""
+    try:
+        run_config = load_run_config(config)
+        artifact_root = input_dir or run_config.artifacts.output_root
+        model = SurfaceReadModel(run_config.backend.read_model_path)
+        if not run_config.backend.read_model_path.exists():
+            refresh = model.refresh_from_artifacts(artifact_root)
+            typer.echo(f"Read model refreshed: {refresh.runs_indexed} runs")
+        summary = model.status(artifact_root)
+    except ContribArenaError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(exc.exit_code) from exc
+    typer.echo("Benchmark status:")
+    typer.echo(f"  Input:       {summary.input_dir}")
+    typer.echo(f"  Read model:  {summary.db_path}")
+    typer.echo(f"  Generated:   {summary.generated_at or 'never'}")
+    typer.echo(f"  Runs:        {summary.runs}")
+    typer.echo(f"  Seasons:     {summary.seasons}")
+    typer.echo(f"  Agents:      {summary.agents}")
+    typer.echo(f"  Judged:      {summary.judged_runs}")
+    typer.echo(f"  Open PRs:    {summary.open_or_tracked_prs}")
+    typer.echo(f"  Skipped:     {summary.skipped}")
+
+
+@app.command()
+def judge(
+    config: Path = typer.Option(..., "--config", "-c"),
+    input_dir: Path | None = typer.Option(None, "--input-dir"),
+    run_id: str | None = typer.Option(None, "--run-id"),
+    all_unjudged: bool = typer.Option(False, "--all-unjudged"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    """Score completed runs with the configured judgement panel."""
+    try:
+        run_config = load_run_config(config)
+        result = refresh_judgement(
+            config=run_config,
+            input_dir=input_dir or run_config.artifacts.output_root,
+            run_id=run_id,
+            all_unjudged=all_unjudged,
+            force=force,
+        )
+    except ContribArenaError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(exc.exit_code) from exc
+    typer.echo("Judgement refresh completed:")
+    typer.echo(f"  Runs judged: {result.runs_judged}")
+    if result.skipped:
+        typer.echo(f"  Skipped:     {len(result.skipped)}")
+
+
+@app.command()
+def serve(
+    config: Path = typer.Option(..., "--config", "-c"),
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(8787, "--port"),
+    input_dir: Path | None = typer.Option(None, "--input-dir"),
+    no_watch: bool = typer.Option(False, "--no-watch"),
+) -> None:
+    """Start the frontend-facing benchmark read API."""
+    try:
+        run_config = load_run_config(config)
+        app_obj = create_app(
+            run_config,
+            input_dir=input_dir or run_config.artifacts.output_root,
+            watch=not no_watch,
+        )
+        import uvicorn
+
+        uvicorn.run(app_obj, host=host, port=port)
+    except ContribArenaError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(exc.exit_code) from exc
 
 
 @surface_app.command("index")
