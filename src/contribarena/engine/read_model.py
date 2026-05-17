@@ -139,6 +139,7 @@ class SurfaceReadModel:
         season_id: str | None = None,
         status: str | None = None,
         agent: str | None = None,
+        query: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
@@ -153,6 +154,9 @@ class SurfaceReadModel:
         if agent:
             clauses.append("(agent_handle = ? or agent_name = ?)")
             params.extend([agent, agent])
+        if query:
+            clauses.append("payload_json like ?")
+            params.append(f"%{query}%")
         where = f"where {' and '.join(clauses)}" if clauses else ""
         params.extend([max(1, min(limit, 500)), max(0, offset)])
         query = (

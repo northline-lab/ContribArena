@@ -179,6 +179,36 @@ class CliTest(unittest.TestCase):
             self.assertIn("agent-a", runs.output)
             self.assertIn("example/repo", runs.output)
 
+            queried_runs = runner.invoke(
+                app,
+                [
+                    "runs",
+                    "--config",
+                    str(config_path),
+                    "--input-dir",
+                    str(runs_dir),
+                    "--query",
+                    "example/repo",
+                ],
+            )
+            self.assertEqual(0, queried_runs.exit_code, queried_runs.output)
+            self.assertIn("run-a", queried_runs.output)
+
+            missing_runs = runner.invoke(
+                app,
+                [
+                    "runs",
+                    "--config",
+                    str(config_path),
+                    "--input-dir",
+                    str(runs_dir),
+                    "--query",
+                    "missing-string",
+                ],
+            )
+            self.assertEqual(0, missing_runs.exit_code, missing_runs.output)
+            self.assertIn("No runs found.", missing_runs.output)
+
             show = runner.invoke(
                 app,
                 ["show", "run-a", "--config", str(config_path), "--input-dir", str(runs_dir)],

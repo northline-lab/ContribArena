@@ -127,6 +127,7 @@ def runs_list(
     season_id: str | None = typer.Option(None, "--season-id"),
     status_filter: str | None = typer.Option(None, "--status"),
     agent: str | None = typer.Option(None, "--agent"),
+    query: str | None = typer.Option(None, "--query", "-q"),
     limit: int = typer.Option(20, "--limit", min=1, max=500),
     offset: int = typer.Option(0, "--offset", min=0),
     refresh: bool = typer.Option(False, "--refresh"),
@@ -143,6 +144,7 @@ def runs_list(
             season_id=season_id,
             status=status_filter,
             agent=agent,
+            query=query,
             limit=limit,
             offset=offset,
         )

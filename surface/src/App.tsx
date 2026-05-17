@@ -74,6 +74,23 @@ function compactDate(value: string): string {
 }
 
 function RunsPage({ runs }: { runs: RunSummary[] }) {
+  const [query, setQuery] = useState("");
+  const [status, setStatus] = useState("all");
+  const statuses = Array.from(new Set(runs.map((run) => run.run_status).filter(Boolean))).sort();
+  const normalizedQuery = query.trim().toLowerCase();
+  const filteredRuns = runs.filter((run) => {
+    const statusMatches = status === "all" || run.run_status === status;
+    const queryMatches = !normalizedQuery || [
+      run.run_id,
+      run.repository.full_name,
+      run.agent.handle,
+      run.agent.name,
+      run.contribution_class,
+      run.quality_gate.status,
+      run.maintainer_outcome.status,
+    ].some((value) => String(value ?? "").toLowerCase().includes(normalizedQuery));
+    return statusMatches && queryMatches;
+  });
   return (
     <section className="subpage">
       <div className="subpage-head">
@@ -81,8 +98,26 @@ function RunsPage({ runs }: { runs: RunSummary[] }) {
         <h2>Runs</h2>
         <p>Every row is generated from benchmark artifacts and judgement output.</p>
       </div>
+      <div className="run-controls">
+        <input
+          aria-label="Search runs"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Search runs"
+        />
+        <select
+          aria-label="Filter run status"
+          value={status}
+          onChange={(event) => setStatus(event.target.value)}
+        >
+          <option value="all">All statuses</option>
+          {statuses.map((item) => (
+            <option value={item} key={item}>{item}</option>
+          ))}
+        </select>
+      </div>
       <div className="run-list">
-        {runs.map((run) => (
+        {filteredRuns.map((run) => (
           <a className="run-row" href={`#/runs/${encodeURIComponent(run.run_id)}`} key={run.run_id}>
             <span>
               <strong>{run.repository.full_name || "unknown repo"}</strong>
@@ -94,6 +129,7 @@ function RunsPage({ runs }: { runs: RunSummary[] }) {
           </a>
         ))}
       </div>
+      {!filteredRuns.length && <div className="empty-state">No runs found.</div>}
     </section>
   );
 }
