@@ -37,6 +37,7 @@ PUBLIC_ARTIFACTS = {
 }
 
 OPERATOR_ARTIFACTS = {
+    "agent_final_result.json",
     "artifact_manifest.json",
     "config.json",
     "repo_profile.md",

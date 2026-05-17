@@ -428,6 +428,7 @@ class Runner:
                 _finalize_workspace(workspace, trace, terminal, config.workspace.cleanup_policy)
 
     def _write_agent_artifacts(self, artifacts: ArtifactWriter, result: AgentFinalResult) -> None:
+        artifacts.write_json("agent_final_result.json", result.model_dump(mode="json"))
         artifacts.write_markdown("repo_profile.md", result.repo_profile)
         opportunities = ["# Opportunity Rank", ""]
         for index, opportunity in enumerate(result.opportunities, start=1):

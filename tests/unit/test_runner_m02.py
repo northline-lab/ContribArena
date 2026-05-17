@@ -1586,6 +1586,7 @@ class RunnerM02Test(unittest.TestCase):
             self.assertEqual("passed", stage_statuses["quality_gate"])
             self.assertEqual("skipped", stage_statuses["pull_request"])
             artifacts = {artifact["name"]: artifact for artifact in summary["artifacts"]}
+            self.assertEqual("operator", artifacts["agent_final_result.json"]["visibility"])
             self.assertEqual("public", artifacts["run_summary.json"]["visibility"])
             self.assertEqual("public", artifacts["patch.diff"]["visibility"])
             self.assertEqual("public", artifacts["judgement.json"]["visibility"])
@@ -1602,6 +1603,7 @@ class RunnerM02Test(unittest.TestCase):
             )
             manifest = json.loads((result.run_dir / "artifact_manifest.json").read_text())
             manifest_names = {entry["name"] for entry in manifest["artifacts"]}
+            self.assertIn("agent_final_result.json", manifest_names)
             self.assertIn("run_summary.json", manifest_names)
             self.assertIn("judge_packet.json", manifest_names)
             self.assertIn("judge_dimension_packets.json", manifest_names)
@@ -1934,6 +1936,7 @@ def _config(output_root: Path) -> RunConfig:
         ),
         workspace=WorkspaceConfig(command_timeout_seconds=10),
         artifacts=ArtifactConfig(output_root=output_root),
+        memory=MemoryConfig(root=output_root.parent / "memory"),
     )
 
 
