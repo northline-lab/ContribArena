@@ -143,6 +143,130 @@ class CliTest(unittest.TestCase):
             self.assertIn("Benchmark status:", result.output)
             self.assertIn("Runs:        0", result.output)
 
+    def test_runs_and_show_read_indexed_backend_state(self) -> None:
+        runner = CliRunner()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.yaml"
+            runs_dir = root / "runs"
+            _write_run_summary(runs_dir / "run-a")
+            self.assertEqual(
+                0,
+                runner.invoke(app, ["init", "--output", str(config_path)]).exit_code,
+            )
+
+            status = runner.invoke(
+                app,
+                [
+                    "status",
+                    "--config",
+                    str(config_path),
+                    "--input-dir",
+                    str(runs_dir),
+                    "--refresh",
+                ],
+            )
+            self.assertEqual(0, status.exit_code, status.output)
+            self.assertIn("Read model refreshed: 1 runs", status.output)
+            self.assertIn("Runs:        1", status.output)
+
+            runs = runner.invoke(
+                app,
+                ["runs", "--config", str(config_path), "--input-dir", str(runs_dir)],
+            )
+            self.assertEqual(0, runs.exit_code, runs.output)
+            self.assertIn("run-a", runs.output)
+            self.assertIn("agent-a", runs.output)
+            self.assertIn("example/repo", runs.output)
+
+            show = runner.invoke(
+                app,
+                ["show", "run-a", "--config", str(config_path), "--input-dir", str(runs_dir)],
+            )
+            self.assertEqual(0, show.exit_code, show.output)
+            self.assertIn("Run:         run-a", show.output)
+            self.assertIn("Artifacts:", show.output)
+
+            artifact = runner.invoke(
+                app,
+                [
+                    "show",
+                    "run-a",
+                    "--config",
+                    str(config_path),
+                    "--input-dir",
+                    str(runs_dir),
+                    "--artifact",
+                    "patch.diff",
+                ],
+            )
+            self.assertEqual(0, artifact.exit_code, artifact.output)
+            self.assertIn("diff --git", artifact.output)
+
+            judge = runner.invoke(
+                app,
+                [
+                    "judge",
+                    "--config",
+                    str(config_path),
+                    "--input-dir",
+                    str(runs_dir),
+                    "--all-unjudged",
+                    "--force",
+                ],
+            )
+            self.assertEqual(0, judge.exit_code, judge.output)
+            self.assertIn("Runs judged: 1", judge.output)
+
+
+def _write_run_summary(path: Path) -> None:
+    path.mkdir(parents=True)
+    payload = {
+        "schema_version": "1",
+        "run_id": "run-a",
+        "run_mode": "shadow",
+        "model": "local-stub",
+        "agent": {"name": "Agent A", "handle": "agent-a"},
+        "repository": {"full_name": "example/repo", "url": "https://github.com/example/repo"},
+        "season": {"id": "season_0", "name": "Season 0", "phase": "owned_repo_calibration"},
+        "opportunity_source": "none",
+        "opportunity_source_ref": "",
+        "started_at": "2026-05-15T00:00:00Z",
+        "completed_at": "2026-05-15T00:01:00Z",
+        "duration_seconds": 60,
+        "run_status": "completed",
+        "terminal_reason": "complete",
+        "terminal_layer": "agent",
+        "contribution_class": "low_risk_code",
+        "pipeline": [],
+        "quality_gate": {"status": "pass", "warnings": []},
+        "pull_request": {"url": "https://github.com/example/repo/pull/1", "number": 1, "state": "open"},
+        "maintainer_outcome": {"status": "pending", "observed_at": "", "source": "none"},
+        "judgement": {
+            "status": "judged",
+            "judge_score": 72,
+            "real_world_adjustment": 2,
+            "arena_score": 74,
+            "rubric_summary": [],
+            "source_artifacts": ["judgement.json"],
+        },
+        "artifacts": [
+            {
+                "name": "patch.diff",
+                "kind": "diff",
+                "visibility": "public",
+                "url": "",
+                "size_bytes": 120,
+                "redacted": False,
+            }
+        ],
+    }
+    (path / "run_summary.json").write_text(
+        json.dumps(payload, indent=2, ensure_ascii=True) + "\n",
+        encoding="utf-8",
+    )
+    (path / "patch.diff").write_text("diff --git a/app.py b/app.py\n", encoding="utf-8")
+
 
 if __name__ == "__main__":
     unittest.main()

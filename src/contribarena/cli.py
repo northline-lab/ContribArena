@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import sys
 import shutil
 import importlib.metadata
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import typer
 
@@ -91,13 +93,15 @@ def controller(
 def status(
     config: Path = typer.Option(..., "--config", "-c"),
     input_dir: Path | None = typer.Option(None, "--input-dir"),
+    refresh: bool = typer.Option(False, "--refresh"),
 ) -> None:
     """Inspect benchmark backend state without starting new work."""
     try:
         run_config = load_run_config(config)
-        artifact_root = input_dir or run_config.artifacts.output_root
-        model = SurfaceReadModel(run_config.backend.read_model_path)
-        if not run_config.backend.read_model_path.exists():
+        artifact_root = input_dir or _config_relative(config, run_config.artifacts.output_root)
+        read_model_path = _config_relative(config, run_config.backend.read_model_path)
+        model = SurfaceReadModel(read_model_path)
+        if refresh or not read_model_path.exists():
             refresh = model.refresh_from_artifacts(artifact_root)
             typer.echo(f"Read model refreshed: {refresh.runs_indexed} runs")
         summary = model.status(artifact_root)
@@ -116,6 +120,87 @@ def status(
     typer.echo(f"  Skipped:     {summary.skipped}")
 
 
+@app.command("runs")
+def runs_list(
+    config: Path = typer.Option(..., "--config", "-c"),
+    input_dir: Path | None = typer.Option(None, "--input-dir"),
+    season_id: str | None = typer.Option(None, "--season-id"),
+    status_filter: str | None = typer.Option(None, "--status"),
+    agent: str | None = typer.Option(None, "--agent"),
+    limit: int = typer.Option(20, "--limit", min=1, max=500),
+    offset: int = typer.Option(0, "--offset", min=0),
+    refresh: bool = typer.Option(False, "--refresh"),
+) -> None:
+    """List indexed benchmark runs."""
+    try:
+        run_config = load_run_config(config)
+        artifact_root = input_dir or _config_relative(config, run_config.artifacts.output_root)
+        read_model_path = _config_relative(config, run_config.backend.read_model_path)
+        model = SurfaceReadModel(read_model_path)
+        if refresh or not read_model_path.exists():
+            model.refresh_from_artifacts(artifact_root)
+        rows = model.runs(
+            season_id=season_id,
+            status=status_filter,
+            agent=agent,
+            limit=limit,
+            offset=offset,
+        )
+    except ContribArenaError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(exc.exit_code) from exc
+    if not rows:
+        typer.echo("No runs found.")
+        return
+    typer.echo(f"{'Run ID':<28} {'Status':<11} {'Agent':<16} {'Repo':<26} {'Score':>5}")
+    for row in rows:
+        agent_info = row.get("agent", {}) if isinstance(row.get("agent"), dict) else {}
+        repo = row.get("repository", {}) if isinstance(row.get("repository"), dict) else {}
+        judgement = row.get("judgement", {}) if isinstance(row.get("judgement"), dict) else {}
+        score = judgement.get("arena_score")
+        typer.echo(
+            f"{_clip(str(row.get('run_id') or ''), 28):<28} "
+            f"{_clip(str(row.get('run_status') or 'unknown'), 11):<11} "
+            f"{_clip(str(agent_info.get('handle') or agent_info.get('name') or ''), 16):<16} "
+            f"{_clip(str(repo.get('full_name') or ''), 26):<26} "
+            f"{_score_text(score):>5}"
+        )
+
+
+@app.command("show")
+def show_run(
+    run_id: str = typer.Argument(...),
+    config: Path = typer.Option(..., "--config", "-c"),
+    input_dir: Path | None = typer.Option(None, "--input-dir"),
+    artifact: str | None = typer.Option(None, "--artifact"),
+    refresh: bool = typer.Option(False, "--refresh"),
+) -> None:
+    """Show one run summary or one artifact from the run directory."""
+    try:
+        run_config = load_run_config(config)
+        artifact_root = input_dir or _config_relative(config, run_config.artifacts.output_root)
+        read_model_path = _config_relative(config, run_config.backend.read_model_path)
+        model = SurfaceReadModel(read_model_path)
+        if refresh or not read_model_path.exists():
+            model.refresh_from_artifacts(artifact_root)
+        run = model.run(run_id)
+        if run is None:
+            typer.echo(f"Run not found: {run_id}", err=True)
+            raise typer.Exit(1)
+        if artifact:
+            path = _run_artifact_path(artifact_root, run_id, artifact)
+            if path is None:
+                typer.echo(f"Artifact not found: {artifact}", err=True)
+                raise typer.Exit(1)
+            typer.echo(path.read_text(encoding="utf-8", errors="replace"), nl=False)
+            return
+    except ContribArenaError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(exc.exit_code) from exc
+
+    _print_run_summary(run)
+
+
 @app.command()
 def judge(
     config: Path = typer.Option(..., "--config", "-c"),
@@ -129,7 +214,7 @@ def judge(
         run_config = load_run_config(config)
         result = refresh_judgement(
             config=run_config,
-            input_dir=input_dir or run_config.artifacts.output_root,
+            input_dir=input_dir or _config_relative(config, run_config.artifacts.output_root),
             run_id=run_id,
             all_unjudged=all_unjudged,
             force=force,
@@ -154,9 +239,11 @@ def serve(
     """Start the frontend-facing benchmark read API."""
     try:
         run_config = load_run_config(config)
+        read_model_path = _config_relative(config, run_config.backend.read_model_path)
         app_obj = create_app(
             run_config,
-            input_dir=input_dir or run_config.artifacts.output_root,
+            input_dir=input_dir or _config_relative(config, run_config.artifacts.output_root),
+            db_path=read_model_path,
             watch=not no_watch,
         )
         import uvicorn
@@ -222,6 +309,57 @@ def _command_status(name: str, command: list[str]) -> str:
     lines = (result.stderr or result.stdout).strip().splitlines()
     detail = lines[0] if lines else f"{name} returned exit code {result.returncode}"
     return f"unusable: {detail}"
+
+
+def _config_relative(config_path: Path, path: Path) -> Path:
+    return path if path.is_absolute() else config_path.resolve().parent / path
+
+
+def _print_run_summary(run: dict[str, Any]) -> None:
+    agent = run.get("agent", {}) if isinstance(run.get("agent"), dict) else {}
+    repo = run.get("repository", {}) if isinstance(run.get("repository"), dict) else {}
+    season = run.get("season", {}) if isinstance(run.get("season"), dict) else {}
+    judgement = run.get("judgement", {}) if isinstance(run.get("judgement"), dict) else {}
+    pr = run.get("pull_request", {}) if isinstance(run.get("pull_request"), dict) else {}
+    typer.echo(f"Run:         {run.get('run_id') or ''}")
+    typer.echo(f"Status:      {run.get('run_status') or 'unknown'}")
+    typer.echo(f"Agent:       {agent.get('handle') or agent.get('name') or ''}")
+    typer.echo(f"Repository:  {repo.get('full_name') or ''}")
+    typer.echo(f"Season:      {season.get('id') or ''}")
+    typer.echo(f"Started:     {run.get('started_at') or ''}")
+    typer.echo(f"Completed:   {run.get('completed_at') or ''}")
+    typer.echo(f"Arena score: {_score_text(judgement.get('arena_score'))}")
+    if pr.get("url"):
+        typer.echo(f"PR:          {pr.get('url')}")
+    artifacts = [item for item in run.get("artifacts", []) if isinstance(item, dict)]
+    if artifacts:
+        typer.echo("Artifacts:")
+        for item in artifacts:
+            visibility = str(item.get("visibility") or "internal")
+            typer.echo(f"  - {item.get('name') or ''} ({visibility})")
+
+
+def _run_artifact_path(input_dir: Path, run_id: str, artifact_name: str) -> Path | None:
+    if "/" in artifact_name or "\\" in artifact_name:
+        return None
+    for summary_path in sorted(input_dir.rglob("run_summary.json")):
+        try:
+            payload = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict) or str(payload.get("run_id") or "") != run_id:
+            continue
+        path = summary_path.parent / artifact_name
+        return path if path.is_file() else None
+    return None
+
+
+def _clip(value: str, width: int) -> str:
+    return value if len(value) <= width else value[: max(0, width - 3)] + "..."
+
+
+def _score_text(value: Any) -> str:
+    return "-" if value is None or value == "" else str(value)
 
 
 app.add_typer(surface_app, name="surface")

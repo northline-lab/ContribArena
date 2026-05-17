@@ -28,7 +28,12 @@ def refresh_judgement(
     all_unjudged: bool = False,
     force: bool = False,
 ) -> JudgeRefreshResult:
-    run_dirs = _target_run_dirs(input_dir=input_dir, run_id=run_id, all_unjudged=all_unjudged)
+    run_dirs = _target_run_dirs(
+        input_dir=input_dir,
+        run_id=run_id,
+        all_unjudged=all_unjudged,
+        force=force,
+    )
     judged = 0
     skipped: list[str] = []
     for run_dir in run_dirs:
@@ -61,6 +66,7 @@ def _target_run_dirs(
     input_dir: Path,
     run_id: str | None,
     all_unjudged: bool,
+    force: bool,
 ) -> list[Path]:
     if not input_dir.exists():
         raise InfrastructureError(f"judge input directory does not exist: {input_dir}")
@@ -78,7 +84,11 @@ def _target_run_dirs(
             path.parent
             for path in input_dir.rglob("run_summary.json")
             if _summary_is_terminal(path)
-            and _summary_judgement_status(path) not in {"judged", "partial_fallback", "fallback"}
+            and (
+                force
+                or _summary_judgement_status(path)
+                not in {"judged", "partial_fallback", "fallback"}
+            )
         ]
     raise InfrastructureError("judge requires --run-id or --all-unjudged")
 
