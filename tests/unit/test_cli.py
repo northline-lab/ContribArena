@@ -5,10 +5,12 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from typer.testing import CliRunner
 
 from contribarena.cli import app
+from contribarena.engine.runner import RunResult
 
 
 class CliTest(unittest.TestCase):
@@ -47,6 +49,7 @@ class CliTest(unittest.TestCase):
                 self.assertEqual(
                     0, runner.invoke(app, ["init", "--output", str(config_path)]).exit_code
                 )
+                _write_test_memory_root(config_path, tmp_path)
                 result = runner.invoke(
                     app,
                     ["run", "--config", str(config_path), "--output-dir", str(output_dir)],
@@ -112,6 +115,92 @@ class CliTest(unittest.TestCase):
                     "workspace_stopped",
                 }.issubset(trace_states)
             )
+
+    def test_run_model_override_is_written_to_artifacts(self) -> None:
+        runner = CliRunner()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config_path = tmp_path / "config.yaml"
+            self.assertEqual(
+                0, runner.invoke(app, ["init", "--output", str(config_path)]).exit_code
+            )
+            seen_models = []
+
+            def fake_run(self, config, output_dir=None, verbose=False):
+                seen_models.append(config.run.model)
+                return RunResult(
+                    run_id="mock-run",
+                    run_dir=tmp_path / "runs" / "mock-run",
+                    status="completed",
+                    tool_calls=0,
+                )
+
+            with patch("contribarena.cli.Runner.run", fake_run):
+                result = runner.invoke(
+                    app,
+                    [
+                        "run",
+                        "--config",
+                        str(config_path),
+                        "--model",
+                        "compatible/example",
+                    ],
+                )
+
+            self.assertEqual(0, result.exit_code, result.output)
+            self.assertEqual(["compatible/example"], seen_models)
+
+    def test_run_matrix_runs_configured_models(self) -> None:
+        runner = CliRunner()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config_path = tmp_path / "config.yaml"
+            self.assertEqual(
+                0, runner.invoke(app, ["init", "--output", str(config_path)]).exit_code
+            )
+            config_text = config_path.read_text(encoding="utf-8")
+            config_path.write_text(
+                config_text.replace(
+                    "    compatible: {}\n",
+                    (
+                        "    compatible:\n"
+                        "      alpha:\n"
+                        "        base_url: http://localhost/v1\n"
+                        "        api_key_env: EMPTY\n"
+                        "        model: alpha-model\n"
+                        "      beta:\n"
+                        "        base_url: http://localhost/v1\n"
+                        "        api_key_env: EMPTY\n"
+                        "        model: beta-model\n"
+                    ),
+                ),
+                encoding="utf-8",
+            )
+            seen_models = []
+
+            def fake_run(self, config, output_dir=None, verbose=False):
+                seen_models.append(config.run.model)
+                return RunResult(
+                    run_id=config.run.model.replace("/", "_"),
+                    run_dir=tmp_path / "runs" / config.run.model.replace("/", "_"),
+                    status="completed",
+                    tool_calls=0,
+                )
+
+            with patch("contribarena.cli.Runner.run", fake_run):
+                result = runner.invoke(
+                    app,
+                    [
+                        "run-matrix",
+                        "--config",
+                        str(config_path),
+                    ],
+                )
+
+            self.assertEqual(0, result.exit_code, result.output)
+            self.assertIn("compatible/alpha", result.output)
+            self.assertIn("compatible/beta", result.output)
+            self.assertEqual(["compatible/alpha", "compatible/beta"], seen_models)
 
     def test_controller_reports_disabled_starter_config(self) -> None:
         runner = CliRunner()
@@ -296,6 +385,26 @@ def _write_run_summary(path: Path) -> None:
         encoding="utf-8",
     )
     (path / "patch.diff").write_text("diff --git a/app.py b/app.py\n", encoding="utf-8")
+
+
+def _write_fake_docker(path: Path) -> None:
+    path.write_text(
+        "#!/usr/bin/env sh\n"
+        'if [ "$1" = "run" ]; then echo container-id; exit 0; fi\n'
+        'if [ "$1" = "exec" ]; then echo /workspace; exit 0; fi\n'
+        'if [ "$1" = "rm" ]; then exit 0; fi\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+def _write_test_memory_root(config_path: Path, root: Path) -> None:
+    text = config_path.read_text(encoding="utf-8")
+    config_path.write_text(
+        text.replace("  root: .contribarena/memory\n", f"  root: {root / 'memory'}\n"),
+        encoding="utf-8",
+    )
 
 
 if __name__ == "__main__":

@@ -27,6 +27,12 @@ workspace:
 artifacts:
   output_root: runs
 
+backend:
+  read_model_path: read_model.sqlite
+  api_cors_origins: []
+  watch_enabled: true
+  refresh_debounce_seconds: 1.0
+
 models:
   providers:
     compatible: {}

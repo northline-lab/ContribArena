@@ -49,11 +49,18 @@ def validate(config: Path = typer.Option(..., "--config", "-c")) -> None:
 def run(
     config: Path = typer.Option(..., "--config", "-c"),
     output_dir: Path | None = typer.Option(None, "--output-dir", "-o"),
+    model: str | None = typer.Option(
+        None,
+        "--model",
+        help="Override run.model for this invocation, for example compatible/qwen36plus.",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Execute a ContribArena agent run."""
     try:
         run_config = load_run_config(config)
+        if model:
+            run_config = _with_model_override(run_config, model)
         result = Runner().run(run_config, output_dir=output_dir, verbose=verbose)
     except ContribArenaError as exc:
         typer.echo(str(exc), err=True)
@@ -63,15 +70,55 @@ def run(
     typer.echo(f"  Tool calls:  {result.tool_calls}")
 
 
+@app.command("run-matrix")
+def run_matrix(
+    config: Path = typer.Option(..., "--config", "-c"),
+    output_dir: Path | None = typer.Option(None, "--output-dir", "-o"),
+    models: list[str] | None = typer.Option(
+        None,
+        "--model",
+        help=(
+            "Model to run. Repeat for multiple models. "
+            "Defaults to all configured provider models, or run.model when none are configured."
+        ),
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Run the same benchmark config once for each selected model."""
+    try:
+        run_config = load_run_config(config)
+        selected_models = models or _configured_models(run_config)
+        if not selected_models:
+            raise ContribArenaError("no models selected for run-matrix")
+        results = []
+        for model_name in selected_models:
+            matrix_config = _with_model_override(run_config, model_name)
+            result = Runner().run(matrix_config, output_dir=output_dir, verbose=verbose)
+            results.append((model_name, result))
+    except ContribArenaError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(exc.exit_code) from exc
+    typer.echo("Run matrix completed:")
+    for model_name, result in results:
+        typer.echo(f"  {model_name}: {result.status} ({result.run_dir})")
+
+
 @app.command()
 def controller(
     config: Path = typer.Option(..., "--config", "-c"),
     output_dir: Path | None = typer.Option(None, "--output-dir", "-o"),
+    model: str | None = typer.Option(
+        None,
+        "--model",
+        help="Override run.model for controller-started runs.",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Run the local ContribArena controller loop."""
     try:
         run_config = load_run_config(config)
+        if model:
+            run_config = _with_model_override(run_config, model)
         result = LocalController().run(run_config, output_dir=output_dir, verbose=verbose)
     except ContribArenaError as exc:
         typer.echo(str(exc), err=True)
@@ -315,6 +362,24 @@ def _command_status(name: str, command: list[str]) -> str:
 
 def _config_relative(config_path: Path, path: Path) -> Path:
     return path if path.is_absolute() else config_path.resolve().parent / path
+
+
+def _with_model_override(run_config: Any, model: str) -> Any:
+    return run_config.model_copy(
+        update={"run": run_config.run.model_copy(update={"model": model})},
+        deep=True,
+    )
+
+
+def _configured_models(run_config: Any) -> list[str]:
+    providers = run_config.models.providers
+    models = [
+        *(f"compatible/{name}" for name in providers.compatible),
+        *(f"responses/{name}" for name in providers.responses),
+        *(f"anthropic/{name}" for name in providers.anthropic),
+        *(f"gemini/{name}" for name in providers.gemini),
+    ]
+    return models or [run_config.run.model]
 
 
 def _print_run_summary(run: dict[str, Any]) -> None:
