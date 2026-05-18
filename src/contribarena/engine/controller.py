@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
-from contribarena.config.schema import RunConfig
+from contribarena.config.schema import DEFAULT_MEMORY_RELATIVE, MemoryConfig, RunConfig
 from contribarena.engine.external_lifecycle import (
     lifecycle_record_due,
     mark_lifecycle_observation_failed,
@@ -323,7 +323,7 @@ def _record_lifecycle_memory_artifacts(
     memory: MemoryService | None = None
     try:
         memory = MemoryService(
-            config.memory,
+            _controller_memory_config(config),
             run_id=_lifecycle_memory_run_id(record),
             repo_full_name=getattr(record, "repository", ""),
         )
@@ -362,6 +362,14 @@ def _lifecycle_memory_run_id(record: object) -> str:
     number = str(getattr(record, "number", "unknown"))
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     return f"lifecycle-{repo}-{number}-{timestamp}"
+
+
+def _controller_memory_config(config: RunConfig) -> MemoryConfig:
+    if config.memory.root == DEFAULT_MEMORY_RELATIVE:
+        return config.memory.model_copy(
+            update={"root": config.artifacts.output_root.parent / "memory"}
+        )
+    return config.memory
 
 
 def _safe_log_error(message: str) -> str:

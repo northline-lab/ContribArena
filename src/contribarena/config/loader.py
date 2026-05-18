@@ -20,6 +20,9 @@ STARTER_CONFIG = """run:
     max_steps: 25
     max_tokens:
     max_wall_time_seconds: 900
+    max_invocations: 5
+    max_consecutive_no_progress: 2
+    max_recoveries: 8
 
 discovery:
   candidates:

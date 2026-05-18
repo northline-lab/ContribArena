@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import json
 from json import JSONDecodeError
+from typing import Any
 
+from agents.exceptions import MaxTurnsExceeded
 from agents.models.interface import ModelProvider
+from openai.types.responses import ResponseFunctionToolCall
 
+from contribarena.agent.invocation import AgentInvocationResult
 from contribarena.agent.model_view import to_model_json
 from contribarena.agent.tool_contract import ContributorTools
 from contribarena.config.schema import RepoCandidate, RunConfig
@@ -29,9 +33,13 @@ class ContributorAgent:
         tools: ContributorTools,
         prompt: str,
         model_provider: ModelProvider | None = None,
-    ) -> AgentFinalResult:
+    ) -> AgentInvocationResult:
         if config.run.model == "local-stub":
-            return self._run_local_stub(config, tools, reason="model=local-stub")
+            return AgentInvocationResult(
+                content="local-stub completed a deterministic fallback run",
+                stopped_reason="local_stub",
+                legacy_final_result=self._run_local_stub(config, tools, reason="model=local-stub"),
+            )
         if model_provider is None:
             raise AgentError("model_provider is required for non-local-stub runs")
         return self._run_agents_sdk(config, tools, prompt, model_provider)
@@ -42,7 +50,7 @@ class ContributorAgent:
         tools: ContributorTools,
         prompt: str,
         model_provider: ModelProvider,
-    ) -> AgentFinalResult:
+    ) -> AgentInvocationResult:
         try:
             from agents import (
                 Agent,
@@ -259,7 +267,6 @@ class ContributorAgent:
                 max_tokens=config.run.budget.max_tokens,
                 parallel_tool_calls=False,
             ),
-            output_type=AgentFinalResult,
         )
         try:
             run_config = AgentsRunConfig(
@@ -274,9 +281,24 @@ class ContributorAgent:
                 max_turns=config.run.budget.max_steps,
                 run_config=run_config,
             )
-            return result.final_output_as(AgentFinalResult)
+            return AgentInvocationResult(
+                content=_stringify_final_output(result.final_output),
+                stopped_reason="content",
+                usage=getattr(result, "usage", None),
+                tool_call_count=_count_tool_calls(getattr(result, "new_items", [])),
+            )
+        except MaxTurnsExceeded as exc:
+            return AgentInvocationResult(
+                content=f"Invocation stopped at max turns: {exc}",
+                stopped_reason="max_turns",
+                error_message=str(exc),
+            )
         except Exception as exc:
-            raise AgentError(f"agent run failed: {exc}") from exc
+            return AgentInvocationResult(
+                content=f"Provider invocation failed: {exc}",
+                stopped_reason="provider_error",
+                error_message=str(exc),
+            )
 
     def _run_local_stub(
         self,
@@ -423,3 +445,28 @@ def _metadata_default_branch(metadata: object) -> str:
     if isinstance(metadata, dict):
         return str(metadata.get("default_branch") or "main")
     return "main"
+
+
+def _stringify_final_output(output: Any) -> str:
+    if output is None:
+        return ""
+    if isinstance(output, str):
+        return output
+    if hasattr(output, "model_dump_json"):
+        return str(output.model_dump_json())
+    return str(output)
+
+
+def _count_tool_calls(items: object) -> int:
+    if not isinstance(items, list):
+        return 0
+    count = 0
+    for item in items:
+        raw_item = getattr(item, "raw_item", None)
+        item_type = getattr(item, "type", None) or getattr(raw_item, "type", None)
+        if isinstance(raw_item, ResponseFunctionToolCall) or item_type in {
+            "function_call",
+            "tool_call",
+        }:
+            count += 1
+    return count

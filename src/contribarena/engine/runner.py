@@ -9,9 +9,19 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from contribarena.agent import AgentInvocationResult
 from contribarena.agent import ContributorAgent
 from contribarena.agent.prompts import build_goal_prompt
 from contribarena.config.schema import OwnedRepositoryPolicy, RepoCandidate, RunConfig
+from contribarena.engine.agent_loop import (
+    AgentLoopState,
+    capture_cursor,
+    derive_agent_result,
+    render_continuation_context,
+    review_invocation,
+    trace_invocation_review,
+    LoopOutcome,
+)
 from contribarena.engine.artifacts import ArtifactWriter
 from contribarena.engine.context import ContextBuilder
 from contribarena.engine.external_lifecycle import lifecycle_record_for_opened_pr
@@ -244,26 +254,41 @@ class Runner:
                 "agent.context_loaded",
                 {"prompt_bytes": len(prompt.encode("utf-8"))},
             )
-            result = self.agent.run(
-                config,
-                registry,
-                prompt,
-                model_provider=TracingModelProvider(
-                    ContribArenaModelProvider(config.models),
-                    trace,
-                ),
+            loop_state, loop_terminal, loop_outcome = self._run_agent_loop(
+                config=config,
+                registry=registry,
+                initial_prompt=prompt,
+                trace=trace,
+                operator=operator,
+                capture=capture,
+                goals=goals,
+                memory=memory,
+            )
+            result = derive_agent_result(
+                config=config,
+                capture=capture,
+                goals=goals,
+                loop_state=loop_state,
+                terminal=loop_terminal,
             )
             trace.write(
                 RunState.AGENT_FINAL_RESULT,
                 "agent.final_result",
-                {"status": result.status},
+                {"status": result.status, "derived": True},
             )
+            # Compatibility alias for M0.9 readers. Remove in M0.10 after
+            # surface/judgement consumers migrate to agent.terminal.
             operator.write(
                 "agent",
                 result.status,
-                "agent returned structured final result",
+                "agent loop reached terminal review",
                 evidence=["trace.jsonl"],
-                payload={"status": result.status},
+                payload={
+                    "status": result.status,
+                    "invocations": loop_state.counters.invocations_used,
+                    "terminal_reason": loop_terminal.reason if loop_terminal else "",
+                    "loop_outcome": loop_outcome,
+                },
             )
             agent_status = result.status
             _enforce_issue_completion(config, result, capture)
@@ -275,11 +300,14 @@ class Runner:
                 "agent.harness_reviewed",
                 {
                     "agent_status": agent_status,
+                    "loop_outcome": loop_outcome,
                     "harness_status": result.status,
                     "quality_gate": quality_gate.status,
                 },
             )
-            terminal = _terminal_state_for_result(result, capture, agent_status, quality_gate)
+            terminal = loop_terminal or _terminal_state_for_result(
+                result, capture, agent_status, quality_gate, loop_outcome=loop_outcome
+            )
             self._write_issue_artifacts(config, artifacts, result, capture)
             self._write_agent_artifacts(artifacts, result)
             trace.write(
@@ -427,6 +455,118 @@ class Runner:
             if workspace_started:
                 _finalize_workspace(workspace, trace, terminal, config.workspace.cleanup_policy)
 
+    def _run_agent_loop(
+        self,
+        *,
+        config: RunConfig,
+        registry: ToolRegistry,
+        initial_prompt: str,
+        trace: TraceWriter,
+        operator: OperatorProgressWriter,
+        capture: ArtifactCapture,
+        goals: GoalService,
+        memory: MemoryService,
+    ) -> tuple[AgentLoopState, TerminalState | None, LoopOutcome]:
+        loop_state = AgentLoopState()
+        prompt = initial_prompt
+        provider = TracingModelProvider(ContribArenaModelProvider(config.models), trace)
+        while True:
+            seq = loop_state.counters.invocations_used + 1
+            continuation = seq > 1
+            trace.write(
+                RunState.AGENT_ACTING,
+                "agent.invocation_started",
+                {"invocation_seq": seq, "continuation": continuation},
+            )
+            operator.write(
+                "agent",
+                "invocation_started",
+                "agent invocation started",
+                evidence=["trace.jsonl"],
+                payload={"seq": seq, "continuation": continuation},
+            )
+            before = capture_cursor(capture, goals, memory)
+            raw_invocation = self.agent.run(
+                config,
+                registry,
+                prompt,
+                model_provider=provider,
+            )
+            invocation = _normalize_invocation_result(raw_invocation)
+            if invocation.stopped_reason == "provider_error":
+                trace.write(
+                    RunState.AGENT_ERROR,
+                    "agent.invocation_failed",
+                    {
+                        "invocation_seq": seq,
+                        "reason": "model_runtime",
+                        "error": truncate_for_operator(invocation.error_message),
+                    },
+                )
+            trace.write(
+                RunState.AGENT_ACTING,
+                "agent.invocation_returned",
+                {
+                    "invocation_seq": seq,
+                    "stopped_reason": invocation.stopped_reason,
+                    "has_content": bool(invocation.content.strip()),
+                    "tool_calls": invocation.tool_call_count,
+                },
+            )
+            operator.write(
+                "agent",
+                "invocation_returned",
+                "agent invocation returned",
+                evidence=["trace.jsonl"],
+                payload={"seq": seq, "tool_calls": invocation.tool_call_count},
+            )
+            review = review_invocation(
+                config=config,
+                capture=capture,
+                goals=goals,
+                memory=memory,
+                before=before,
+                state=loop_state,
+                invocation=invocation,
+            )
+            trace_invocation_review(trace, review, loop_state.counters)
+            if review.decision == "continue":
+                trace.write(
+                    RunState.AGENT_ACTING,
+                    "agent.continued",
+                    {"reason": review.reason, "invocation_seq": seq},
+                )
+                operator.write(
+                    "agent",
+                    "continued",
+                    "continuing active agent goal",
+                    evidence=["trace.jsonl"],
+                    payload={"seq": seq, "reason": review.reason},
+                )
+                prompt = render_continuation_context(
+                    config=config,
+                    goals=goals,
+                    state=loop_state,
+                    progress=review.progress,
+                )
+                continue
+            if review.terminal is not None:
+                trace.write(
+                    RunState.AGENT_FINAL_RESULT,
+                    "agent.terminal",
+                    {
+                        **review.terminal.model_dump(mode="json"),
+                        "sub_reason": review.sub_reason,
+                    },
+                )
+            else:
+                trace.write(
+                    RunState.AGENT_FINAL_RESULT,
+                    "agent.terminal",
+                    {"reason": review.reason, "invocation_seq": seq},
+                )
+            return loop_state, review.terminal, review.outcome  # type: ignore[return-value]
+
     def _write_agent_artifacts(self, artifacts: ArtifactWriter, result: AgentFinalResult) -> None:
         artifacts.write_json("agent_final_result.json", result.model_dump(mode="json"))
         artifacts.write_markdown("repo_profile.md", result.repo_profile)
@@ -487,6 +627,18 @@ class Runner:
             "verification_summary.md",
             result.verification_summary or _verification_summary_from_capture(capture),
         )
+
+
+def _normalize_invocation_result(raw: object) -> AgentInvocationResult:
+    if isinstance(raw, AgentInvocationResult):
+        return raw
+    if isinstance(raw, AgentFinalResult):
+        return AgentInvocationResult(
+            content=raw.workspace_summary.notes,
+            stopped_reason="legacy_final_result",
+            legacy_final_result=raw,
+        )
+    return AgentInvocationResult(content=str(raw or ""))
 
 
 def _submitted_patch(capture: ArtifactCapture) -> str:
@@ -1771,6 +1923,8 @@ def _terminal_state_for_result(
     capture: ArtifactCapture,
     agent_status: str,
     quality_gate: QualityGateResult | None = None,
+    *,
+    loop_outcome: str = "",
 ) -> TerminalState:
     if (
         quality_gate is not None
@@ -1821,7 +1975,7 @@ def _terminal_state_for_result(
     if result.status == "completed":
         reason = "run_completed"
     elif result.status == "blocked":
-        reason = "agent_blocked"
+        reason = "agent_blocked" if loop_outcome != "no_continuation_path" else "no_continuation_path"
     else:
         reason = "agent_failed"
     return TerminalState(

@@ -10,7 +10,11 @@ from agents.usage import Usage
 from openai.types.chat import ChatCompletionMessage
 from openai.types.responses import ResponseFunctionToolCall
 
-from contribarena.providers.action_guard import RECOVERY_TOOL_NAME, guard_model_response
+from contribarena.providers.action_guard import (
+    RECOVERY_TOOL_NAME,
+    guard_model_response,
+    guard_structured_model_response,
+)
 from contribarena.providers.adapters import (
     _repair_structured_output_message,
     _to_anthropic_tools,
@@ -146,6 +150,41 @@ class ProviderActionGuardTest(unittest.TestCase):
         payload = json.loads(recovery.arguments)
         self.assertEqual("non_tool_text_response", payload["recovery_kind"])
 
+    def test_converts_text_json_tool_intent_to_tool_call(self) -> None:
+        examples = [
+            {"name": "sample_tool", "arguments": {"path": "repo/app.py"}},
+            [{"name": "sample_tool", "arguments": {"path": "repo/app.py"}}],
+            {"call": "sample_tool", "args": {"path": "repo/app.py"}},
+            ["sample_tool", {"path": "repo/app.py"}],
+        ]
+
+        for payload in examples:
+            with self.subTest(payload=payload):
+                response = _text_response(json.dumps(payload))
+
+                guarded = guard_structured_model_response(
+                    response,
+                    [_sample_tool, _recovery_tool],
+                    _StructuredSchema(),
+                )
+
+                self.assertEqual(1, len(guarded.output))
+                call = guarded.output[0]
+                self.assertIsInstance(call, ResponseFunctionToolCall)
+                self.assertEqual("sample_tool", call.name)
+                self.assertEqual({"path": "repo/app.py"}, json.loads(call.arguments))
+
+    def test_leaves_non_tool_json_content_for_harness_review(self) -> None:
+        response = _text_response('{"status": "calling_tool"}')
+
+        guarded = guard_structured_model_response(
+            response,
+            [_sample_tool, _recovery_tool],
+            _StructuredSchema(),
+        )
+
+        self.assertIs(guarded, response)
+
 
 @function_tool(name_override="sample_tool")
 def _sample_tool(path: str) -> str:
@@ -188,9 +227,31 @@ def _model_response(output: list[ResponseFunctionToolCall]) -> ModelResponse:
     return ModelResponse(output=output, usage=Usage(), response_id="response-id")
 
 
+def _text_response(text: str) -> ModelResponse:
+    return ModelResponse(
+        output=Converter.message_to_output_items(
+            ChatCompletionMessage(role="assistant", content=text),
+            provider_data={"model": "adapter"},
+        ),
+        usage=Usage(),
+        response_id="response-id",
+    )
+
+
 class _StructuredSchema:
     def is_plain_text(self) -> bool:
         return False
+
+    def json_schema(self) -> dict[str, object]:
+        return {
+            "type": "object",
+            "required": ["status", "searched_query", "note"],
+            "properties": {
+                "status": {"type": "string"},
+                "searched_query": {"type": "string"},
+                "note": {"type": "string"},
+            },
+        }
 
 
 if __name__ == "__main__":

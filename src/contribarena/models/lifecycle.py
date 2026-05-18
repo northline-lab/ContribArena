@@ -10,6 +10,7 @@ TerminalLayer = Literal[
     "run",
     "workspace",
     "agent",
+    "model_runtime",
     "budget",
     "governance",
     "contribution",

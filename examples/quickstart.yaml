@@ -5,6 +5,9 @@ run:
     max_steps: 25
     max_tokens:
     max_wall_time_seconds: 900
+    max_invocations: 5
+    max_consecutive_no_progress: 2
+    max_recoveries: 8
 
 discovery:
   candidates:
@@ -28,7 +31,7 @@ artifacts:
   output_root: runs
 
 backend:
-  read_model_path: read_model.sqlite
+  read_model_path: .contribarena/read_model.sqlite
   api_cors_origins: []
   watch_enabled: true
   refresh_debounce_seconds: 1.0

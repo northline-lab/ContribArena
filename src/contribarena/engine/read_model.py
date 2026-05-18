@@ -13,7 +13,6 @@ from contribarena.engine.surface_indexer import (
     _load_run_summaries,
     _stats,
 )
-from contribarena.errors import InfrastructureError
 
 
 @dataclass(frozen=True)

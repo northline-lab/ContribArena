@@ -57,7 +57,7 @@ def build_goal_prompt(config: RunConfig) -> str:
             "6. Use ACI tools against paths under repo/ to inspect and search; use aci_apply_patch as the primary edit tool for the smallest useful change.\n"
             "7. If the verification command is not obvious, call aci_suggest_verification(path='repo'); then use aci_verify.\n"
             "8. Call aci_submit_patch(path='repo') to capture the shadow patch; it includes new files, so do not run git add or git commit for submission. Only set no_command_verification_rationale when command verification is genuinely unavailable.\n"
-            "9. Return the final structured completion result.\n"
+            "9. Briefly state what happened; the harness derives the final run result from captured evidence.\n"
         )
     else:
         query = config.discovery.query or ""
@@ -75,7 +75,7 @@ def build_goal_prompt(config: RunConfig) -> str:
             "7. Use ACI tools against paths under repo/ to inspect and search; use aci_apply_patch as the primary edit tool for the smallest useful change.\n"
             "8. If the verification command is not obvious, call aci_suggest_verification(path='repo'); then use aci_verify.\n"
             "9. Call aci_submit_patch(path='repo') to capture the shadow patch; it includes new files, so do not run git add or git commit for submission. Only set no_command_verification_rationale when command verification is genuinely unavailable.\n"
-            "10. Return the final structured completion result.\n"
+            "10. Briefly state what happened; the harness derives the final run result from captured evidence.\n"
         )
     if config.run.mode == "owned_live":
         run_label = "M0.4 owned-live autonomous contributor run"

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import threading
-import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from collections.abc import AsyncIterator

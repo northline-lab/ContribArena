@@ -123,6 +123,14 @@ def _guard_model_response(
 ) -> ModelResponse:
     tool_calls = [item for item in response.output if isinstance(item, ResponseFunctionToolCall)]
     if not tool_calls:
+        text_tool_call = _text_tool_call(response, tools)
+        if text_tool_call is not None:
+            return ModelResponse(
+                output=[text_tool_call],
+                usage=response.usage,
+                response_id=response.response_id,
+                request_id=response.request_id,
+            )
         violation = _non_tool_text_violation(response, tools, output_schema)
         if violation is not None:
             return ModelResponse(
@@ -153,7 +161,9 @@ def _non_tool_text_violation(
     if RECOVERY_TOOL_NAME not in {tool.name for tool in tools if isinstance(tool, FunctionTool)}:
         return None
     text = _response_text(response).strip()
-    if not text or _looks_like_json(text):
+    if not text:
+        return None
+    if _looks_like_json(text):
         return None
     return ToolActionViolation(
         recovery_kind="non_tool_text_response",
@@ -209,6 +219,61 @@ def _tool_action_violation(
             attempted_tool=call.name,
         )
     return _schema_violation(call.name, args, schema)
+
+
+def _text_tool_call(response: ModelResponse, tools: list[Tool]) -> ResponseFunctionToolCall | None:
+    text = _response_text(response).strip()
+    if not text or not _looks_like_json(text):
+        return None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    tool_schemas = {
+        tool.name: tool.params_json_schema for tool in tools if isinstance(tool, FunctionTool)
+    }
+    tool_name, args = _extract_text_tool_intent(payload, set(tool_schemas))
+    if not tool_name or not isinstance(args, dict):
+        return None
+    violation = _schema_violation(tool_name, args, tool_schemas[tool_name])
+    if violation is not None:
+        return None
+    call_id = f"contribarena-text-tool-call-{uuid4().hex[:12]}"
+    return ResponseFunctionToolCall(
+        arguments=json.dumps(args, ensure_ascii=True),
+        call_id=call_id,
+        name=tool_name,
+        type="function_call",
+        id=call_id,
+    )
+
+
+def _extract_text_tool_intent(
+    payload: Any,
+    tool_names: set[str],
+) -> tuple[str | None, dict[str, Any] | None]:
+    if isinstance(payload, list):
+        if len(payload) == 1:
+            return _extract_text_tool_intent(payload[0], tool_names)
+        if len(payload) == 2 and isinstance(payload[0], str) and payload[0] in tool_names:
+            return payload[0], payload[1] if isinstance(payload[1], dict) else None
+        return None, None
+    if not isinstance(payload, dict):
+        return None, None
+    name = payload.get("name") or payload.get("tool") or payload.get("call")
+    if not isinstance(name, str) or name not in tool_names:
+        return None, None
+    args = payload.get("arguments")
+    if args is None:
+        args = payload.get("args")
+    if args is None:
+        args = payload.get("parameters")
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except json.JSONDecodeError:
+            return None, None
+    return name, args if isinstance(args, dict) else None
 
 
 def _schema_violation(

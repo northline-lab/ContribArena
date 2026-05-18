@@ -6,10 +6,17 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
 
+DEFAULT_MEMORY_RELATIVE = Path(".contribarena/memory")
+DEFAULT_READ_MODEL_RELATIVE = Path(".contribarena/read_model.sqlite")
+
+
 class BudgetConfig(BaseModel):
     max_steps: int = Field(default=25, ge=1)
     max_tokens: int | None = Field(default=None, ge=1)
     max_wall_time_seconds: int | None = Field(default=900, ge=1)
+    max_invocations: int = Field(default=5, ge=1)
+    max_consecutive_no_progress: int = Field(default=2, ge=1)
+    max_recoveries: int = Field(default=8, ge=1)
 
 
 class RunSection(BaseModel):
@@ -90,7 +97,7 @@ class ArtifactConfig(BaseModel):
 
 class MemoryConfig(BaseModel):
     enabled: bool = True
-    root: Path = Path(".contribarena/memory")
+    root: Path = DEFAULT_MEMORY_RELATIVE
     backend: Literal["noop", "graphiti"] = "noop"
     graphiti_enabled: bool = False
     graphiti_graph_backend: Literal["falkordb"] = "falkordb"
@@ -265,7 +272,7 @@ class ControllerConfig(BaseModel):
 
 
 class BackendConfig(BaseModel):
-    read_model_path: Path = Path(".contribarena/read_model.sqlite")
+    read_model_path: Path = DEFAULT_READ_MODEL_RELATIVE
     api_cors_origins: list[str] = Field(
         default_factory=lambda: [
             "http://localhost:5173",

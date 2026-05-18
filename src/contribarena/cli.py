@@ -12,6 +12,7 @@ import typer
 
 from contribarena import __version__
 from contribarena.config import load_run_config, write_starter_config
+from contribarena.config.schema import DEFAULT_READ_MODEL_RELATIVE
 from contribarena.engine import LocalController, Runner
 from contribarena.engine.api import create_app
 from contribarena.engine.judge_refresh import refresh_judgement
@@ -146,7 +147,7 @@ def status(
     try:
         run_config = load_run_config(config)
         artifact_root = input_dir or _config_relative(config, run_config.artifacts.output_root)
-        read_model_path = _config_relative(config, run_config.backend.read_model_path)
+        read_model_path = _read_model_path(config, run_config, artifact_root)
         model = SurfaceReadModel(read_model_path)
         if refresh or not read_model_path.exists():
             refresh = model.refresh_from_artifacts(artifact_root)
@@ -183,7 +184,7 @@ def runs_list(
     try:
         run_config = load_run_config(config)
         artifact_root = input_dir or _config_relative(config, run_config.artifacts.output_root)
-        read_model_path = _config_relative(config, run_config.backend.read_model_path)
+        read_model_path = _read_model_path(config, run_config, artifact_root)
         model = SurfaceReadModel(read_model_path)
         if refresh or not read_model_path.exists():
             model.refresh_from_artifacts(artifact_root)
@@ -228,7 +229,7 @@ def show_run(
     try:
         run_config = load_run_config(config)
         artifact_root = input_dir or _config_relative(config, run_config.artifacts.output_root)
-        read_model_path = _config_relative(config, run_config.backend.read_model_path)
+        read_model_path = _read_model_path(config, run_config, artifact_root)
         model = SurfaceReadModel(read_model_path)
         if refresh or not read_model_path.exists():
             model.refresh_from_artifacts(artifact_root)
@@ -288,10 +289,11 @@ def serve(
     """Start the frontend-facing benchmark read API."""
     try:
         run_config = load_run_config(config)
-        read_model_path = _config_relative(config, run_config.backend.read_model_path)
+        artifact_root = input_dir or _config_relative(config, run_config.artifacts.output_root)
+        read_model_path = _read_model_path(config, run_config, artifact_root)
         app_obj = create_app(
             run_config,
-            input_dir=input_dir or _config_relative(config, run_config.artifacts.output_root),
+            input_dir=artifact_root,
             db_path=read_model_path,
             watch=not no_watch,
         )
@@ -362,6 +364,15 @@ def _command_status(name: str, command: list[str]) -> str:
 
 def _config_relative(config_path: Path, path: Path) -> Path:
     return path if path.is_absolute() else config_path.resolve().parent / path
+
+
+def _read_model_path(config_path: Path, run_config: Any, artifact_root: Path) -> Path:
+    path = run_config.backend.read_model_path
+    if path.is_absolute():
+        return path
+    if path == DEFAULT_READ_MODEL_RELATIVE:
+        return artifact_root.parent / "read_model.sqlite"
+    return _config_relative(config_path, path)
 
 
 def _with_model_override(run_config: Any, model: str) -> Any:

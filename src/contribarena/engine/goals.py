@@ -7,13 +7,20 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from contribarena.config.schema import RunConfig
+from contribarena.config.schema import DEFAULT_MEMORY_RELATIVE, RunConfig
 from contribarena.memory.redact import redact_text
 from contribarena.models import GoalContext, GoalEvent, GoalState, GoalUpdateResult, ShortTermGoal
 
 
 def goal_state_path(config: RunConfig) -> Path:
-    return config.goal.state_path or config.artifacts.output_root / "goal_state.json"
+    if config.goal.state_path is not None:
+        return config.goal.state_path
+    if (
+        config.artifacts.output_root == Path("runs")
+        and config.memory.root != DEFAULT_MEMORY_RELATIVE
+    ):
+        return config.memory.root / "goal_state.json"
+    return config.artifacts.output_root / "goal_state.json"
 
 
 class GoalService:

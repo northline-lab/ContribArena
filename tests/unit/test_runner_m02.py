@@ -26,6 +26,7 @@ from contribarena.config.schema import (
     RunSection,
     WorkspaceConfig,
 )
+from contribarena.agent import AgentInvocationResult
 from contribarena.agent.contributor import build_agent_instructions
 from contribarena.engine.goals import GoalService, goal_state_path
 from contribarena.engine.runner import Runner, _owned_live_push_command
@@ -107,6 +108,21 @@ class FakeFailingAgent:
         model_provider: object = None,
     ) -> AgentFinalResult:
         raise AgentError("synthetic agent failure")
+
+
+class FakeProviderErrorAgent:
+    def run(
+        self,
+        config: RunConfig,
+        tools: object,
+        prompt: str,
+        model_provider: object = None,
+    ) -> AgentInvocationResult:
+        return AgentInvocationResult(
+            content="Provider invocation failed.",
+            stopped_reason="provider_error",
+            error_message="HTTP 400",
+        )
 
 
 class FakeMemoryAgent:
@@ -1523,6 +1539,24 @@ class RunnerM02Test(unittest.TestCase):
                 for line in (run_dirs[0] / "trace.jsonl").read_text().splitlines()
             }
             self.assertIn("workspace_retained", trace_states)
+
+    def test_provider_error_writes_model_runtime_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _config(tmp_path / "runs")
+            result = _run_with_fake_docker(FakeProviderErrorAgent(), config, tmp_path)
+
+            self.assertEqual("failed", result.status)
+            self.assertEqual("model_runtime", result.terminal_reason)
+            terminal = json.loads((result.run_dir / "terminal_state.json").read_text())
+            self.assertEqual("model_runtime", terminal["reason"])
+            self.assertEqual("model_runtime", terminal["layer"])
+            trace_events = [
+                json.loads(line)
+                for line in (result.run_dir / "trace.jsonl").read_text().splitlines()
+                if line.strip()
+            ]
+            self.assertIn("agent.invocation_failed", {event["event"] for event in trace_events})
 
     def test_runner_passes_tracing_model_provider_to_agent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
