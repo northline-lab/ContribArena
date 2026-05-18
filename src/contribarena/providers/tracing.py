@@ -301,8 +301,8 @@ class TracingModel(Model):
                 "elapsed_ms": _elapsed_ms(started),
                 "error_type": type(exc).__name__,
                 "error_kind": error_kind,
-                "error": _safe_error_message(str(exc)),
-                "error_message": _safe_error_message(str(exc)),
+                "error": _error_message(exc),
+                "error_message": _error_message(exc),
                 "retry_attempted": retry_attempted,
                 "retry_outcome": "not_applicable",
                 "next_retry_delay_seconds": delay_seconds,
@@ -319,7 +319,7 @@ class TracingModel(Model):
         retry_outcome: str,
         error_kind: str,
     ) -> None:
-        safe_error = _safe_error_message(str(exc))
+        safe_error = _error_message(exc)
         self._trace.write(
             RunState.MODEL_TURN_FAILED,
             "model_turn.failed",
@@ -436,8 +436,15 @@ def _safe_error_message(message: str) -> str:
     return redacted[:500]
 
 
+def _error_message(exc: Exception) -> str:
+    message = str(exc).strip()
+    if not message:
+        message = type(exc).__name__
+    return _safe_error_message(message)
+
+
 def _classify_model_runtime_error(exc: Exception) -> str:
-    message = str(exc).lower()
+    message = f"{type(exc).__name__}: {str(exc)}".lower()
     status_code = _status_code_from_error_message(message)
     if "duplicate" in message and "tool_call_id" in message:
         return "duplicate_tool_call_id"

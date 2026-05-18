@@ -18,6 +18,7 @@ from contribarena.providers.action_guard import (
 from contribarena.providers.adapters import (
     _repair_structured_output_message,
     _to_anthropic_tools,
+    _to_gemini_contents,
     _to_gemini_tools,
 )
 
@@ -66,24 +67,74 @@ class ProviderToolSchemaTest(unittest.TestCase):
             self.assertIn("expected_files_json", schema["properties"])
             self.assertIn("operations_json", schema["required"])
 
-
-class ProviderActionGuardTest(unittest.TestCase):
-    def test_rejects_multiple_tool_calls_as_recovery_tool_call(self) -> None:
-        response = _model_response(
+    def test_gemini_groups_multiple_tool_outputs_after_multi_tool_call_turn(self) -> None:
+        contents = _to_gemini_contents(
             [
-                _tool_call("aci_view", {"path": "repo/app.py"}),
-                _tool_call("aci_search", {"pattern": "needle"}),
+                {
+                    "type": "function_call",
+                    "call_id": "call-a",
+                    "name": "repo_search",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call-b",
+                    "name": "aci_runtime_get_context",
+                    "arguments": '{"scope":"run"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call-a",
+                    "output": "search ok",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call-b",
+                    "output": "runtime ok",
+                },
             ]
         )
 
-        guarded = guard_model_response(response, [_sample_tool, _recovery_tool])
+        self.assertEqual("model", contents[0]["role"])
+        self.assertEqual(2, len(contents[0]["parts"]))
+        self.assertEqual("user", contents[1]["role"])
+        self.assertEqual(2, len(contents[1]["parts"]))
+        response_names = [
+            part["functionResponse"]["name"]
+            for part in contents[1]["parts"]
+        ]
+        self.assertEqual(["repo_search", "aci_runtime_get_context"], response_names)
+
+
+class ProviderActionGuardTest(unittest.TestCase):
+    def test_accepts_multiple_valid_tool_calls(self) -> None:
+        response = _model_response(
+            [
+                _tool_call("sample_tool", {"path": "repo/app.py"}),
+                _tool_call("view_tool", {"path": "repo/other.py"}),
+            ]
+        )
+
+        guarded = guard_model_response(response, [_sample_tool, _view_tool, _recovery_tool])
+
+        self.assertIs(guarded, response)
+
+    def test_rejects_invalid_call_inside_multiple_tool_calls(self) -> None:
+        response = _model_response(
+            [
+                _tool_call("sample_tool", {"path": "repo/app.py"}),
+                _tool_call("sample_tool", {}),
+            ]
+        )
+
+        guarded = guard_model_response(response, [_sample_tool, _view_tool, _recovery_tool])
 
         self.assertEqual(1, len(guarded.output))
         recovery = guarded.output[0]
         self.assertIsInstance(recovery, ResponseFunctionToolCall)
         self.assertEqual(RECOVERY_TOOL_NAME, recovery.name)
         payload = json.loads(recovery.arguments)
-        self.assertEqual("multi_tool_action", payload["recovery_kind"])
+        self.assertEqual("invalid_tool_arguments", payload["recovery_kind"])
 
     def test_rejects_missing_required_tool_argument(self) -> None:
         response = _model_response([_tool_call("sample_tool", {})])

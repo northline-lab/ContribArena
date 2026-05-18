@@ -297,16 +297,18 @@ class ContributorAgent:
                 tool_call_count=_count_tool_calls(getattr(result, "new_items", [])),
             )
         except MaxTurnsExceeded as exc:
+            error_message = _exception_message(exc)
             return AgentInvocationResult(
-                content=f"Invocation stopped at max turns: {exc}",
+                content=f"Invocation stopped at max turns: {error_message}",
                 stopped_reason="max_turns",
-                error_message=str(exc),
+                error_message=error_message,
             )
         except Exception as exc:
+            error_message = _exception_message(exc)
             return AgentInvocationResult(
-                content=f"Provider invocation failed: {exc}",
+                content=f"Provider invocation failed: {error_message}",
                 stopped_reason="provider_error",
-                error_message=str(exc),
+                error_message=error_message,
             )
 
     def _run_local_stub(
@@ -479,3 +481,8 @@ def _count_tool_calls(items: object) -> int:
         }:
             count += 1
     return count
+
+
+def _exception_message(exc: Exception) -> str:
+    message = str(exc).strip()
+    return message or type(exc).__name__

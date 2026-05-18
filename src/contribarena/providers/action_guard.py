@@ -184,41 +184,34 @@ def _tool_action_violation(
     }
     if RECOVERY_TOOL_NAME not in tool_schemas:
         return None
-    if len(tool_calls) > 1:
-        names = ", ".join(call.name for call in tool_calls)
-        return ToolActionViolation(
-            recovery_kind="multi_tool_action",
-            message=(
-                "Rejected multiple tool calls in one model step. "
-                f"Attempted tools: {names}."
-            ),
-            attempted_tool=names,
-        )
-    call = tool_calls[0]
-    if call.name == RECOVERY_TOOL_NAME:
-        return None
-    schema = tool_schemas.get(call.name)
-    if schema is None:
-        return ToolActionViolation(
-            recovery_kind="unknown_tool",
-            message=f"Rejected unknown tool call: {call.name}.",
-            attempted_tool=call.name,
-        )
-    try:
-        args = json.loads(call.arguments or "{}")
-    except json.JSONDecodeError as exc:
-        return ToolActionViolation(
-            recovery_kind="malformed_action",
-            message=f"Rejected malformed JSON arguments for {call.name}: {exc.msg}.",
-            attempted_tool=call.name,
-        )
-    if not isinstance(args, dict):
-        return ToolActionViolation(
-            recovery_kind="invalid_tool_arguments",
-            message=f"Rejected non-object arguments for {call.name}.",
-            attempted_tool=call.name,
-        )
-    return _schema_violation(call.name, args, schema)
+    for call in tool_calls:
+        if call.name == RECOVERY_TOOL_NAME:
+            continue
+        schema = tool_schemas.get(call.name)
+        if schema is None:
+            return ToolActionViolation(
+                recovery_kind="unknown_tool",
+                message=f"Rejected unknown tool call: {call.name}.",
+                attempted_tool=call.name,
+            )
+        try:
+            args = json.loads(call.arguments or "{}")
+        except json.JSONDecodeError as exc:
+            return ToolActionViolation(
+                recovery_kind="malformed_action",
+                message=f"Rejected malformed JSON arguments for {call.name}: {exc.msg}.",
+                attempted_tool=call.name,
+            )
+        if not isinstance(args, dict):
+            return ToolActionViolation(
+                recovery_kind="invalid_tool_arguments",
+                message=f"Rejected non-object arguments for {call.name}.",
+                attempted_tool=call.name,
+            )
+        violation = _schema_violation(call.name, args, schema)
+        if violation is not None:
+            return violation
+    return None
 
 
 def _text_tool_call(response: ModelResponse, tools: list[Tool]) -> ResponseFunctionToolCall | None:

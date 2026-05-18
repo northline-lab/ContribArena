@@ -128,6 +128,22 @@ class FakeProviderErrorAgent:
         )
 
 
+class FakeBlankProviderErrorAgent:
+    def run(
+        self,
+        config: RunConfig,
+        tools: object,
+        prompt: str,
+        model_provider: object = None,
+        **kwargs: object,
+    ) -> AgentInvocationResult:
+        return AgentInvocationResult(
+            content="Provider invocation failed: ReadTimeout",
+            stopped_reason="provider_error",
+            error_message="ReadTimeout",
+        )
+
+
 class FakeMemoryAgent:
     def run(
         self,
@@ -1658,6 +1674,15 @@ class RunnerM02Test(unittest.TestCase):
                 if line.strip()
             ]
             self.assertIn("agent.invocation_failed", {event["event"] for event in trace_events})
+
+    def test_provider_error_message_reaches_terminal_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _config(tmp_path / "runs")
+            result = _run_with_fake_docker(FakeBlankProviderErrorAgent(), config, tmp_path)
+
+            terminal = json.loads((result.run_dir / "terminal_state.json").read_text())
+            self.assertEqual("ReadTimeout", terminal["message"])
 
     def test_runner_passes_tracing_model_provider_to_agent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

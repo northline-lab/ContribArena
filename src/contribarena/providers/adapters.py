@@ -4,6 +4,7 @@ import json
 import re
 from collections.abc import AsyncIterator
 from typing import Any
+from uuid import uuid4
 
 import httpx
 from json_repair import repair_json
@@ -120,7 +121,7 @@ class GeminiGenerateContentModel(Model):
         self.name = name
         self.config = config
         self._api_key = api_key
-        self._client = httpx.AsyncClient(timeout=120)
+        self._client = httpx.AsyncClient(timeout=180)
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -549,8 +550,9 @@ def _gemini_response_to_chat_message(payload: dict[str, Any]) -> ChatCompletionM
         if function_call:
             name = function_call.get("name")
             args = function_call.get("args") or {}
+            call_id = f"gemini-call-{uuid4().hex[:12]}-{index}"
             tool_call = ChatCompletionMessageFunctionToolCall(
-                id=f"gemini-call-{index}",
+                id=call_id,
                 type="function",
                 function=Function(name=name, arguments=json.dumps(args, ensure_ascii=True)),
             )
