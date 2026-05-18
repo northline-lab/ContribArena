@@ -6,13 +6,18 @@ from pathlib import Path
 
 from contribarena.config.schema import (
     ArtifactConfig,
+    CompatibleModelConfig,
     DiscoveryConfig,
     JudgementJudgeConfig,
+    ModelProvidersConfig,
+    ModelsConfig,
     RepoCandidate,
+    ResponsesModelConfig,
     RunConfig,
     RunSection,
     WorkspaceConfig,
 )
+from contribarena.engine import judgement as judgement_module
 from contribarena.engine.judgement import judge_run
 from contribarena.models.judgement import JudgePacket, JudgementSeason
 
@@ -88,8 +93,74 @@ class JudgementScoringTests(unittest.TestCase):
         self.assertEqual(1.0, judgement.aggregate_rubric[3].weight)
         self.assertTrue(all(score.weight == 1.0 for score in judgement.judges[0].rubric[3:4]))
 
+    def test_default_judges_use_all_configured_provider_models(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(Path(tmp), explicit_judges=False)
+            config.run.model = "compatible/worker"
+            config.models = ModelsConfig(
+                providers=ModelProvidersConfig(
+                    compatible={
+                        "qwen": CompatibleModelConfig(
+                            base_url="https://example.com/v1",
+                            api_key_env="TEST_API_KEY",
+                        )
+                    },
+                    responses={
+                        "gpt": ResponsesModelConfig(
+                            base_url="https://example.com/v1",
+                            api_key_env="TEST_API_KEY",
+                        )
+                    },
+                )
+            )
+            judges = judgement_module._judges(config)
 
-def _config(output_root: Path) -> RunConfig:
+        self.assertEqual(
+            ["compatible/qwen", "responses/gpt"],
+            [judge.model for judge in judges],
+        )
+
+    def test_dimension_judge_retries_three_times_with_exponential_backoff(self) -> None:
+        calls = 0
+        sleeps: list[float] = []
+
+        class FakeAgent:
+            def __init__(self, **kwargs: object) -> None:
+                pass
+
+        class FakeModelSettings:
+            def __init__(self, **kwargs: object) -> None:
+                pass
+
+        class FakeRunConfig:
+            def __init__(self, **kwargs: object) -> None:
+                pass
+
+        class FakeRunner:
+            @staticmethod
+            def run_sync(*args: object, **kwargs: object) -> object:
+                nonlocal calls
+                calls += 1
+                raise RuntimeError("transient judge failure")
+
+        with unittest.mock.patch.object(judgement_module, "_sleep_before_retry", sleeps.append):
+            with self.assertRaises(RuntimeError):
+                judgement_module._run_llm_dimension_judge(
+                    agent_cls=FakeAgent,
+                    agents_run_config_cls=FakeRunConfig,
+                    model_settings_cls=FakeModelSettings,
+                    runner=FakeRunner(),
+                    dimension="solution_correctness",
+                    judge=JudgementJudgeConfig(id="judge", model="compatible/judge"),
+                    model_provider=object(),  # type: ignore[arg-type]
+                    packet=_packet(),
+                )
+
+        self.assertEqual(3, calls)
+        self.assertEqual([1.0, 2.0], sleeps)
+
+
+def _config(output_root: Path, *, explicit_judges: bool = True) -> RunConfig:
     config = RunConfig(
         run=RunSection(id="run-1", mode="shadow", model="local-stub"),
         discovery=DiscoveryConfig(
@@ -104,7 +175,8 @@ def _config(output_root: Path) -> RunConfig:
         workspace=WorkspaceConfig(),
         artifacts=ArtifactConfig(output_root=output_root),
     )
-    config.judgement.judges = [JudgementJudgeConfig(id="judge_a", model="local-stub")]
+    if explicit_judges:
+        config.judgement.judges = [JudgementJudgeConfig(id="judge_a", model="local-stub")]
     return config
 
 

@@ -1778,7 +1778,8 @@ class RunnerM02Test(unittest.TestCase):
                 JudgementJudgeConfig(id="judge_a", model="compatible/judge-a"),
                 JudgementJudgeConfig(id="judge_b", model="compatible/judge-b"),
             ]
-            result = _run_with_fake_docker(FakeIssueAgent(), config, tmp_path)
+            with patch("contribarena.engine.judgement._sleep_before_retry"):
+                result = _run_with_fake_docker(FakeIssueAgent(), config, tmp_path)
 
             packet = json.loads((result.run_dir / "judge_packet.json").read_text())
             self.assertEqual(result.run_id, packet["run_id"])

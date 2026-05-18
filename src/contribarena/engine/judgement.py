@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -130,8 +131,21 @@ def judge_run(
 def _judges(config: RunConfig) -> list[JudgementJudgeConfig]:
     if config.judgement.judges:
         return config.judgement.judges
-    model = config.run.model
-    return [JudgementJudgeConfig(id=_judge_id(model), model=model)]
+    return [
+        JudgementJudgeConfig(id=_judge_id(model), model=model)
+        for model in _configured_judge_models(config)
+    ]
+
+
+def _configured_judge_models(config: RunConfig) -> list[str]:
+    providers = config.models.providers
+    models = [
+        *(f"compatible/{name}" for name in providers.compatible),
+        *(f"responses/{name}" for name in providers.responses),
+        *(f"anthropic/{name}" for name in providers.anthropic),
+        *(f"gemini/{name}" for name in providers.gemini),
+    ]
+    return models or [config.run.model]
 
 
 def _judge_from_config(
@@ -237,7 +251,7 @@ def _run_llm_dimension_judge(
     packet: JudgePacket,
 ) -> JudgementRubricScore:
     last_error: Exception | None = None
-    for attempt in range(2):
+    for attempt in range(3):
         try:
             agent = agent_cls(
                 name=f"contribarena-judge-{judge.id}-{dimension}-{attempt + 1}",
@@ -258,8 +272,14 @@ def _run_llm_dimension_judge(
             return _normalize_llm_dimension(dimension, str(result.final_output))
         except Exception as exc:
             last_error = exc
+            if attempt < 2:
+                _sleep_before_retry(float(2**attempt))
     assert last_error is not None
     raise last_error
+
+
+def _sleep_before_retry(seconds: float) -> None:
+    time.sleep(seconds)
 
 
 def _dimension_packet(dimension: str, packet: JudgePacket) -> dict[str, object]:
