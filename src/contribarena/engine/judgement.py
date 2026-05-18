@@ -5,7 +5,7 @@ import math
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from agents.models.interface import ModelProvider
 from json_repair import repair_json
@@ -43,6 +43,10 @@ DEFAULT_DIMENSION_WEIGHTS = {
     "verification_evidence_quality": 0.15,
     "maintainer_acceptability": 0.20,
 }
+
+
+class JudgementProgressReporter(Protocol):
+    def __call__(self, event: str, payload: dict[str, Any]) -> None: ...
 
 
 def build_judge_packet(
@@ -100,9 +104,28 @@ def judge_run(
     run_dir: Path,
     packet: JudgePacket,
     model_provider: ModelProvider | None = None,
+    progress: JudgementProgressReporter | None = None,
 ) -> JudgementArtifact:
     provider = model_provider or ContribArenaModelProvider(config.models)
-    judges = [_judge_from_config(config, judge, packet, provider) for judge in _judges(config)]
+    judge_configs = _judges(config)
+    _report_progress(progress, "judgement.started", {"judge_count": len(judge_configs)})
+    judges: list[JudgementJudgeResult] = []
+    for judge in judge_configs:
+        _report_progress(progress, "judgement.judge_started", {"judge_id": judge.id, "model": judge.model})
+        result = _judge_from_config(config, judge, packet, provider, progress)
+        judges.append(result)
+        fallback_dimensions = sum(1 for score in result.rubric if score.source == "fallback")
+        _report_progress(
+            progress,
+            "judgement.judge_finished",
+            {
+                "judge_id": judge.id,
+                "model": judge.model,
+                "score": result.judge_score,
+                "fallback_dimensions": fallback_dimensions,
+                "error": result.error,
+            },
+        )
     aggregate = _aggregate(judges, _dimension_weights(config))
     judge_score = _mean([judge.judge_score for judge in judges])
     maintainer = JudgementMaintainerOutcome(
@@ -111,7 +134,7 @@ def judge_run(
     )
     adjustment = _real_world_adjustment(config, packet)
     pr_url = str(packet.pull_request.get("url", ""))
-    return JudgementArtifact(
+    artifact = JudgementArtifact(
         status=_judgement_status(judges),
         season_id=config.judgement.season_id,
         run_id=run_id,
@@ -126,6 +149,16 @@ def judge_run(
         evidence=_evidence(run_dir),
         created_at=datetime.now(UTC).isoformat(),
     )
+    _report_progress(
+        progress,
+        "judgement.finished",
+        {
+            "status": artifact.status,
+            "judge_score": artifact.judge_score,
+            "arena_score": artifact.arena_score,
+        },
+    )
+    return artifact
 
 
 def _judges(config: RunConfig) -> list[JudgementJudgeConfig]:
@@ -153,9 +186,10 @@ def _judge_from_config(
     judge: JudgementJudgeConfig,
     packet: JudgePacket,
     model_provider: ModelProvider,
+    progress: JudgementProgressReporter | None,
 ) -> JudgementJudgeResult:
     if judge.model != "local-stub":
-        llm_result = _try_llm_judge(config, judge, packet, model_provider)
+        llm_result = _try_llm_judge(config, judge, packet, model_provider, progress)
         if llm_result is not None:
             return llm_result
     rubric = _apply_weights(
@@ -186,6 +220,7 @@ def _try_llm_judge(
     judge: JudgementJudgeConfig,
     packet: JudgePacket,
     model_provider: ModelProvider,
+    progress: JudgementProgressReporter | None,
 ) -> JudgementJudgeResult | None:
     try:
         from agents import Agent, ModelSettings, RunConfig as AgentsRunConfig, Runner
@@ -207,11 +242,35 @@ def _try_llm_judge(
                         judge=judge,
                         model_provider=model_provider,
                         packet=packet,
+                        progress=progress,
                     )
+                )
+                _report_progress(
+                    progress,
+                    "judgement.dimension_finished",
+                    {
+                        "judge_id": judge.id,
+                        "model": judge.model,
+                        "dimension": dimension,
+                        "source": rubric[-1].source,
+                        "score": rubric[-1].score,
+                    },
                 )
             except Exception as exc:
                 rubric.append(fallback[dimension].model_copy(update={"source": "fallback"}))
                 errors.append(f"{dimension}: {str(exc)[:160]}")
+                _report_progress(
+                    progress,
+                    "judgement.dimension_failed",
+                    {
+                        "judge_id": judge.id,
+                        "model": judge.model,
+                        "dimension": dimension,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc)[:240],
+                        "fallback": True,
+                    },
+                )
         rubric = _apply_weights(rubric, _dimension_weights(config))
         score = _rubric_score(rubric)
         return JudgementJudgeResult(
@@ -249,9 +308,20 @@ def _run_llm_dimension_judge(
     judge: JudgementJudgeConfig,
     model_provider: ModelProvider,
     packet: JudgePacket,
+    progress: JudgementProgressReporter | None = None,
 ) -> JudgementRubricScore:
     last_error: Exception | None = None
     for attempt in range(3):
+        _report_progress(
+            progress,
+            "judgement.dimension_started",
+            {
+                "judge_id": judge.id,
+                "model": judge.model,
+                "dimension": dimension,
+                "attempt": attempt + 1,
+            },
+        )
         try:
             agent = agent_cls(
                 name=f"contribarena-judge-{judge.id}-{dimension}-{attempt + 1}",
@@ -272,6 +342,19 @@ def _run_llm_dimension_judge(
             return _normalize_llm_dimension(dimension, str(result.final_output))
         except Exception as exc:
             last_error = exc
+            _report_progress(
+                progress,
+                "judgement.dimension_retry",
+                {
+                    "judge_id": judge.id,
+                    "model": judge.model,
+                    "dimension": dimension,
+                    "attempt": attempt + 1,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc)[:240],
+                    "will_retry": attempt < 2,
+                },
+            )
             if attempt < 2:
                 _sleep_before_retry(float(2**attempt))
     assert last_error is not None
@@ -280,6 +363,15 @@ def _run_llm_dimension_judge(
 
 def _sleep_before_retry(seconds: float) -> None:
     time.sleep(seconds)
+
+
+def _report_progress(
+    progress: JudgementProgressReporter | None,
+    event: str,
+    payload: dict[str, Any],
+) -> None:
+    if progress is not None:
+        progress(event, payload)
 
 
 def _dimension_packet(dimension: str, packet: JudgePacket) -> dict[str, object]:

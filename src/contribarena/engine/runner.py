@@ -389,7 +389,7 @@ class Runner:
                 _finalize_workspace(workspace, trace, terminal, config.workspace.cleanup_policy)
                 workspace_finalized = True
             _write_run_summary_artifact(artifacts, config, run_id, repo_slug, terminal)
-            _write_judgement_artifacts(artifacts, config, run_id)
+            _write_judgement_artifacts(artifacts, config, run_id, trace=trace, operator=operator)
             _write_run_summary_artifact(artifacts, config, run_id, repo_slug, terminal)
             trace.write(
                 RunState.ARTIFACTS_WRITTEN,
@@ -454,7 +454,7 @@ class Runner:
                 _finalize_workspace(workspace, trace, terminal, config.workspace.cleanup_policy)
                 workspace_finalized = True
             _write_run_summary_artifact(artifacts, config, run_id, repo_slug, terminal)
-            _write_judgement_artifacts(artifacts, config, run_id)
+            _write_judgement_artifacts(artifacts, config, run_id, trace=trace, operator=operator)
             _write_run_summary_artifact(artifacts, config, run_id, repo_slug, terminal)
             artifacts.finalize_manifest()
             raise
@@ -763,6 +763,9 @@ def _write_judgement_artifacts(
     artifacts: ArtifactWriter,
     config: RunConfig,
     run_id: str,
+    *,
+    trace: TraceWriter | None = None,
+    operator: OperatorProgressWriter | None = None,
 ) -> None:
     if not config.judgement.enabled:
         return
@@ -778,8 +781,65 @@ def _write_judgement_artifacts(
         run_id=run_id,
         run_dir=artifacts.run_dir,
         packet=packet,
+        progress=_judgement_progress_reporter(trace=trace, operator=operator),
     )
     artifacts.write_json("judgement.json", judgement.model_dump(mode="json"), required=False)
+
+
+def _judgement_progress_reporter(
+    *,
+    trace: TraceWriter | None,
+    operator: OperatorProgressWriter | None,
+) -> object | None:
+    if trace is None and operator is None:
+        return None
+
+    def report(event: str, payload: dict[str, object]) -> None:
+        if trace is not None:
+            trace.write(RunState.CONTRIBUTION_REVIEWED, event, payload)
+        if operator is not None:
+            operator.write(
+                "judgement",
+                _operator_judgement_status(event, payload),
+                _operator_judgement_summary(event, payload),
+                evidence=["judgement.json", "judge_packet.json", "trace.jsonl"],
+                payload=payload,
+            )
+
+    return report
+
+
+def _operator_judgement_status(event: str, payload: dict[str, object]) -> str:
+    if event.endswith(".failed"):
+        return "needs_attention"
+    if event.endswith(".retry"):
+        return "retrying" if payload.get("will_retry") else "fallback"
+    if event.endswith(".finished"):
+        return "ok"
+    return "working"
+
+
+def _operator_judgement_summary(event: str, payload: dict[str, object]) -> str:
+    judge = payload.get("judge_id")
+    model = payload.get("model")
+    dimension = payload.get("dimension")
+    if event == "judgement.started":
+        return f"started judgement panel with {payload.get('judge_count')} judge(s)"
+    if event == "judgement.judge_started":
+        return f"started judge {judge} ({model})"
+    if event == "judgement.dimension_started":
+        return f"judging {dimension} with {judge} ({model}), attempt {payload.get('attempt')}"
+    if event == "judgement.dimension_retry":
+        return f"retrying judge {judge} ({model}) for {dimension}: {payload.get('error_type')}"
+    if event == "judgement.dimension_failed":
+        return f"judge {judge} ({model}) used fallback for {dimension}: {payload.get('error_type')}"
+    if event == "judgement.dimension_finished":
+        return f"finished judge {judge} ({model}) for {dimension}: {payload.get('score')}/5"
+    if event == "judgement.judge_finished":
+        return f"finished judge {judge} ({model}) score {payload.get('score')}"
+    if event == "judgement.finished":
+        return f"finished judgement: {payload.get('status')} score {payload.get('judge_score')}"
+    return event
 
 
 def _write_pr_lifecycle_artifacts(

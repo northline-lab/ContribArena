@@ -10,8 +10,11 @@ from contribarena.engine.judgement import (
     build_judge_packet,
     judge_run,
 )
+from contribarena.engine.operator_events import OperatorProgressWriter
+from contribarena.engine.runner import _judgement_progress_reporter
 from contribarena.engine.surface_summary import _judgement
 from contribarena.errors import InfrastructureError
+from contribarena.trace import TraceWriter
 
 
 @dataclass(frozen=True)
@@ -50,7 +53,15 @@ def refresh_judgement(
         packet = build_judge_packet(config=config, run_id=rid, run_dir=run_dir)
         _write_json(run_dir / "judge_packet.json", packet.model_dump(mode="json"))
         _write_json(run_dir / "judge_dimension_packets.json", build_judge_dimension_packets(packet))
-        judgement = judge_run(config=config, run_id=rid, run_dir=run_dir, packet=packet)
+        trace = TraceWriter(run_dir / "trace.jsonl", rid)
+        operator = OperatorProgressWriter(run_dir / "operator_events.jsonl", rid, stream=True)
+        judgement = judge_run(
+            config=config,
+            run_id=rid,
+            run_dir=run_dir,
+            packet=packet,
+            progress=_judgement_progress_reporter(trace=trace, operator=operator),
+        )
         _write_json(run_dir / "judgement.json", judgement.model_dump(mode="json"))
         summary["judgement"] = _judgement(run_dir).model_dump(mode="json")
         _ensure_artifact(summary, "judge_packet.json", "json")

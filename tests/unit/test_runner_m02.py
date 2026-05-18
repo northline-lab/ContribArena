@@ -1804,6 +1804,15 @@ class RunnerM02Test(unittest.TestCase):
                 1.0,
                 sum(score["weight"] for score in judgement["aggregate_rubric"]),
             )
+            operator_events = [
+                json.loads(line)
+                for line in (result.run_dir / "operator_events.jsonl").read_text().splitlines()
+                if line.strip()
+            ]
+            self.assertIn(
+                "judgement",
+                {event["phase"] for event in operator_events},
+            )
             self.assertEqual(
                 0.25,
                 next(
