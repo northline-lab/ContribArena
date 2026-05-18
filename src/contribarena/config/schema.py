@@ -11,9 +11,9 @@ DEFAULT_READ_MODEL_RELATIVE = Path(".contribarena/read_model.sqlite")
 
 
 class BudgetConfig(BaseModel):
-    max_steps: int = Field(default=25, ge=1)
+    max_steps: int = Field(default=80, ge=1)
     max_tokens: int | None = Field(default=None, ge=1)
-    max_wall_time_seconds: int | None = Field(default=900, ge=1)
+    max_wall_time_seconds: int | None = Field(default=3600, ge=1)
     max_invocations: int = Field(default=5, ge=1)
     max_consecutive_no_progress: int = Field(default=2, ge=1)
     max_recoveries: int = Field(default=8, ge=1)

@@ -44,7 +44,36 @@ class WorkspaceTest(unittest.TestCase):
             self.assertIn("exec", log)
             self.assertIn("exec -i", log)
             self.assertIn("/proc/1/fd/1", log)
+            self.assertIn("set -o pipefail", log)
             self.assertIn("rm -f", log)
+
+    def test_workspace_stop_times_out_instead_of_hanging(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            docker = bin_dir / "docker"
+            docker.write_text(
+                "#!/usr/bin/env sh\n"
+                'if [ "$1" = "rm" ]; then sleep 2; exit 0; fi\n'
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+            old_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = f"{bin_dir}:{old_path}"
+            try:
+                workspace = DockerWorkspaceManager(
+                    "run-1",
+                    "owner/repo",
+                    WorkspaceConfig(command_timeout_seconds=1),
+                )
+                result = workspace.stop()
+            finally:
+                os.environ["PATH"] = old_path
+
+            self.assertEqual(124, result.exit_code)
+            self.assertTrue(result.timed_out)
+            self.assertIn("timed out", result.stderr)
 
 
 if __name__ == "__main__":

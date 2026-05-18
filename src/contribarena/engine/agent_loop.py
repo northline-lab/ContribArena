@@ -10,6 +10,7 @@ from contribarena.config.schema import RepoCandidate, RunConfig
 from contribarena.engine.goals import GoalService
 from contribarena.engine.middleware.artifact import ArtifactCapture
 from contribarena.engine.operator_events import truncate_for_operator
+from contribarena.memory.redact import redact_text
 from contribarena.models import (
     AgentFinalResult,
     OpportunitySummary,
@@ -105,7 +106,7 @@ class AgentLoopReview:
 class AgentLoopState:
     counters: LoopCounters = field(default_factory=LoopCounters)
     last_invocation_note: str = ""
-    last_useful_tool_summaries: list[str] = field(default_factory=list)
+    recent_tool_summaries: list[str] = field(default_factory=list)
     recovery_warning: str = ""
     legacy_final_result: AgentFinalResult | None = None
 
@@ -148,11 +149,14 @@ def review_invocation(
     if invocation.legacy_final_result is not None:
         state.legacy_final_result = invocation.legacy_final_result
     if invocation.content.strip():
-        state.last_invocation_note = truncate_for_operator(invocation.content.strip(), 1200)
+        state.last_invocation_note = redact_text(
+            truncate_for_operator(invocation.content.strip(), 1200),
+            max_chars=1200,
+        )
     delta = invocation_delta(capture, goals, memory, before)
     state.counters.recovery_count += delta.recoveries
     progress = agent_loop_progress(capture, goals)
-    state.last_useful_tool_summaries = _recent_successful_tool_summaries(capture)
+    state.recent_tool_summaries = _recent_successful_tool_summaries(capture)
 
     terminal_recovery = _terminal_recovery(capture)
     if invocation.legacy_final_result is not None:
@@ -220,7 +224,20 @@ def review_invocation(
         state.recovery_warning = ""
     else:
         state.counters.consecutive_no_progress += 1
-        state.recovery_warning = "Previous invocation ended without observable progress."
+        remaining = (
+            config.run.budget.max_consecutive_no_progress
+            - state.counters.consecutive_no_progress
+        )
+        if remaining <= 1:
+            state.recovery_warning = (
+                "No observable progress in the previous invocation. One more invocation "
+                "without tool-evidenced progress will end the run as failed_to_recover."
+            )
+        else:
+            state.recovery_warning = (
+                f"No observable progress in the previous invocation. "
+                f"{remaining} more invocations remain."
+            )
 
     if _has_successful_submit(capture):
         return AgentLoopReview(
@@ -386,7 +403,7 @@ def render_continuation_context(
         ),
         (
             "Recent Useful Tool Summaries",
-            "\n".join(f"- {item}" for item in state.last_useful_tool_summaries[-3:]) or "- none",
+            "\n".join(f"- {item}" for item in state.recent_tool_summaries[-3:]) or "- none",
             False,
         ),
         ("Recovery Warning", state.recovery_warning or "none", False),
@@ -510,7 +527,7 @@ def _recent_successful_tool_summaries(capture: ArtifactCapture) -> list[str]:
     summaries: list[str] = []
     for step in capture.steps:
         if step.accepted and step.tool != "aci_recover_invalid_action":
-            summaries.append(f"{step.tool}: {step.result_summary[:180]}")
+            summaries.append(redact_text(f"{step.tool}: {step.result_summary}", max_chars=180))
     return summaries[-3:]
 
 
@@ -551,18 +568,18 @@ def _derived_status(
     terminal: TerminalState | None,
     legacy: AgentFinalResult | None,
 ) -> str:
-    if terminal is not None and terminal.reason in {
+    terminal_reasons_authoritative = {
         "failed_to_recover",
         "budget_exhausted",
         "goal_abandon_limit",
-    }:
+        "model_runtime",
+    }
+    if terminal is not None and terminal.reason in terminal_reasons_authoritative:
         return terminal.status
     if legacy is not None:
         return legacy.status
     if _has_successful_submit(capture):
         return "completed"
-    if terminal is not None:
-        return terminal.status
     return "blocked"
 
 

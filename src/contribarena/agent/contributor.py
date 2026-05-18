@@ -8,7 +8,7 @@ from agents.exceptions import MaxTurnsExceeded
 from agents.models.interface import ModelProvider
 from openai.types.responses import ResponseFunctionToolCall
 
-from contribarena.agent.invocation import AgentInvocationResult
+from contribarena.agent.invocation import AgentInvocationContext, AgentInvocationResult
 from contribarena.agent.model_view import to_model_json
 from contribarena.agent.tool_contract import ContributorTools
 from contribarena.config.schema import RepoCandidate, RunConfig
@@ -33,6 +33,7 @@ class ContributorAgent:
         tools: ContributorTools,
         prompt: str,
         model_provider: ModelProvider | None = None,
+        invocation_context: AgentInvocationContext | None = None,
     ) -> AgentInvocationResult:
         if config.run.model == "local-stub":
             return AgentInvocationResult(
@@ -42,7 +43,7 @@ class ContributorAgent:
             )
         if model_provider is None:
             raise AgentError("model_provider is required for non-local-stub runs")
-        return self._run_agents_sdk(config, tools, prompt, model_provider)
+        return self._run_agents_sdk(config, tools, prompt, model_provider, invocation_context)
 
     def _run_agents_sdk(
         self,
@@ -50,6 +51,7 @@ class ContributorAgent:
         tools: ContributorTools,
         prompt: str,
         model_provider: ModelProvider,
+        invocation_context: AgentInvocationContext | None = None,
     ) -> AgentInvocationResult:
         try:
             from agents import (
@@ -59,6 +61,7 @@ class ContributorAgent:
                 Runner,
                 function_tool,
             )
+            from agents.memory import SQLiteSession
         except ImportError as exc:
             raise AgentError("openai-agents is required for non-local-stub runs") from exc
 
@@ -275,11 +278,17 @@ class ContributorAgent:
                 # trace.jsonl is the M0 source of truth; SDK spans can be enabled later.
                 tracing_disabled=True,
             )
+            sdk_session = None
+            if invocation_context is not None:
+                if invocation_context.sdk_session is None:
+                    invocation_context.sdk_session = SQLiteSession(config.run.id or "contribarena-run")
+                sdk_session = invocation_context.sdk_session
             result = Runner.run_sync(
                 agent,
                 prompt,
                 max_turns=config.run.budget.max_steps,
                 run_config=run_config,
+                session=sdk_session,
             )
             return AgentInvocationResult(
                 content=_stringify_final_output(result.final_output),

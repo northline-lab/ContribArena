@@ -46,12 +46,23 @@ class DockerWorkspaceManager:
             )
 
     def stop(self) -> CommandResult:
+        timeout = min(max(self.config.command_timeout_seconds, 1), 30)
         try:
             completed = subprocess.run(
                 ["docker", "rm", "-f", self.container_name],
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            return CommandResult(
+                command=f"docker rm -f {self.container_name}",
+                stdout=exc.stdout or "",
+                stderr=exc.stderr or f"docker cleanup timed out after {timeout} seconds",
+                exit_code=124,
+                duration_seconds=float(timeout),
+                timed_out=True,
             )
         except FileNotFoundError:
             return CommandResult(
@@ -181,6 +192,7 @@ def _logged_shell_command(workdir: str, cmd: str) -> str:
     command_label = shlex.quote(cmd[:300])
     return (
         f"printf '[contribarena] workspace command: %s\\n' {command_label} > /proc/1/fd/1; "
+        "set -o pipefail; "
         f"cd {shlex.quote(workdir)} && "
         f"{{ {cmd}; }} > >(tee /proc/1/fd/1) 2> >(tee /proc/1/fd/2 >&2)"
     )

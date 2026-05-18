@@ -4,7 +4,7 @@ run:
   budget:
     max_steps: 30
     max_tokens:
-    max_wall_time_seconds: 900
+    max_wall_time_seconds: 3600
 
 discovery:
   candidates:

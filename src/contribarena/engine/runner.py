@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from contribarena.agent import AgentInvocationResult
+from contribarena.agent import AgentInvocationContext, AgentInvocationResult
 from contribarena.agent import ContributorAgent
 from contribarena.agent.prompts import build_goal_prompt
 from contribarena.config.schema import OwnedRepositoryPolicy, RepoCandidate, RunConfig
@@ -170,9 +170,10 @@ class Runner:
             artifacts.write_json(
                 "memory_context.json",
                 memory_context.model_dump(mode="json"),
-            )
+        )
         terminal: TerminalState | None = None
         workspace_started = False
+        workspace_finalized = False
 
         try:
             trace.write(
@@ -384,6 +385,9 @@ class Runner:
                     "terminal_layer": terminal.layer,
                 },
             )
+            if workspace_started:
+                _finalize_workspace(workspace, trace, terminal, config.workspace.cleanup_policy)
+                workspace_finalized = True
             _write_run_summary_artifact(artifacts, config, run_id, repo_slug, terminal)
             _write_judgement_artifacts(artifacts, config, run_id)
             _write_run_summary_artifact(artifacts, config, run_id, repo_slug, terminal)
@@ -397,7 +401,7 @@ class Runner:
                 run_id=run_id,
                 run_dir=artifacts.run_dir,
                 status=terminal.status,
-                tool_calls=budget.steps,
+                tool_calls=budget.total_steps,
                 terminal_reason=terminal.reason,
                 terminal_layer=terminal.layer,
             )
@@ -446,13 +450,16 @@ class Runner:
                 "run.terminal",
                 terminal.model_dump(mode="json"),
             )
+            if workspace_started:
+                _finalize_workspace(workspace, trace, terminal, config.workspace.cleanup_policy)
+                workspace_finalized = True
             _write_run_summary_artifact(artifacts, config, run_id, repo_slug, terminal)
             _write_judgement_artifacts(artifacts, config, run_id)
             _write_run_summary_artifact(artifacts, config, run_id, repo_slug, terminal)
             artifacts.finalize_manifest()
             raise
         finally:
-            if workspace_started:
+            if workspace_started and not workspace_finalized:
                 _finalize_workspace(workspace, trace, terminal, config.workspace.cleanup_policy)
 
     def _run_agent_loop(
@@ -469,6 +476,7 @@ class Runner:
     ) -> tuple[AgentLoopState, TerminalState | None, LoopOutcome]:
         loop_state = AgentLoopState()
         prompt = initial_prompt
+        invocation_context = AgentInvocationContext()
         provider = TracingModelProvider(ContribArenaModelProvider(config.models), trace)
         while True:
             seq = loop_state.counters.invocations_used + 1
@@ -485,12 +493,15 @@ class Runner:
                 evidence=["trace.jsonl"],
                 payload={"seq": seq, "continuation": continuation},
             )
+            registry.budget.reset_for_invocation()
             before = capture_cursor(capture, goals, memory)
+            usage_before = provider.usage.snapshot()
             raw_invocation = self.agent.run(
                 config,
                 registry,
                 prompt,
                 model_provider=provider,
+                invocation_context=invocation_context,
             )
             invocation = _normalize_invocation_result(raw_invocation)
             if invocation.stopped_reason == "provider_error":
@@ -503,6 +514,7 @@ class Runner:
                         "error": truncate_for_operator(invocation.error_message),
                     },
                 )
+            usage_payload = _invocation_usage_payload(invocation, usage_before, provider.usage.snapshot())
             trace.write(
                 RunState.AGENT_ACTING,
                 "agent.invocation_returned",
@@ -510,7 +522,10 @@ class Runner:
                     "invocation_seq": seq,
                     "stopped_reason": invocation.stopped_reason,
                     "has_content": bool(invocation.content.strip()),
-                    "tool_calls": invocation.tool_call_count,
+                    "sdk_tool_calls": invocation.tool_call_count,
+                    "executed_tools": len(capture.aci_results) - before.aci_results,
+                    "executed_commands": len(capture.commands) - before.commands,
+                    **usage_payload,
                 },
             )
             operator.write(
@@ -518,7 +533,13 @@ class Runner:
                 "invocation_returned",
                 "agent invocation returned",
                 evidence=["trace.jsonl"],
-                payload={"seq": seq, "tool_calls": invocation.tool_call_count},
+                payload={
+                    "seq": seq,
+                    "sdk_tool_calls": invocation.tool_call_count,
+                    "executed_tools": len(capture.aci_results) - before.aci_results,
+                    "executed_commands": len(capture.commands) - before.commands,
+                    **usage_payload,
+                },
             )
             review = review_invocation(
                 config=config,
@@ -639,6 +660,27 @@ def _normalize_invocation_result(raw: object) -> AgentInvocationResult:
             legacy_final_result=raw,
         )
     return AgentInvocationResult(content=str(raw or ""))
+
+
+def _invocation_usage_payload(
+    invocation: AgentInvocationResult,
+    before: dict[str, int] | None = None,
+    after: dict[str, int] | None = None,
+) -> dict[str, int | None]:
+    usage = invocation.usage
+    if usage is None and before is not None and after is not None:
+        return {
+            "requests": max(0, after["requests"] - before["requests"]),
+            "input_tokens": max(0, after["input_tokens"] - before["input_tokens"]),
+            "output_tokens": max(0, after["output_tokens"] - before["output_tokens"]),
+            "total_tokens": max(0, after["total_tokens"] - before["total_tokens"]),
+        }
+    return {
+        "requests": getattr(usage, "requests", None),
+        "input_tokens": getattr(usage, "input_tokens", None),
+        "output_tokens": getattr(usage, "output_tokens", None),
+        "total_tokens": getattr(usage, "total_tokens", None),
+    }
 
 
 def _submitted_patch(capture: ArtifactCapture) -> str:
@@ -1974,15 +2016,18 @@ def _terminal_state_for_result(
         )
     if result.status == "completed":
         reason = "run_completed"
+        message = _latest_successful_verification_summary(capture)
     elif result.status == "blocked":
         reason = "agent_blocked" if loop_outcome != "no_continuation_path" else "no_continuation_path"
+        message = "; ".join(result.blockers)
     else:
         reason = "agent_failed"
+        message = "; ".join(result.blockers)
     return TerminalState(
         status=result.status,
         reason=reason,
         layer="run" if result.status == "completed" else "agent",
-        message="; ".join(result.blockers),
+        message=message,
         agent_status=agent_status,
         harness_status=result.status,
     )
@@ -2135,6 +2180,20 @@ def _verification_summary_from_capture(capture: ArtifactCapture | None) -> str:
         status = "passed" if item.success else "failed"
         sections.extend([f"## {item.tool}: {status}", "", item.output or item.error or "", ""])
     return "\n".join(sections)
+
+
+def _latest_successful_verification_summary(capture: ArtifactCapture) -> str:
+    latest = next(
+        (
+            item
+            for item in reversed(capture.aci_results)
+            if item.tool == "aci_verify" and item.success
+        ),
+        None,
+    )
+    if latest is None:
+        return ""
+    return f"aci_verify passed: {latest.output or latest.error or ''}"
 
 
 def _command_log(commands: list[object]) -> str:

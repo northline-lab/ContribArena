@@ -17,6 +17,27 @@ from contribarena.models import RunState
 from contribarena.trace import TraceWriter
 
 
+class ModelUsageAccumulator:
+    requests: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+
+    def snapshot(self) -> dict[str, int]:
+        return {
+            "requests": self.requests,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.total_tokens,
+        }
+
+    def add(self, usage: dict[str, Any]) -> None:
+        self.requests += _usage_int(usage.get("requests"))
+        self.input_tokens += _usage_int(usage.get("input_tokens"))
+        self.output_tokens += _usage_int(usage.get("output_tokens"))
+        self.total_tokens += _usage_int(usage.get("total_tokens"))
+
+
 class TracingModelProvider(ModelProvider):
     """ModelProvider wrapper that emits ContribArena trace events for model turns."""
 
@@ -31,12 +52,14 @@ class TracingModelProvider(ModelProvider):
         self._trace = trace
         self._heartbeat_interval_seconds = heartbeat_interval_seconds
         self._cache: dict[str | None, Model] = {}
+        self.usage = ModelUsageAccumulator()
 
     def get_model(self, model_name: str | None) -> Model:
         if model_name not in self._cache:
             self._cache[model_name] = TracingModel(
                 self._provider.get_model(model_name),
                 self._trace,
+                usage=self.usage,
                 model_name=model_name or "default",
                 heartbeat_interval_seconds=self._heartbeat_interval_seconds,
             )
@@ -52,11 +75,13 @@ class TracingModel(Model):
         model: Model,
         trace: TraceWriter,
         *,
+        usage: ModelUsageAccumulator,
         model_name: str,
         heartbeat_interval_seconds: float,
     ) -> None:
         self._model = model
         self._trace = trace
+        self._usage = usage
         self._model_name = model_name
         self._heartbeat_interval_seconds = heartbeat_interval_seconds
         self._turn = 0
@@ -224,6 +249,8 @@ class TracingModel(Model):
         )
 
     def _write_finished(self, turn_id: str, started: float, response: ModelResponse) -> None:
+        usage = _usage_payload(response.usage)
+        self._usage.add(usage)
         self._trace.write(
             RunState.MODEL_TURN_FINISHED,
             "model_turn.finished",
@@ -235,7 +262,7 @@ class TracingModel(Model):
                 "request_id": response.request_id or "",
                 "response_id": response.response_id or "",
                 "output_items": len(response.output),
-                "usage": _usage_payload(response.usage),
+                "usage": usage,
             },
         )
 
@@ -392,6 +419,14 @@ def _usage_payload(usage: Any) -> dict[str, Any]:
             if isinstance(value, str | int | float | bool | type(None))
         }
     return {}
+
+
+def _usage_int(value: Any) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int | float):
+        return int(value)
+    return 0
 
 
 def _safe_error_message(message: str) -> str:

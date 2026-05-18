@@ -25,3 +25,10 @@ class AgentInvocationResult:
     usage: Any | None = None
     tool_call_count: int = 0
     error_message: str = ""
+
+
+@dataclass
+class AgentInvocationContext:
+    """State shared across SDK invocations within one ContribArena run."""
+
+    sdk_session: Any | None = None

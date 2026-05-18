@@ -5,7 +5,8 @@ import unittest
 from pathlib import Path
 
 from contribarena.agent import AgentInvocationResult
-from contribarena.config.schema import ArtifactConfig, DiscoveryConfig, RepoCandidate, RunConfig
+from contribarena.config.schema import ArtifactConfig, BudgetConfig, DiscoveryConfig, RepoCandidate
+from contribarena.config.schema import RunConfig
 from contribarena.config.schema import MemoryConfig, RunSection, WorkspaceConfig
 from contribarena.engine.agent_loop import (
     AgentLoopState,
@@ -17,9 +18,12 @@ from contribarena.engine.agent_loop import (
 )
 from contribarena.engine.goals import GoalService
 from contribarena.engine.middleware.artifact import ArtifactCapture
+from contribarena.engine.middleware.budget import BudgetTracker
+from contribarena.errors import BudgetExhausted
 from contribarena.models import (
     AciResult,
     AgentFinalResult,
+    AgentStep,
     CommandResult,
     OpportunitySummary,
     RepoSummary,
@@ -29,6 +33,21 @@ from contribarena.models.agent_result import WorkspaceSummary
 
 
 class AgentLoopRuntimeTest(unittest.TestCase):
+    def test_budget_steps_reset_per_invocation_and_total_steps_accumulate(self) -> None:
+        budget = BudgetTracker(BudgetConfig(max_steps=2))
+
+        budget.record_step()
+        budget.record_step()
+        with self.assertRaises(BudgetExhausted):
+            budget.record_step()
+
+        self.assertEqual(3, budget.total_steps)
+        budget.reset_steps_for_invocation()
+        budget.record_step()
+
+        self.assertEqual(1, budget.steps)
+        self.assertEqual(4, budget.total_steps)
+
     def test_plain_content_without_progress_continues_once_then_fails_to_recover(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = _config(Path(tmp))
@@ -106,6 +125,7 @@ class AgentLoopRuntimeTest(unittest.TestCase):
             self.assertEqual("terminal", review.decision)
             self.assertEqual("patch_submitted", review.reason)
             self.assertEqual("patch_submitted", review.outcome)
+            self.assertEqual(1, state.counters.invocations_used)
             self.assertEqual("completed", result.status)
             self.assertTrue(result.workspace_summary.patch_applied)
             self.assertIn("aci_verify passed", result.verification_summary)
@@ -306,7 +326,7 @@ class AgentLoopRuntimeTest(unittest.TestCase):
             goals.update(objective="Finish the patch.", status="active")
             state = AgentLoopState(
                 last_invocation_note="x" * 2000,
-                last_useful_tool_summaries=["old", "new"],
+                recent_tool_summaries=["old", "new"],
                 recovery_warning="Previous invocation ended without progress.",
             )
 
@@ -323,10 +343,79 @@ class AgentLoopRuntimeTest(unittest.TestCase):
             self.assertIn("Lifecycle Gaps", text)
             self.assertLessEqual(len(text.encode("utf-8")), 500)
 
+    def test_progressful_last_invocation_is_reviewed_before_budget_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(Path(tmp), max_invocations=1)
+            capture = ArtifactCapture()
+            goals = GoalService(config, run_id="run")
+            state = AgentLoopState()
+            before = capture_cursor(capture, goals, None)
+            capture.record_command(
+                CommandResult(
+                    command="git clone https://github.com/example/repo repo",
+                    exit_code=0,
+                    duration_seconds=1.0,
+                )
+            )
 
-def _config(tmp_path: Path) -> RunConfig:
+            review = review_invocation(
+                config=config,
+                capture=capture,
+                goals=goals,
+                memory=None,
+                before=before,
+                state=state,
+                invocation=AgentInvocationResult(content="Repository cloned."),
+            )
+
+            self.assertEqual("terminal", review.decision)
+            self.assertEqual("budget_exhausted", review.outcome)
+            self.assertIsNotNone(review.delta)
+            self.assertEqual(1, review.delta.commands)
+            self.assertTrue(review.delta.made_progress)
+            self.assertEqual(0, state.counters.consecutive_no_progress)
+            self.assertEqual(1, state.counters.invocations_used)
+
+    def test_continuation_state_redacts_notes_and_tool_summaries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(Path(tmp))
+            capture = ArtifactCapture()
+            capture.record_step(
+                AgentStep(
+                    step=1,
+                    phase="coding",
+                    tool="aci_verify",
+                    result_summary="authorization: bearer ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    state="ok",
+                    duration_seconds=0.1,
+                )
+            )
+            goals = GoalService(config, run_id="run")
+            state = AgentLoopState()
+
+            review_invocation(
+                config=config,
+                capture=capture,
+                goals=goals,
+                memory=None,
+                before=capture_cursor(ArtifactCapture(), goals, None),
+                state=state,
+                invocation=AgentInvocationResult(content="token=supersecretvalue123456"),
+            )
+
+            self.assertNotIn("supersecretvalue123456", state.last_invocation_note)
+            self.assertIn("token=***", state.last_invocation_note)
+            self.assertEqual(1, len(state.recent_tool_summaries))
+            self.assertNotIn("ghp_", state.recent_tool_summaries[0])
+
+
+def _config(tmp_path: Path, *, max_invocations: int = 5) -> RunConfig:
     return RunConfig(
-        run=RunSection(mode="shadow", model="local-stub"),
+        run=RunSection(
+            mode="shadow",
+            model="local-stub",
+            budget=BudgetConfig(max_invocations=max_invocations),
+        ),
         discovery=DiscoveryConfig(
             candidates=[
                 RepoCandidate(

@@ -43,7 +43,50 @@ class TracingModelProviderTest(unittest.TestCase):
             self.assertEqual("req-1", finished["request_id"])
             self.assertEqual("resp-1", finished["response_id"])
             self.assertEqual(0, finished["output_items"])
+            self.assertEqual(
+                {
+                    "requests": 1,
+                    "input_tokens": 2,
+                    "output_tokens": 3,
+                    "total_tokens": 5,
+                },
+                finished["usage"],
+            )
             self.assertIn("elapsed_ms", finished)
+
+    def test_accumulates_model_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "trace.jsonl"
+            provider = TracingModelProvider(
+                FakeModelProvider(FakeModel()),
+                TraceWriter(path, "run-1"),
+                heartbeat_interval_seconds=0,
+            )
+            model = provider.get_model("compatible/test-model")
+
+            before = provider.usage.snapshot()
+            asyncio.run(_get_response(model))
+            middle = provider.usage.snapshot()
+            asyncio.run(_get_response(model))
+            after = provider.usage.snapshot()
+
+            self.assertEqual(
+                {"requests": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                before,
+            )
+            self.assertEqual(
+                {"requests": 1, "input_tokens": 2, "output_tokens": 3, "total_tokens": 5},
+                middle,
+            )
+            self.assertEqual(
+                {
+                    "requests": 2,
+                    "input_tokens": 4,
+                    "output_tokens": 6,
+                    "total_tokens": 10,
+                },
+                after,
+            )
 
     def test_traces_model_turn_failure_without_secret_leak(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -59,6 +59,7 @@ class FakeM02Agent:
         tools: object,
         prompt: str,
         model_provider: object = None,
+        **kwargs: object,
     ) -> AgentFinalResult:
         command = tools.workspace_run(  # type: ignore[attr-defined]
             "git clone https://github.com/example/repo.git repo && cd repo && git status --short"
@@ -106,6 +107,7 @@ class FakeFailingAgent:
         tools: object,
         prompt: str,
         model_provider: object = None,
+        **kwargs: object,
     ) -> AgentFinalResult:
         raise AgentError("synthetic agent failure")
 
@@ -117,6 +119,7 @@ class FakeProviderErrorAgent:
         tools: object,
         prompt: str,
         model_provider: object = None,
+        **kwargs: object,
     ) -> AgentInvocationResult:
         return AgentInvocationResult(
             content="Provider invocation failed.",
@@ -132,6 +135,7 @@ class FakeMemoryAgent:
         tools: object,
         prompt: str,
         model_provider: object = None,
+        **kwargs: object,
     ) -> AgentFinalResult:
         self.prompt = prompt
         memory_context = tools.aci_runtime_get_context("run")  # type: ignore[attr-defined]
@@ -194,6 +198,7 @@ class FakeGoalHalfRunAgent:
         tools: object,
         prompt: str,
         model_provider: object = None,
+        **kwargs: object,
     ) -> AgentFinalResult:
         self.prompt = prompt
         runtime_context = tools.aci_runtime_get_context("run")  # type: ignore[attr-defined]
@@ -238,6 +243,7 @@ class FakeGoalCompletingAgent:
         tools: object,
         prompt: str,
         model_provider: object = None,
+        **kwargs: object,
     ) -> AgentFinalResult:
         self.prompt = prompt
         runtime_context = tools.aci_runtime_get_context("run")  # type: ignore[attr-defined]
@@ -286,6 +292,43 @@ class FakeGoalCompletingAgent:
         )
 
 
+class FakeSessionContinuationAgent:
+    def __init__(self) -> None:
+        self.context_ids: list[int] = []
+
+    def run(
+        self,
+        config: RunConfig,
+        tools: object,
+        prompt: str,
+        model_provider: object = None,
+        **kwargs: object,
+    ) -> AgentInvocationResult:
+        invocation_context = kwargs.get("invocation_context")
+        self.context_ids.append(id(invocation_context))
+        if len(self.context_ids) == 1:
+            tools.workspace_run(  # type: ignore[attr-defined]
+                "git clone https://github.com/example/repo.git repo && cd repo && git status --short"
+            )
+            tools.aci_view("repo/app.py")  # type: ignore[attr-defined]
+            tools.aci_replace("repo/app.py", "old", "new")  # type: ignore[attr-defined]
+            tools.aci_goal_update(  # type: ignore[attr-defined]
+                "Submit a verified patch.",
+                "active",
+                "Edited repo/app.py; verification still pending.",
+            )
+            return AgentInvocationResult(content="Edited; continue for verification.")
+
+        tools.aci_verify("python3 -m compileall .", "repo")  # type: ignore[attr-defined]
+        tools.aci_submit_patch()  # type: ignore[attr-defined]
+        tools.aci_goal_update(  # type: ignore[attr-defined]
+            "",
+            "complete",
+            "Verified and submitted patch.",
+        )
+        return AgentInvocationResult(content="Verified and submitted.")
+
+
 class FakeIssueAgent:
     def __init__(
         self,
@@ -317,6 +360,7 @@ class FakeIssueAgent:
         tools: object,
         prompt: str,
         model_provider: object = None,
+        **kwargs: object,
     ) -> AgentFinalResult:
         self.model_provider = model_provider
         self.prompt = prompt
@@ -415,6 +459,7 @@ class FakeActionRecoveryAgent:
         tools: object,
         prompt: str,
         model_provider: object = None,
+        **kwargs: object,
     ) -> AgentFinalResult:
         tools.workspace_run("pwd")  # type: ignore[attr-defined]
         for _ in range(3):
@@ -447,6 +492,53 @@ class FakeActionRecoveryAgent:
                 notes="Invalid model action was rejected before workspace execution.",
             ),
             blockers=["invalid model action"],
+        )
+
+
+class FakePipeVerificationAgent:
+    def run(
+        self,
+        config: RunConfig,
+        tools: object,
+        prompt: str,
+        model_provider: object = None,
+        **kwargs: object,
+    ) -> AgentFinalResult:
+        command = tools.workspace_run(  # type: ignore[attr-defined]
+            "git clone https://github.com/example/repo.git repo && cd repo && git status --short"
+        )
+        tools.aci_view("repo/app.py")  # type: ignore[attr-defined]
+        tools.aci_replace("repo/app.py", "return 'old'", "return 'new'")  # type: ignore[attr-defined]
+        tools.aci_verify("python3 -m pytest missing_test.py 2>&1 | head -10", "repo")  # type: ignore[attr-defined]
+        tools.aci_submit_patch(  # type: ignore[attr-defined]
+            no_command_verification_rationale="No command verifier exists for this text-only generated fixture; reviewed the exact diff."
+        )
+        return AgentFinalResult(
+            status="completed",
+            repo=RepoSummary(owner="example", name="repo", url="https://github.com/example/repo"),
+            repo_profile="# Repo Profile\n\nSmall issue fixture.",
+            opportunities=[
+                OpportunitySummary(
+                    title="Fix configured problem",
+                    rationale="Directly addresses the problem statement.",
+                    risk="low",
+                    source="configured",
+                )
+            ],
+            selected_task=SelectedTask(
+                title="Fix configured problem",
+                rationale="Issue-solving mode should not self-select another task.",
+                expected_change="old -> new",
+                risk="low",
+            ),
+            workspace_summary=WorkspaceSummary(
+                commands_run=[command],
+                patch_applied=True,
+                notes="Issue-solving patch submitted.",
+            ),
+            problem_statement_summary="Configured issue asks for old marker to become new.",
+            reproduction_notes="Inspected repo/app.py and found the old marker.",
+            verification_summary="No command verifier exists; reviewed the exact diff.",
         )
 
 
@@ -726,6 +818,7 @@ class RunnerM02Test(unittest.TestCase):
                 tools: object,
                 prompt: str,
                 model_provider: object = None,
+                **kwargs: object,
             ) -> AgentFinalResult:
                 tools.workspace_run(  # type: ignore[attr-defined]
                     "git clone https://github.com/example/repo.git repo"
@@ -844,6 +937,7 @@ class RunnerM02Test(unittest.TestCase):
                 tools: object,
                 prompt: str,
                 model_provider: object = None,
+                **kwargs: object,
             ) -> AgentFinalResult:
                 self.model_provider = model_provider
                 self.prompt = prompt
@@ -895,11 +989,18 @@ class RunnerM02Test(unittest.TestCase):
             )
 
             report = (result.run_dir / "quality_report.md").read_text()
+            terminal = json.loads((result.run_dir / "terminal_state.json").read_text())
             self.assertEqual("completed", result.status)
             self.assertIn("## Submit-Time Review", report)
             self.assertIn("submit-time review passed", report)
             self.assertIn("## Prior Submit-Time Review Failures", report)
             self.assertIn("requires successful focused verification after the last edit", report)
+            self.assertIn("aci_verify passed", terminal["message"])
+            self.assertIn("compile ok", terminal["message"])
+            self.assertNotIn(
+                "requires successful focused verification after the last edit",
+                terminal["message"],
+            )
 
     def test_issue_solving_completed_requires_problem_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1699,6 +1800,41 @@ class RunnerM02Test(unittest.TestCase):
             self.assertIn("judge_packet.json", judgement["evidence"])
             self.assertIn("judge_dimension_packets.json", judgement["evidence"])
 
+    def test_workspace_cleanup_runs_before_judgement_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            result = _run_with_fake_docker(FakeIssueAgent(), _issue_config(tmp_path / "runs"), tmp_path)
+
+            events = [
+                json.loads(line)
+                for line in (result.run_dir / "trace.jsonl").read_text().splitlines()
+                if line.strip()
+            ]
+            event_names = [event["event"] for event in events]
+            self.assertLess(
+                event_names.index("workspace.stopping"),
+                event_names.index("artifacts.written"),
+            )
+            self.assertLess(
+                event_names.index("workspace.stopped"),
+                event_names.index("artifacts.written"),
+            )
+
+    def test_pipefail_prevents_piped_verification_from_masking_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            result = _run_with_fake_docker(
+                FakePipeVerificationAgent(),
+                _issue_config(tmp_path / "runs"),
+                tmp_path,
+            )
+
+            quality_gate = json.loads((result.run_dir / "quality_gate.json").read_text())
+            test_log = (result.run_dir / "test_log.txt").read_text()
+            self.assertEqual("pass", quality_gate["status"])
+            self.assertIn("python3 -m pytest missing_test.py 2>&1 | head -10", test_log)
+            self.assertIn("- Exit code: 1", test_log)
+
     def test_surface_run_summary_written_for_agent_exception(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1855,6 +1991,29 @@ class RunnerM02Test(unittest.TestCase):
             self.assertIn("aci_submit_patch", tools)
             goal_events = (second.run_dir / "goal_events.jsonl").read_text()
             self.assertIn("goal_completed", goal_events)
+
+    def test_invocation_continuation_reuses_same_sdk_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _config(tmp_path / "runs")
+            agent = FakeSessionContinuationAgent()
+
+            result = _run_with_fake_docker(agent, config, tmp_path)
+
+            self.assertEqual("completed", result.status)
+            self.assertEqual(2, len(agent.context_ids))
+            self.assertEqual(agent.context_ids[0], agent.context_ids[1])
+            trace_events = [
+                json.loads(line)
+                for line in (result.run_dir / "trace.jsonl").read_text().splitlines()
+            ]
+            reviews = [
+                event["payload"]
+                for event in trace_events
+                if event["event"] == "agent.invocation_reviewed"
+            ]
+            self.assertEqual("continue", reviews[0]["decision"])
+            self.assertEqual("patch_submitted", reviews[1]["outcome"])
 
     def test_runner_exposes_tracked_prs_in_runtime_memory_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2181,6 +2340,8 @@ def _run_with_fake_docker(
         f"    *\"cat -- {diff_path}\"*) printf \"def marker():\\n    return 'old'\\n\"; exit 0 ;;\n"
         f"    *\"nl -ba {diff_path}\"*) printf \"     1\\tdef marker():\\n     2\\t    return 'old'\\n\"; exit 0 ;;\n"
         '    *"python3 -m compileall ."*) printf "compile ok\\n"; exit 0 ;;\n'
+        '    *"missing_test.py"*"set -o pipefail"*) printf "pytest failed\\n"; exit 1 ;;\n'
+        '    *"missing_test.py"*) printf "pytest failed\\n"; exit 0 ;;\n'
         f"{guidance_failure_case}"
         f"{push_failure_case}"
         f"{push_success_case}"

@@ -10,9 +10,9 @@ run:
   # - gemini/example-gemini
   model: compatible/example-gpt
   budget:
-    max_steps: 25
+    max_steps: 80
     max_tokens:
-    max_wall_time_seconds: 900
+    max_wall_time_seconds: 3600
 
 discovery:
   candidates:
