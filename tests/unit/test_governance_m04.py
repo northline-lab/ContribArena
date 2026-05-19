@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,6 +17,8 @@ from contribarena.config.schema import (
     RepoCandidate,
     RunConfig,
     RunSection,
+    SeasonConfig,
+    SeasonParticipantConfig,
     WorkspaceConfig,
 )
 from contribarena.engine.controller import LocalController
@@ -441,11 +444,141 @@ class GovernanceM04Test(unittest.TestCase):
                 result.decision.reasons,
             )
 
+    def test_active_season_auto_wakes_agent_participant(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _owned_config(live_enabled=True, output_root=tmp_path / "runs")
+            config.season = SeasonConfig(
+                id="season_0",
+                status="active",
+                state_root=tmp_path / "seasons",
+                participants=[
+                    SeasonParticipantConfig(model="compatible/qwen36plus"),
+                    SeasonParticipantConfig(model="responses/gpt55", role=["judge"]),
+                ],
+            )
+            launcher = FakeLauncher()
+
+            result = LocalController(launcher=launcher).run_once(config)
+
+            self.assertEqual("run_completed", result.status)
+            self.assertEqual(1, launcher.calls)
+            launched = launcher.configs[0]
+            self.assertEqual("compatible/qwen36plus", launched.run.model)
+            self.assertEqual("season_0", launched.run.season_id)
+            self.assertEqual("season_0:qwen36plus", launched.run.participant_id)
+            self.assertEqual("auto", launched.run.wake_source)
+            state = load_governance_state(launched)
+            self.assertEqual(1, len(state.attempts))
+            self.assertEqual("prepared", state.attempts[0].status)
+            self.assertEqual("season.auto_wake", state.attempts[0].action)
+            self.assertEqual(
+                "participant=season_0:qwen36plus;wake_dispatched",
+                state.attempts[0].decision_id,
+            )
+            self.assertEqual("example/repo", state.attempts[0].repository)
+            self.assertTrue(
+                (
+                    tmp_path
+                    / "seasons"
+                    / "season_0"
+                    / "participants"
+                    / "season_0:qwen36plus"
+                    / "pr_history.json"
+                ).exists()
+            )
+            participant_state = json.loads(
+                (
+                    tmp_path
+                    / "seasons"
+                    / "season_0"
+                    / "participants"
+                    / "season_0:qwen36plus"
+                    / "participant_state.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual("example/repo", participant_state["last_repo_slug"])
+            self.assertEqual("auto", participant_state["last_wake_source"])
+
+    def test_active_season_without_agent_participant_does_not_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _owned_config(live_enabled=True, output_root=tmp_path / "runs")
+            config.season = SeasonConfig(
+                id="season_0",
+                status="active",
+                state_root=tmp_path / "seasons",
+                participants=[
+                    SeasonParticipantConfig(model="responses/gpt55", role=["judge"]),
+                ],
+            )
+            launcher = FakeLauncher()
+
+            result = LocalController(launcher=launcher).run_once(config)
+
+            self.assertEqual("season_no_eligible_participant", result.status)
+            self.assertEqual(0, launcher.calls)
+
+    def test_active_season_skips_participant_until_wake_interval_elapsed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _owned_config(live_enabled=True, output_root=tmp_path / "runs")
+            config.season = SeasonConfig(
+                id="season_0",
+                status="active",
+                state_root=tmp_path / "seasons",
+                defaults={"wake_interval": "6h", "max_concurrent_runs": 1},
+                participants=[SeasonParticipantConfig(model="compatible/qwen36plus")],
+            )
+            participant_dir = tmp_path / "seasons" / "season_0" / "participants" / "season_0:qwen36plus"
+            participant_dir.mkdir(parents=True)
+            (participant_dir / "participant_state.json").write_text(
+                json.dumps({"last_wake_at": "2999-01-01T00:00:00+00:00"}) + "\n",
+                encoding="utf-8",
+            )
+            launcher = FakeLauncher()
+
+            result = LocalController(launcher=launcher).run_once(config)
+
+            self.assertEqual("season_no_eligible_participant", result.status)
+            self.assertEqual(0, launcher.calls)
+            state = load_governance_state(config)
+            self.assertEqual("skipped", state.attempts[0].status)
+            self.assertIn("wake_interval_not_elapsed", state.attempts[0].decision_id)
+
+    def test_active_season_skips_participant_at_concurrency_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _owned_config(live_enabled=True, output_root=tmp_path / "runs")
+            config.season = SeasonConfig(
+                id="season_0",
+                status="active",
+                state_root=tmp_path / "seasons",
+                defaults={"wake_interval": "1s", "max_concurrent_runs": 1},
+                participants=[SeasonParticipantConfig(model="compatible/qwen36plus")],
+            )
+            participant_dir = tmp_path / "seasons" / "season_0" / "participants" / "season_0:qwen36plus"
+            participant_dir.mkdir(parents=True)
+            (participant_dir / "participant_state.json").write_text(
+                json.dumps({"active_runs": 1}) + "\n",
+                encoding="utf-8",
+            )
+            launcher = FakeLauncher()
+
+            result = LocalController(launcher=launcher).run_once(config)
+
+            self.assertEqual("season_no_eligible_participant", result.status)
+            self.assertEqual(0, launcher.calls)
+            state = load_governance_state(config)
+            self.assertEqual("skipped", state.attempts[0].status)
+            self.assertIn("participant_at_concurrency_limit", state.attempts[0].decision_id)
+
 
 class FakeLauncher:
     def __init__(self, write_open_pr: bool = False) -> None:
         self.calls = 0
         self.write_open_pr = write_open_pr
+        self.configs: list[RunConfig] = []
 
     def run(
         self,
@@ -454,6 +587,7 @@ class FakeLauncher:
         verbose: bool = False,
     ) -> RunResult:
         self.calls += 1
+        self.configs.append(config)
         if self.write_open_pr:
             state = load_governance_state(config)
             record_governance_pr(

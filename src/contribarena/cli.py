@@ -17,13 +17,14 @@ from contribarena.engine import LocalController, Runner
 from contribarena.engine.api import create_app
 from contribarena.engine.judge_refresh import refresh_judgement
 from contribarena.engine.read_model import SurfaceReadModel
-from contribarena.engine.seasons import SeasonStore
+from contribarena.engine.seasons import SeasonStore, cleanup_season_workspaces
 from contribarena.engine.surface_indexer import index_surface_data
 from contribarena.errors import ContribArenaError
 
 app = typer.Typer(help="ContribArena control plane commands.")
 surface_app = typer.Typer(help="Build public read-only surface data.")
 season_app = typer.Typer(help="Manage season state and participant admission.")
+season_workspace_app = typer.Typer(help="Manage persistent season workspaces.")
 
 
 @app.command()
@@ -118,7 +119,16 @@ def season_complete(
 ) -> None:
     """Freeze the season snapshot and mark it completed."""
     _ = force_with_open_prs
+    cleanup = _season_workspace_clean(config, season_id, quiet=True)
     _season_transition(config, season_id, "completed")
+    typer.echo(f"Cleaned workspaces: {cleanup}")
+
+
+@season_workspace_app.command("clean")
+def season_workspace_clean(config: Path = typer.Option(..., "--config", "-c"), season_id: str | None = None) -> None:
+    """Force cleanup of persistent season workspaces and participant memory."""
+    count = _season_workspace_clean(config, season_id)
+    typer.echo(f"Cleaned workspaces: {count}")
 
 
 @season_app.command("status")
@@ -588,6 +598,26 @@ def _season_transition(config: Path, season_id: str | None, status: str) -> None
     typer.echo(f"Season {target}: {state.get('status')}")
 
 
+def _season_workspace_clean(config: Path, season_id: str | None, *, quiet: bool = False) -> int:
+    try:
+        run_config = load_run_config(config)
+        target = season_id or (run_config.season.id if run_config.season else "season_0")
+        results = cleanup_season_workspaces(
+            SeasonStore.from_config(run_config),
+            target,
+            run_config.season,
+        )
+    except ContribArenaError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(exc.exit_code) from exc
+    if not quiet:
+        for result in results:
+            typer.echo(
+                f"{result['participant_id']} {result['container']} exit={result['exit_code']}"
+            )
+    return len(results)
+
+
 def _configured_models(run_config: Any) -> list[str]:
     providers = run_config.models.providers
     models = [
@@ -647,4 +677,5 @@ def _score_text(value: Any) -> str:
 
 
 app.add_typer(surface_app, name="surface")
+season_app.add_typer(season_workspace_app, name="workspace")
 app.add_typer(season_app, name="season")

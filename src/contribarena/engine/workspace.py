@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import shlex
 import time
+from datetime import UTC, datetime
 
 from contribarena.config.schema import WorkspaceConfig
 from contribarena.engine.artifacts import slugify
@@ -15,9 +16,13 @@ class DockerWorkspaceManager:
         self.run_id = run_id
         self.repo_slug = repo_slug
         self.config = config
-        self.container_name = f"contribarena-{slugify(run_id)[:12]}-{slugify(repo_slug)}"
+        key = config.persistent_key or f"{slugify(run_id)[:12]}-{slugify(repo_slug)}"
+        self.container_name = f"contribarena-{slugify(key)}"
 
     def start(self) -> None:
+        if self.config.persistent_key and self._container_exists():
+            self._write_metadata()
+            return
         command = [
             "docker",
             "run",
@@ -44,8 +49,18 @@ class DockerWorkspaceManager:
             raise InfrastructureError(
                 f"docker run failed: {result.stderr.strip() or result.stdout.strip()}"
             )
+        self._write_metadata()
 
     def stop(self) -> CommandResult:
+        if self.config.persistent_key:
+            self._write_metadata()
+            return CommandResult(
+                command=f"retain persistent workspace {self.container_name}",
+                stdout=self.container_name,
+                stderr="",
+                exit_code=0,
+                duration_seconds=0.0,
+            )
         timeout = min(max(self.config.command_timeout_seconds, 1), 30)
         try:
             completed = subprocess.run(
@@ -173,6 +188,30 @@ class DockerWorkspaceManager:
             success=completed.returncode == 0,
             files_modified=_files_from_patch(diff),
             error=None if completed.returncode == 0 else completed.stderr or completed.stdout,
+        )
+
+    def _container_exists(self) -> bool:
+        try:
+            completed = subprocess.run(
+                ["docker", "inspect", self.container_name],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+        return completed.returncode == 0
+
+    def _write_metadata(self) -> None:
+        path = self.config.persistent_metadata_path
+        if path is None:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(self.container_name + "\n", encoding="utf-8")
+        (path.parent / "last_used_at").write_text(
+            datetime.now(UTC).isoformat() + "\n",
+            encoding="utf-8",
         )
 
 

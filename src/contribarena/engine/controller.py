@@ -25,8 +25,17 @@ from contribarena.engine.middleware.governance import (
 )
 from contribarena.engine.runtime_config import apply_output_dir
 from contribarena.engine.runner import RunResult, Runner
+from contribarena.engine.seasons import (
+    SeasonStore,
+    load_participant_state,
+    mark_participant_run_started,
+    participant_is_due,
+    participant_id_for,
+    participant_max_concurrent,
+)
 from contribarena.memory import MemoryService
 from contribarena.models import (
+    GovernanceAttempt,
     GovernanceDecision,
     GovernanceState,
     MaintainerSignal,
@@ -104,6 +113,9 @@ class LocalController:
         output_dir: Path | None = None,
         verbose: bool = False,
     ) -> ControllerTickResult:
+        season_tick = self._run_season_wake_tick(config, output_dir=output_dir, verbose=verbose)
+        if season_tick is not None:
+            return season_tick
         if config.run.mode == "external_live":
             lifecycle_tick = self._run_external_lifecycle_tick(config)
             if lifecycle_tick is not None and not _active_short_term_goal(config):
@@ -167,6 +179,77 @@ class LocalController:
             decision=decision,
             run_result=run_result,
         )
+
+    def _run_season_wake_tick(
+        self,
+        config: RunConfig,
+        output_dir: Path | None = None,
+        verbose: bool = False,
+    ) -> ControllerTickResult | None:
+        if config.season is None or config.season.status != "active":
+            return None
+        season = config.season
+        store = SeasonStore.from_config(config)
+        for participant in season.participants:
+            if "agent" not in participant.role:
+                continue
+            participant_id = participant_id_for(season, participant)
+            participant_state = load_participant_state(store, season.id, participant_id)
+            if int(participant_state.get("active_runs") or 0) >= participant_max_concurrent(
+                season,
+                participant,
+            ):
+                _record_season_scheduler_attempt(
+                    config,
+                    participant_id=participant_id,
+                    status="skipped",
+                    detail="participant_at_concurrency_limit",
+                )
+                continue
+            if not participant_is_due(
+                season=season,
+                participant=participant,
+                state=participant_state,
+            ):
+                _record_season_scheduler_attempt(
+                    config,
+                    participant_id=participant_id,
+                    status="skipped",
+                    detail="wake_interval_not_elapsed",
+                )
+                continue
+            run_config = config.model_copy(
+                update={
+                    "run": config.run.model_copy(
+                        update={
+                            "model": participant.model,
+                            "season_id": season.id,
+                            "participant_id": participant_id,
+                            "wake_source": "auto",
+                        }
+                    )
+                },
+                deep=True,
+            )
+            repo_slug = _configured_repo_slug(run_config)
+            _record_season_scheduler_attempt(
+                run_config,
+                participant_id=participant_id,
+                status="prepared",
+                detail="wake_dispatched",
+            )
+            mark_participant_run_started(
+                store,
+                season.id,
+                participant_id,
+                repo_slug=repo_slug,
+                wake_source="auto",
+                increment_active=False,
+            )
+            run_result = self.launcher.run(run_config, output_dir=output_dir, verbose=verbose)
+            status = "run_completed" if run_result.status == "completed" else "run_failed"
+            return ControllerTickResult(status=status, run_result=run_result)
+        return ControllerTickResult(status="season_no_eligible_participant")
 
     def _run_external_lifecycle_tick(
         self,
@@ -280,6 +363,31 @@ def _authenticated_actor(config: RunConfig, pr_client: object | None) -> str:
     if authenticated_actor is None:
         return ""
     return str(authenticated_actor() or "")
+
+
+def _configured_repo_slug(config: RunConfig) -> str:
+    if config.discovery.candidates:
+        return config.discovery.candidates[0].full_name
+    return config.discovery.query or "github-discovery"
+
+
+def _record_season_scheduler_attempt(
+    config: RunConfig,
+    *,
+    participant_id: str,
+    status: str,
+    detail: str,
+) -> None:
+    state = load_governance_state(config)
+    state.attempts.append(
+        GovernanceAttempt(
+            repository=_configured_repo_slug(config),
+            status=status,  # type: ignore[arg-type]
+            action="season.auto_wake",
+            decision_id=f"participant={participant_id};{detail}",
+        )
+    )
+    save_governance_state(config, state)
 
 
 def _active_short_term_goal(config: RunConfig) -> bool:

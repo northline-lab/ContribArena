@@ -2365,6 +2365,75 @@ class RunnerM02Test(unittest.TestCase):
                     / f"{result.run_id}.jsonl"
                 ).exists()
             )
+            participant_state = json.loads(
+                (
+                    tmp_path
+                    / "seasons"
+                    / "season_0"
+                    / "participants"
+                    / "season_0:local-stub"
+                    / "participant_state.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(1, participant_state["runs_count"])
+            self.assertEqual(0, participant_state["active_runs"])
+            self.assertEqual(result.run_id, participant_state["last_run_id"])
+            self.assertEqual("completed", participant_state["last_run_status"])
+            self.assertTrue(
+                (
+                    tmp_path
+                    / "seasons"
+                    / "season_0"
+                    / "participants"
+                    / "season_0:local-stub"
+                    / "workspaces"
+                    / "example-repo"
+                    / "container_id"
+                ).exists()
+            )
+            clone_state = json.loads(
+                (
+                    tmp_path
+                    / "seasons"
+                    / "season_0"
+                    / "participants"
+                    / "season_0:local-stub"
+                    / "workspaces"
+                    / "example-repo"
+                    / "clone_state.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual("example/repo", clone_state["repo_slug"])
+            self.assertEqual(result.run_id, clone_state["run_id"])
+
+    def test_season_admission_backfills_default_participant_id_for_state_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _config(tmp_path / "runs")
+            config.run.season_id = "season_0"
+            config.run.wake_source = "manual"
+            config.season = SeasonConfig(
+                id="season_0",
+                name="Season 0",
+                status="active",
+                state_root=tmp_path / "seasons",
+                participants=[SeasonParticipantConfig(model="local-stub")],
+            )
+
+            result = _run_with_fake_docker(FakeM02Agent(), config, tmp_path)
+
+            self.assertTrue(
+                (
+                    tmp_path
+                    / "seasons"
+                    / "season_0"
+                    / "participants"
+                    / "season_0:local-stub"
+                    / "goal_state.json"
+                ).exists()
+            )
+            summary = json.loads((result.run_dir / "run_summary.json").read_text())
+            self.assertEqual("season_0:local-stub", summary["agent"]["participant_id"])
 
     def test_season_admission_rejects_inactive_season(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2380,6 +2449,32 @@ class RunnerM02Test(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(Exception, "season_not_active"):
+                Runner(agent=FakeM02Agent()).run(config, output_dir=tmp_path / "runs")
+
+    def test_manual_season_run_rejects_participant_at_concurrency_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _config(tmp_path / "runs")
+            config.run.season_id = "season_0"
+            config.run.participant_id = "season_0:local-stub"
+            config.run.wake_source = "manual"
+            config.season = SeasonConfig(
+                id="season_0",
+                status="active",
+                state_root=tmp_path / "seasons",
+                defaults={"wake_interval": "1h", "max_concurrent_runs": 1},
+                participants=[SeasonParticipantConfig(model="local-stub")],
+            )
+            participant_dir = (
+                tmp_path / "seasons" / "season_0" / "participants" / "season_0:local-stub"
+            )
+            participant_dir.mkdir(parents=True)
+            (participant_dir / "participant_state.json").write_text(
+                json.dumps({"active_runs": 1}) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(Exception, "participant_at_concurrency_limit"):
                 Runner(agent=FakeM02Agent()).run(config, output_dir=tmp_path / "runs")
 
     def test_season_identity_normalization(self) -> None:

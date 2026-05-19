@@ -55,7 +55,14 @@ from contribarena.engine.middleware.governance import (
 from contribarena.engine.operator_events import OperatorProgressWriter, truncate_for_operator
 from contribarena.engine.runtime_config import apply_output_dir
 from contribarena.engine.seasons import admit_run
-from contribarena.engine.seasons import participant_memory_root
+from contribarena.engine.seasons import (
+    SeasonStore,
+    mark_participant_run_finished,
+    mark_participant_run_started,
+    participant_memory_root,
+    repo_workspace_dir,
+    workspace_key_for,
+)
 from contribarena.engine.surface_summary import build_run_summary
 from contribarena.engine.workspace import DockerWorkspaceManager
 from contribarena.errors import AgentError, BudgetExhausted, InfrastructureError
@@ -130,6 +137,19 @@ class Runner:
     ) -> RunResult:
         config = apply_output_dir(config, output_dir)
         admission = admit_run(config)
+        if admission.ranked:
+            config = config.model_copy(
+                update={
+                    "run": config.run.model_copy(
+                        update={
+                            "season_id": admission.season_id,
+                            "participant_id": admission.participant_id,
+                            "wake_source": admission.wake_source,
+                        }
+                    )
+                },
+                deep=True,
+            )
         repo_slug = (
             config.discovery.candidates[0].full_name
             if config.discovery.candidates
@@ -175,7 +195,18 @@ class Runner:
         trace.write(RunState.CONFIG_LOADED, "config.loaded", {"model": config.run.model})
 
         artifacts.write_json("config.json", config.model_dump(mode="json"))
-        workspace = DockerWorkspaceManager(run_id, repo_slug, config.workspace)
+        workspace_config = config.workspace
+        workspace_dir = repo_workspace_dir(config, repo_slug)
+        workspace_key = workspace_key_for(config, repo_slug)
+        if workspace_dir is not None and workspace_key:
+            workspace_config = config.workspace.model_copy(
+                update={
+                    "persistent_key": workspace_key,
+                    "persistent_metadata_path": workspace_dir / "container_id",
+                }
+            )
+            _write_clone_state(workspace_dir, repo_slug=repo_slug, run_id=run_id)
+        workspace = DockerWorkspaceManager(run_id, repo_slug, workspace_config)
         budget = BudgetTracker(config.run.budget)
         capture = ArtifactCapture()
         memory_config = config.memory
@@ -209,6 +240,14 @@ class Runner:
         workspace_finalized = False
 
         try:
+            if admission.ranked and admission.participant_id:
+                mark_participant_run_started(
+                    SeasonStore.from_config(config),
+                    admission.season_id,
+                    admission.participant_id,
+                    repo_slug=repo_slug,
+                    wake_source=admission.wake_source,
+                )
             trace.write(
                 RunState.WORKSPACE_STARTING,
                 "workspace.starting",
@@ -433,6 +472,12 @@ class Runner:
                 {"count": len(artifacts.entries) + 1},
             )
             artifacts.finalize_manifest()
+            mark_participant_run_finished(
+                config,
+                run_id=run_id,
+                status=terminal.status,
+                repo_slug=repo_slug,
+            )
             return RunResult(
                 run_id=run_id,
                 run_dir=artifacts.run_dir,
@@ -493,6 +538,12 @@ class Runner:
             _write_judgement_artifacts(artifacts, config, run_id, trace=trace, operator=operator)
             _write_run_summary_artifact(artifacts, config, run_id, repo_slug, terminal)
             artifacts.finalize_manifest()
+            mark_participant_run_finished(
+                config,
+                run_id=run_id,
+                status=terminal.status,
+                repo_slug=repo_slug,
+            )
             raise
         finally:
             if workspace_started and not workspace_finalized:
@@ -698,6 +749,19 @@ def _normalize_invocation_result(raw: object) -> AgentInvocationResult:
             legacy_final_result=raw,
         )
     return AgentInvocationResult(content=str(raw or ""))
+
+
+def _write_clone_state(workspace_dir: Path, *, repo_slug: str, run_id: str) -> None:
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "repo_slug": repo_slug,
+        "run_id": run_id,
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+    (workspace_dir / "clone_state.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _invocation_usage_payload(

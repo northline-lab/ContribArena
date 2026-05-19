@@ -75,6 +75,80 @@ class WorkspaceTest(unittest.TestCase):
             self.assertTrue(result.timed_out)
             self.assertIn("timed out", result.stderr)
 
+    def test_persistent_workspace_start_reuses_existing_container(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            log_path = root / "docker.log"
+            metadata_path = root / "workspace" / "container_id"
+            bin_dir.mkdir()
+            docker = bin_dir / "docker"
+            docker.write_text(
+                "#!/usr/bin/env sh\n"
+                f'echo "$@" >> {log_path}\n'
+                'if [ "$1" = "inspect" ]; then exit 0; fi\n'
+                'if [ "$1" = "run" ]; then exit 9; fi\n'
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+            old_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = f"{bin_dir}:{old_path}"
+            try:
+                workspace = DockerWorkspaceManager(
+                    "run-1",
+                    "owner/repo",
+                    WorkspaceConfig(
+                        persistent_key="season_0-agent-owner-repo",
+                        persistent_metadata_path=metadata_path,
+                    ),
+                )
+                workspace.start()
+            finally:
+                os.environ["PATH"] = old_path
+
+            log = log_path.read_text(encoding="utf-8")
+            self.assertIn("inspect contribarena-season_0-agent-owner-repo", log)
+            self.assertNotIn("run -d", log)
+            self.assertEqual("contribarena-season_0-agent-owner-repo", metadata_path.read_text().strip())
+            self.assertTrue((metadata_path.parent / "last_used_at").exists())
+
+    def test_persistent_workspace_stop_retains_container(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            log_path = root / "docker.log"
+            metadata_path = root / "workspace" / "container_id"
+            bin_dir.mkdir()
+            docker = bin_dir / "docker"
+            docker.write_text(
+                "#!/usr/bin/env sh\n"
+                f'echo "$@" >> {log_path}\n'
+                'if [ "$1" = "rm" ]; then exit 9; fi\n'
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+            old_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = f"{bin_dir}:{old_path}"
+            try:
+                workspace = DockerWorkspaceManager(
+                    "run-1",
+                    "owner/repo",
+                    WorkspaceConfig(
+                        persistent_key="season_0-agent-owner-repo",
+                        persistent_metadata_path=metadata_path,
+                    ),
+                )
+                result = workspace.stop()
+            finally:
+                os.environ["PATH"] = old_path
+
+            self.assertEqual(0, result.exit_code)
+            self.assertIn("retain persistent workspace", result.command)
+            self.assertFalse(log_path.exists())
+            self.assertEqual("contribarena-season_0-agent-owner-repo", metadata_path.read_text().strip())
+
 
 if __name__ == "__main__":
     unittest.main()

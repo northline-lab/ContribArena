@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
@@ -158,6 +160,146 @@ def participant_governance_state_path(config: RunConfig) -> Path | None:
     return participant_dir / "pr_history.json" if participant_dir is not None else None
 
 
+def participant_state_path(config: RunConfig) -> Path | None:
+    participant_dir = participant_dir_for_config(config)
+    return participant_dir / "participant_state.json" if participant_dir is not None else None
+
+
+def repo_workspace_dir(config: RunConfig, repo_slug: str) -> Path | None:
+    participant_dir = participant_dir_for_config(config)
+    if participant_dir is None:
+        return None
+    safe_repo = re.sub(r"[^A-Za-z0-9_.-]+", "-", repo_slug).strip("-") or "repo"
+    return participant_dir / "workspaces" / safe_repo
+
+
+def workspace_key_for(config: RunConfig, repo_slug: str) -> str:
+    if config.run.season_id and config.run.participant_id:
+        safe_repo = re.sub(r"[^A-Za-z0-9_.-]+", "-", repo_slug).strip("-") or "repo"
+        return f"{config.run.season_id}-{config.run.participant_id}-{safe_repo}"
+    return ""
+
+
+def load_participant_state(store: SeasonStore, season_id: str, participant_id: str) -> dict[str, Any]:
+    path = store.participant_dir(season_id, participant_id) / "participant_state.json"
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ConfigError(f"invalid participant state {path}: {exc}") from exc
+    return raw if isinstance(raw, dict) else {}
+
+
+def save_participant_state(
+    store: SeasonStore,
+    season_id: str,
+    participant_id: str,
+    state: dict[str, Any],
+) -> None:
+    path = store.participant_dir(season_id, participant_id) / "participant_state.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def participant_max_concurrent(
+    season: SeasonConfig,
+    participant: SeasonParticipantConfig,
+) -> int:
+    return participant.max_concurrent_runs or season.defaults.max_concurrent_runs
+
+
+def parse_duration_seconds(value: str) -> int:
+    text = value.strip().lower()
+    match = re.fullmatch(r"(\d+)\s*([smhd])", text)
+    if match is None:
+        raise ConfigError(f"invalid duration: {value}")
+    amount = int(match.group(1))
+    unit = match.group(2)
+    multiplier = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+    return amount * multiplier
+
+
+def participant_is_due(
+    *,
+    season: SeasonConfig,
+    participant: SeasonParticipantConfig,
+    state: dict[str, Any],
+    now: datetime | None = None,
+) -> bool:
+    last_wake_at = str(state.get("last_wake_at") or "")
+    if not last_wake_at:
+        return True
+    try:
+        last = datetime.fromisoformat(last_wake_at)
+    except ValueError:
+        return True
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=UTC)
+    interval = parse_duration_seconds(participant.wake_interval or season.defaults.wake_interval)
+    return (now or datetime.now(UTC)) - last >= timedelta(seconds=interval)
+
+
+def mark_participant_run_started(
+    store: SeasonStore,
+    season_id: str,
+    participant_id: str,
+    *,
+    repo_slug: str,
+    wake_source: str,
+    increment_active: bool = True,
+) -> dict[str, Any]:
+    state = load_participant_state(store, season_id, participant_id)
+    now = datetime.now(UTC).isoformat()
+    state.update(
+        {
+            "season_id": season_id,
+            "participant_id": participant_id,
+            "last_wake_at": now,
+            "last_run_started_at": now,
+            "last_repo_slug": repo_slug,
+            "last_wake_source": wake_source,
+            "active_runs": int(state.get("active_runs") or 0) + (1 if increment_active else 0),
+        }
+    )
+    save_participant_state(store, season_id, participant_id, state)
+    return state
+
+
+def mark_participant_run_finished(
+    config: RunConfig,
+    *,
+    run_id: str,
+    status: str,
+    repo_slug: str,
+) -> None:
+    path = participant_state_path(config)
+    if path is None or not config.run.season_id or not config.run.participant_id:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except json.JSONDecodeError:
+        raw = {}
+    state = raw if isinstance(raw, dict) else {}
+    now = datetime.now(UTC).isoformat()
+    active_runs = max(0, int(state.get("active_runs") or 0) - 1)
+    state.update(
+        {
+            "season_id": config.run.season_id,
+            "participant_id": config.run.participant_id,
+            "last_run_id": run_id,
+            "last_run_status": status,
+            "last_run_at": now,
+            "last_repo_slug": repo_slug,
+            "active_runs": active_runs,
+            "runs_count": int(state.get("runs_count") or 0) + 1,
+            "failures": int(state.get("failures") or 0) + (0 if status == "completed" else 1),
+        }
+    )
+    path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def admit_run(config: RunConfig) -> SeasonAdmission:
     season_id = config.run.season_id
     if not season_id:
@@ -172,6 +314,10 @@ def admit_run(config: RunConfig) -> SeasonAdmission:
             continue
         if "agent" not in participant.role:
             raise ConfigError(f"participant_not_agent: {participant_id}")
+        if config.run.wake_source == "manual":
+            state = load_participant_state(store, season_id, participant_id)
+            if int(state.get("active_runs") or 0) >= participant_max_concurrent(season, participant):
+                raise ConfigError(f"participant_at_concurrency_limit: {participant_id}")
         store.participant_dir(season_id, participant_id).mkdir(parents=True, exist_ok=True)
         return SeasonAdmission(
             season_id=season_id,
@@ -181,3 +327,34 @@ def admit_run(config: RunConfig) -> SeasonAdmission:
             wake_source=config.run.wake_source if config.run.wake_source != "unranked" else "manual",
         )
     raise ConfigError(f"participant_not_in_allowlist: {participant_id}")
+
+
+def cleanup_season_workspaces(store: SeasonStore, season_id: str, fallback: SeasonConfig | None = None) -> list[dict[str, Any]]:
+    season = store.load(season_id, fallback)
+    results: list[dict[str, Any]] = []
+    for participant in season.participants:
+        participant_id = participant_id_for(season, participant)
+        workspaces = store.participant_dir(season_id, participant_id) / "workspaces"
+        if workspaces.exists():
+            for metadata in sorted(workspaces.glob("*/container_id")):
+                container = metadata.read_text(encoding="utf-8").strip()
+                if not container:
+                    continue
+                completed = subprocess.run(
+                    ["docker", "rm", "-f", container],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                results.append(
+                    {
+                        "participant_id": participant_id,
+                        "workspace": str(metadata.parent),
+                        "container": container,
+                        "exit_code": completed.returncode,
+                    }
+                )
+            shutil.rmtree(workspaces, ignore_errors=True)
+        memory = store.participant_dir(season_id, participant_id) / "memory"
+        shutil.rmtree(memory, ignore_errors=True)
+    return results

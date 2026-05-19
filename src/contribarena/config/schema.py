@@ -114,6 +114,8 @@ class WorkspaceConfig(BaseModel):
     workdir: str = "/workspace"
     command_timeout_seconds: int = Field(default=300, ge=1)
     cleanup_policy: Literal["always", "retain_on_failure", "retain_always"] = "always"
+    persistent_key: str | None = None
+    persistent_metadata_path: Path | None = None
     resources: WorkspaceResources = Field(default_factory=WorkspaceResources)
 
 
