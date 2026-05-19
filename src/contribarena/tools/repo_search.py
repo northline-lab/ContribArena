@@ -24,13 +24,21 @@ def repo_search(
 def repo_search_with_log(
     config: RunConfig, query: str = "", filters: object | None = None
 ) -> RepoSearchResult:
-    search_query = query.strip() or config.discovery.query.strip()
+    explicit_query = query.strip()
+    search_query = explicit_query or config.discovery.query.strip()
     search_filters = _normalize_filters(filters, config.discovery.filters)
     search_query, search_filters = _apply_season_discovery_defaults(
         config,
         search_query,
         search_filters,
     )
+    owned_result = _owned_scope_result(
+        config,
+        explicit_query=explicit_query,
+        filters=search_filters,
+    )
+    if owned_result is not None:
+        return owned_result
 
     if not search_query and search_filters.is_empty():
         candidates = _filter_by_season_profile(config, config.discovery.candidates)
@@ -47,7 +55,7 @@ def repo_search_with_log(
         )
 
     client = GitHubClient()
-    github_query = _build_query(search_query, search_filters)
+    github_query = _build_query(config, search_query, search_filters)
     gh_response = client.gh_json(
         [
             "search",
@@ -124,7 +132,7 @@ def _normalize_filters(filters: object | None, default: RepoSearchFilters) -> Re
     return default
 
 
-def _build_query(query: str, filters: RepoSearchFilters) -> str:
+def _build_query(config: RunConfig, query: str, filters: RepoSearchFilters) -> str:
     parts = [query.strip()] if query.strip() else []
     if filters.language:
         parts.append(f"language:{filters.language}")
@@ -134,7 +142,96 @@ def _build_query(query: str, filters: RepoSearchFilters) -> str:
         parts.append(f"pushed:>{filters.pushed_after}")
     if filters.topic:
         parts.append(f"topic:{filters.topic}")
+    if config.season is not None:
+        for repo in sorted(config.season.discovery_profile.denylist):
+            parts.append(f"-repo:{repo}")
     return " ".join(parts).strip() or "stars:>=1"
+
+
+def _owned_scope_result(
+    config: RunConfig,
+    *,
+    explicit_query: str,
+    filters: RepoSearchFilters,
+) -> RepoSearchResult | None:
+    if config.season is None or config.season.discovery_profile.scope != "owned":
+        return None
+    profile = config.season.discovery_profile
+    allowlist = set(profile.allowlist)
+    if not allowlist:
+        raise ConfigError("owned discovery profile requires allowlist")
+    candidates = _filter_by_season_profile(config, _owned_candidates(config))
+    if not explicit_query:
+        return RepoSearchResult(
+            candidates=candidates,
+            log_row=_log_row(
+                config=config,
+                query="",
+                filters=filters,
+                github_query_string=_owned_query_string(profile.allowlist, profile.denylist),
+                total_hits=len(candidates),
+                candidates=candidates,
+            ),
+        )
+    requested = _repo_name_from_query(explicit_query)
+    if requested in allowlist:
+        selected = [candidate for candidate in candidates if candidate.full_name == requested]
+        if not selected:
+            selected = [_candidate_from_full_name(requested)]
+        return RepoSearchResult(
+            candidates=selected,
+            log_row=_log_row(
+                config=config,
+                query=explicit_query,
+                filters=filters,
+                github_query_string=f"repo:{requested}",
+                total_hits=len(selected),
+                candidates=selected,
+            ),
+        )
+    return RepoSearchResult(
+        candidates=[],
+        log_row=_log_row(
+            config=config,
+            query=explicit_query,
+            filters=filters,
+            github_query_string=_owned_query_string(profile.allowlist, profile.denylist),
+            total_hits=0,
+            candidates=[],
+            error=(
+                "denied_by_season_policy: owned discovery scope only permits "
+                f"allowlist repositories ({', '.join(sorted(allowlist))})"
+            ),
+        ),
+    )
+
+
+def _owned_candidates(config: RunConfig) -> list[RepoCandidate]:
+    configured = list(config.discovery.candidates)
+    configured_names = {candidate.full_name for candidate in configured}
+    allowlist = config.season.discovery_profile.allowlist if config.season is not None else []
+    for full_name in allowlist:
+        if full_name not in configured_names:
+            configured.append(_candidate_from_full_name(full_name))
+    return configured
+
+
+def _owned_query_string(allowlist: list[str], denylist: list[str]) -> str:
+    parts = [f"repo:{repo}" for repo in sorted(allowlist)]
+    parts.extend(f"-repo:{repo}" for repo in sorted(denylist))
+    return " ".join(parts) or "fixed_candidates"
+
+
+def _repo_name_from_query(query: str) -> str:
+    text = query.strip().removesuffix(".git").rstrip("/")
+    if "github.com/" in text:
+        text = text.split("github.com/", 1)[1]
+    if text.startswith("repo:"):
+        text = text.removeprefix("repo:")
+    parts = [part for part in text.split("/") if part]
+    if len(parts) >= 2:
+        return f"{parts[0]}/{parts[1]}"
+    return text
 
 
 def _apply_season_discovery_defaults(
@@ -230,6 +327,15 @@ def _candidate_from_rest(item: dict[str, Any]) -> RepoCandidate:
         repo=repo,
         url=item.get("html_url") or f"https://github.com/{owner}/{repo}",
         notes=notes,
+    )
+
+
+def _candidate_from_full_name(full_name: str) -> RepoCandidate:
+    owner, repo = _split_full_name(full_name)
+    return RepoCandidate(
+        owner=owner,
+        repo=repo,
+        url=f"https://github.com/{owner}/{repo}",
     )
 
 

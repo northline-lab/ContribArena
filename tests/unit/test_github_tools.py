@@ -96,26 +96,7 @@ class GithubToolsTest(unittest.TestCase):
     def test_repo_search_applies_owned_profile_and_records_log_row(self) -> None:
         class FakeClient:
             def gh_json(self, args: list[str]) -> GitHubResponse:
-                return GitHubResponse(
-                    ok=True,
-                    source="gh",
-                    data=[
-                        {
-                            "fullName": "owner/allowed",
-                            "description": "Allowed",
-                            "stargazersCount": 12,
-                            "language": "Python",
-                            "pushedAt": "2026-05-01T00:00:00Z",
-                        },
-                        {
-                            "fullName": "owner/denied",
-                            "description": "Denied",
-                            "stargazersCount": 12,
-                            "language": "Python",
-                            "pushedAt": "2026-05-01T00:00:00Z",
-                        },
-                    ],
-                )
+                raise AssertionError("owned discovery must not query GitHub")
 
             def rest_json(self, *args: object, **kwargs: object) -> GitHubResponse:
                 raise AssertionError("REST fallback should not be used")
@@ -143,12 +124,58 @@ class GithubToolsTest(unittest.TestCase):
         self.assertEqual(["owner/allowed"], [candidate.full_name for candidate in result.candidates])
         self.assertEqual("season_0", result.log_row["season_id"])
         self.assertEqual("season_0:qwen36plus", result.log_row["participant_id"])
-        self.assertEqual("agent framework", result.log_row["query"])
+        self.assertEqual("", result.log_row["query"])
         self.assertEqual({"language": "Python", "stars_min": 50}, result.log_row["filters_resolved"])
-        self.assertIn("language:Python", str(result.log_row["github_query_string"]))
-        self.assertIn("stars:>=50", str(result.log_row["github_query_string"]))
-        self.assertEqual(2, result.log_row["total_hits"])
+        self.assertIn("repo:owner/allowed", str(result.log_row["github_query_string"]))
+        self.assertIn("-repo:owner/denied", str(result.log_row["github_query_string"]))
+        self.assertEqual(1, result.log_row["total_hits"])
         self.assertEqual(1, result.log_row["returned_count"])
+
+    def test_owned_repo_search_rejects_query_outside_allowlist(self) -> None:
+        config = _config(query="placeholder")
+        config.season = SeasonConfig(
+            id="season_0",
+            status="active",
+            participants=[SeasonParticipantConfig(model="local-stub")],
+            discovery_profile=SeasonDiscoveryProfileConfig(
+                scope="owned",
+                allowlist=["owner/allowed"],
+            ),
+        )
+
+        result = repo_search_with_log(config, query="owner/other")
+
+        self.assertEqual([], result.candidates)
+        self.assertEqual("denied_by_season_policy", str(result.log_row["error"]).split(":", 1)[0])
+        self.assertEqual(0, result.log_row["returned_count"])
+
+    def test_external_repo_search_pushes_denylist_into_query(self) -> None:
+        seen: dict[str, object] = {}
+
+        class FakeClient:
+            def gh_json(self, args: list[str]) -> GitHubResponse:
+                seen["query"] = args[-1]
+                return GitHubResponse(ok=True, source="gh", data=[])
+
+            def rest_json(self, *args: object, **kwargs: object) -> GitHubResponse:
+                raise AssertionError("REST fallback should not be used")
+
+        config = _config(query="agent")
+        config.season = SeasonConfig(
+            id="season_1",
+            status="active",
+            participants=[SeasonParticipantConfig(model="local-stub")],
+            discovery_profile=SeasonDiscoveryProfileConfig(
+                scope="external",
+                denylist=["owner/denied"],
+            ),
+        )
+
+        with patch("contribarena.tools.repo_search.GitHubClient", FakeClient):
+            result = repo_search_with_log(config)
+
+        self.assertIn("-repo:owner/denied", str(seen["query"]))
+        self.assertIn("-repo:owner/denied", str(result.log_row["github_query_string"]))
 
     def test_repo_metadata_normalizes_gh_payload(self) -> None:
         class FakeClient:
