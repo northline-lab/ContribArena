@@ -286,7 +286,9 @@ def _leaderboard(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for run in runs:
         agent = run.get("agent", {}) if isinstance(run.get("agent"), dict) else {}
         season = run.get("season", {}) if isinstance(run.get("season"), dict) else {}
-        handle = str(agent.get("handle") or agent.get("name") or "builtin")
+        participant_id = str(agent.get("participant_id") or "")
+        agent_handle = str(agent.get("handle") or agent.get("name") or "builtin")
+        handle = participant_id or agent_handle
         season_id = str(season.get("id") or "")
         key = (season_id, handle, str(agent.get("name") or "builtin"))
         bucket = buckets.setdefault(
@@ -295,8 +297,9 @@ def _leaderboard(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "season_id": season_id,
                 "season_name": str(season.get("name") or ""),
                 "season_phase": str(season.get("phase") or "unknown"),
+                "participant_id": participant_id,
                 "agent_name": str(agent.get("name") or "builtin"),
-                "agent_handle": handle,
+                "agent_handle": agent_handle,
                 "runs": 0,
                 "prs_opened": 0,
                 "quality_gate_passed": 0,

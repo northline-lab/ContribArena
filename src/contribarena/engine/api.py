@@ -72,8 +72,37 @@ def create_app(
     def season(season_id: str) -> dict[str, object]:
         for item in model.seasons():
             if item["id"] == season_id:
-                return {"season": item, "stats": model.stats(season_id)}
+                return {
+                    "season": item,
+                    "stats": model.stats(season_id),
+                    "participants": model.participants(season_id),
+                    "scheduler": model.scheduler_events(season_id),
+                    "workspaces": model.season_workspaces(season_id),
+                }
         raise HTTPException(status_code=404, detail="season not found")
+
+    @app.get("/api/seasons/{season_id}/participants")
+    def season_participants(season_id: str) -> dict[str, object]:
+        return {"participants": model.participants(season_id)}
+
+    @app.get("/api/participants/{participant_id}")
+    def participant(participant_id: str) -> dict[str, object]:
+        item = model.participant(participant_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="participant not found")
+        return {"participant": item}
+
+    @app.get("/api/seasons/{season_id}/pr-lifecycle")
+    def season_pr_lifecycle(season_id: str) -> dict[str, object]:
+        return {"pr_lifecycle": model.pr_lifecycle(season_id=season_id)}
+
+    @app.get("/api/seasons/{season_id}/scheduler")
+    def season_scheduler(season_id: str) -> dict[str, object]:
+        return {"scheduler": model.scheduler_events(season_id)}
+
+    @app.get("/api/seasons/{season_id}/workspaces")
+    def season_workspaces(season_id: str) -> dict[str, object]:
+        return {"workspaces": model.season_workspaces(season_id)}
 
     @app.get("/api/stats")
     def stats(season_id: str | None = None) -> dict[str, object]:
@@ -109,6 +138,17 @@ def create_app(
         if item is None:
             raise HTTPException(status_code=404, detail="run not found")
         return item
+
+    @app.get("/api/runs/{run_id}/discovery")
+    def run_discovery(run_id: str) -> dict[str, object]:
+        return {"discovery": model.discovery_calls(run_id)}
+
+    @app.get("/api/runs/{run_id}/self-review")
+    def run_self_review(run_id: str) -> dict[str, object]:
+        item = model.run(run_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        return {"self_review": model.self_review(run_id)}
 
     @app.get("/api/agents")
     def agents() -> dict[str, object]:

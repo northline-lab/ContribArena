@@ -34,6 +34,13 @@ class BackendReadApiTests(unittest.TestCase):
             self.assertEqual("agent-a", bundle["leaderboard"][0]["agent_handle"])
             artifact = model.public_artifact_path("run-a", "patch.diff")
             self.assertIsNotNone(artifact)
+            self.assertEqual("season_0:agent-a", bundle["leaderboard"][0]["participant_id"])
+            self.assertEqual("season_0:agent-a", model.participants("season_0")[0]["participant_id"])
+            self.assertEqual("agent framework", model.discovery_calls("run-a")[0]["query"])
+            self.assertEqual("open", model.pr_lifecycle(season_id="season_0")[0]["state"])
+            self.assertEqual("container-1", model.season_workspaces("season_0")[0]["container_id"])
+            self.assertEqual("auto", model.scheduler_events("season_0")[0]["wake_source"])
+            self.assertEqual("self_review", model.self_review("run-a")[0]["reviewer_role"])
             self.assertEqual("work", model.phase_history("run-a")[0]["phase"])
             self.assertEqual("aci_submit_patch", model.tool_violations("run-a")[0]["tool"])
 
@@ -48,7 +55,14 @@ class BackendReadApiTests(unittest.TestCase):
 
             self.assertIn("/api/health", routes)
             self.assertIn("/api/surface", routes)
+            self.assertIn("/api/seasons/{season_id}/participants", routes)
+            self.assertIn("/api/participants/{participant_id}", routes)
+            self.assertIn("/api/seasons/{season_id}/pr-lifecycle", routes)
+            self.assertIn("/api/seasons/{season_id}/scheduler", routes)
+            self.assertIn("/api/seasons/{season_id}/workspaces", routes)
             self.assertIn("/api/runs/{run_id}", routes)
+            self.assertIn("/api/runs/{run_id}/discovery", routes)
+            self.assertIn("/api/runs/{run_id}/self-review", routes)
             self.assertIn("/api/artifacts/{run_id}/{artifact_name}", routes)
 
             model = SurfaceReadModel(root / "read.sqlite")
@@ -87,7 +101,8 @@ def _write_run(path: Path, *, run_id: str, agent_handle: str) -> None:
         "run_id": run_id,
         "run_mode": "shadow",
         "model": "local-stub",
-        "agent": {"name": "Agent A", "handle": agent_handle},
+        "wake_source": "auto",
+        "agent": {"name": "Agent A", "handle": agent_handle, "participant_id": f"season_0:{agent_handle}"},
         "repository": {"full_name": "example/repo", "url": "https://github.com/example/repo"},
         "season": {"id": "season_0", "name": "Season 0", "phase": "owned_repo_calibration"},
         "opportunity_source": "none",
@@ -126,6 +141,14 @@ def _write_run(path: Path, *, run_id: str, agent_handle: str) -> None:
                 "visibility": "internal",
                 "url": "",
                 "size_bytes": 1200,
+                "redacted": False,
+            },
+            {
+                "name": "phase_review_maintainer_review.jsonl",
+                "kind": "jsonl",
+                "visibility": "internal",
+                "url": "",
+                "size_bytes": 120,
                 "redacted": False,
             },
         ],
@@ -170,6 +193,68 @@ def _write_run(path: Path, *, run_id: str, agent_handle: str) -> None:
         + "\n",
         encoding="utf-8",
     )
+    (path / "discovery_log.jsonl").write_text(
+        json.dumps(
+            {
+                "season_id": "season_0",
+                "participant_id": f"season_0:{agent_handle}",
+                "query": "agent framework",
+                "filters_resolved": {"language": "Python"},
+                "github_query_string": "agent framework language:Python",
+                "total_hits": 3,
+                "returned_count": 1,
+                "candidates": ["example/repo"],
+            },
+            ensure_ascii=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (path / "operator_events.jsonl").write_text(
+        json.dumps(
+            {
+                "ts": "2026-05-15T00:00:00Z",
+                "phase": "run",
+                "status": "started",
+                "payload": {},
+            },
+            ensure_ascii=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (path / "pr_review_log.jsonl").write_text(
+        json.dumps(
+            {
+                "repository": "example/repo",
+                "number": 1,
+                "state": "open",
+                "lifecycle_status": "tracking",
+            },
+            ensure_ascii=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (path / "phase_review_maintainer_review.jsonl").write_text(
+        json.dumps({"reviewer_role": "self_review", "severity": "low"}, ensure_ascii=True)
+        + "\n",
+        encoding="utf-8",
+    )
+    workspace_dir = path.parent / "seasons" / "season_0" / "participants" / f"season_0:{agent_handle}" / "workspaces" / "example-repo"
+    workspace_dir.mkdir(parents=True)
+    (workspace_dir / "container_id").write_text("container-1\n", encoding="utf-8")
+    (workspace_dir / "last_used_at").write_text("2026-05-15T00:00:00Z\n", encoding="utf-8")
+    (workspace_dir / "clone_state.json").write_text(
+        json.dumps({"repo_slug": "example/repo", "run_id": run_id}, ensure_ascii=True) + "\n",
+        encoding="utf-8",
+    )
+    config = {
+        "workspace": {
+            "persistent_metadata_path": str(workspace_dir / "container_id"),
+        }
+    }
+    (path / "config.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

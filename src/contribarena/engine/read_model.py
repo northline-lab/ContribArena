@@ -62,6 +62,10 @@ class SurfaceReadModel:
         artifact_rows: list[tuple[str, str, str, str, str]] = []
         phase_rows: list[tuple[str, int, str, str, str, str, str, str]] = []
         violation_rows: list[tuple[str, int, str, str, str, str, str]] = []
+        discovery_rows: list[tuple[str, int, str, str, str, str, str]] = []
+        scheduler_rows: list[tuple[str, str, str, str, str, str]] = []
+        pr_rows: list[tuple[str, str, str, int, str, str]] = []
+        workspace_rows: list[tuple[str, str, str, str, str]] = []
         for loaded in loaded_runs:
             run = _api_run(loaded.payload, loaded.run_dir, skipped)
             public_runs.append(run)
@@ -80,8 +84,14 @@ class SurfaceReadModel:
                 )
             phase_rows.extend(_phase_history_rows(run_id, loaded.run_dir))
             violation_rows.extend(_tool_violation_rows(run_id, loaded.run_dir))
+            discovery_rows.extend(_discovery_call_rows(run_id, loaded.run_dir))
+            scheduler_rows.extend(_scheduler_event_rows(run, loaded.run_dir))
+            pr_rows.extend(_pr_lifecycle_rows(run, loaded.run_dir))
+            workspace_rows.extend(_workspace_rows(run, loaded.run_dir))
         leaderboard = _leaderboard(public_runs)
         stats = _stats(public_runs)
+        seasons = _season_rows(public_runs)
+        participants = _participant_rows(public_runs)
         generated_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         with self._connect() as db:
             _replace_data(
@@ -90,6 +100,12 @@ class SurfaceReadModel:
                 artifacts=artifact_rows,
                 phase_history=phase_rows,
                 tool_violations=violation_rows,
+                discovery_calls=discovery_rows,
+                scheduler_events=scheduler_rows,
+                pr_lifecycle=pr_rows,
+                season_workspaces=workspace_rows,
+                seasons=seasons,
+                participants=participants,
                 leaderboard=leaderboard,
                 stats=stats,
                 skipped=skipped,
@@ -118,17 +134,9 @@ class SurfaceReadModel:
             }
 
     def seasons(self) -> list[dict[str, Any]]:
-        seasons: dict[str, dict[str, Any]] = {}
-        for run in self.runs(limit=10_000, offset=0):
-            season = run.get("season", {}) if isinstance(run.get("season"), dict) else {}
-            season_id = str(season.get("id") or "")
-            if season_id and season_id not in seasons:
-                seasons[season_id] = {
-                    "id": season_id,
-                    "name": str(season.get("name") or season_id),
-                    "phase": str(season.get("phase") or "unknown"),
-                }
-        return sorted(seasons.values(), key=lambda item: item["id"])
+        with self._connect() as db:
+            rows = db.execute("select payload_json from seasons order by season_id").fetchall()
+        return [json.loads(row[0]) for row in rows]
 
     def stats(self, season_id: str | None = None) -> dict[str, Any]:
         runs = self.runs(season_id=season_id, limit=10_000, offset=0)
@@ -157,8 +165,8 @@ class SurfaceReadModel:
             clauses.append("run_status = ?")
             params.append(status)
         if agent:
-            clauses.append("(agent_handle = ? or agent_name = ?)")
-            params.extend([agent, agent])
+            clauses.append("(agent_handle = ? or agent_name = ? or participant_id = ?)")
+            params.extend([agent, agent, agent])
         if query:
             clauses.append("payload_json like ?")
             params.append(f"%{query}%")
@@ -175,6 +183,91 @@ class SurfaceReadModel:
         with self._connect() as db:
             row = db.execute("select payload_json from runs where run_id = ?", (run_id,)).fetchone()
         return json.loads(row[0]) if row else None
+
+    def participants(self, season_id: str | None = None) -> list[dict[str, Any]]:
+        query = "select payload_json from participants"
+        params: list[Any] = []
+        if season_id:
+            query += " where season_id = ?"
+            params.append(season_id)
+        query += " order by season_id, participant_id"
+        with self._connect() as db:
+            return _payloads(db.execute(query, params))
+
+    def participant(self, participant_id: str) -> dict[str, Any] | None:
+        with self._connect() as db:
+            row = db.execute(
+                "select payload_json from participants where participant_id = ?",
+                (participant_id,),
+            ).fetchone()
+        if not row:
+            return None
+        item = json.loads(row[0])
+        item["runs_detail"] = self.runs(agent=participant_id, limit=500, offset=0)
+        item["pr_lifecycle"] = self.pr_lifecycle(participant_id=participant_id)
+        return item
+
+    def pr_lifecycle(
+        self,
+        *,
+        season_id: str | None = None,
+        participant_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if season_id:
+            clauses.append("season_id = ?")
+            params.append(season_id)
+        if participant_id:
+            clauses.append("participant_id = ?")
+            params.append(participant_id)
+        where = f"where {' and '.join(clauses)}" if clauses else ""
+        with self._connect() as db:
+            rows = db.execute(
+                f"select payload_json from pr_lifecycle {where} order by season_id, participant_id, repository, number",
+                params,
+            ).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    def discovery_calls(self, run_id: str | None = None) -> list[dict[str, Any]]:
+        query = "select payload_json from discovery_calls"
+        params: list[Any] = []
+        if run_id:
+            query += " where run_id = ?"
+            params.append(run_id)
+        query += " order by run_id, seq"
+        with self._connect() as db:
+            return _payloads(db.execute(query, params))
+
+    def self_review(self, run_id: str) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            row = db.execute(
+                "select path from artifacts where run_id = ? and name = ?",
+                (run_id, "phase_review_maintainer_review.jsonl"),
+            ).fetchone()
+        if not row:
+            return []
+        return _read_jsonl(Path(str(row[0])))
+
+    def scheduler_events(self, season_id: str | None = None) -> list[dict[str, Any]]:
+        query = "select payload_json from scheduler_events"
+        params: list[Any] = []
+        if season_id:
+            query += " where season_id = ?"
+            params.append(season_id)
+        query += " order by created_at, participant_id"
+        with self._connect() as db:
+            return _payloads(db.execute(query, params))
+
+    def season_workspaces(self, season_id: str | None = None) -> list[dict[str, Any]]:
+        query = "select payload_json from season_workspaces"
+        params: list[Any] = []
+        if season_id:
+            query += " where season_id = ?"
+            params.append(season_id)
+        query += " order by season_id, participant_id, repo_slug"
+        with self._connect() as db:
+            return _payloads(db.execute(query, params))
 
     def phase_history(self, run_id: str) -> list[dict[str, Any]]:
         with self._connect() as db:
@@ -333,11 +426,59 @@ def _create_schema(db: sqlite3.Connection) -> None:
         create table if not exists runs (
             run_id text primary key,
             season_id text not null,
+            participant_id text not null default '',
             agent_handle text not null,
             agent_name text not null,
             run_status text not null,
+            wake_source text not null default '',
+            repo_slug text not null default '',
             started_at text not null,
             payload_json text not null
+        );
+        create table if not exists seasons (
+            season_id text primary key,
+            status text not null,
+            payload_json text not null
+        );
+        create table if not exists participants (
+            season_id text not null,
+            participant_id text not null,
+            payload_json text not null,
+            primary key (season_id, participant_id)
+        );
+        create table if not exists pr_lifecycle (
+            season_id text not null,
+            participant_id text not null,
+            repository text not null,
+            number integer not null,
+            state text not null,
+            payload_json text not null,
+            primary key (season_id, participant_id, repository, number)
+        );
+        create table if not exists discovery_calls (
+            run_id text not null,
+            seq integer not null,
+            season_id text not null,
+            participant_id text not null,
+            query text not null,
+            github_query_string text not null,
+            payload_json text not null,
+            primary key (run_id, seq)
+        );
+        create table if not exists scheduler_events (
+            season_id text not null,
+            participant_id text not null,
+            created_at text not null,
+            status text not null,
+            payload_json text not null
+        );
+        create table if not exists season_workspaces (
+            season_id text not null,
+            participant_id text not null,
+            repo_slug text not null,
+            container_id text not null,
+            payload_json text not null,
+            primary key (season_id, participant_id, repo_slug)
         );
         create table if not exists artifacts (
             run_id text not null,
@@ -369,12 +510,20 @@ def _create_schema(db: sqlite3.Connection) -> None:
             primary key (run_id, seq)
         );
         create index if not exists idx_runs_season on runs(season_id);
+        create index if not exists idx_runs_participant on runs(participant_id);
         create index if not exists idx_runs_agent on runs(agent_handle);
         create index if not exists idx_runs_status on runs(run_status);
+        create index if not exists idx_discovery_calls_run on discovery_calls(run_id);
+        create index if not exists idx_scheduler_events_season on scheduler_events(season_id);
+        create index if not exists idx_season_workspaces_season on season_workspaces(season_id);
+        create index if not exists idx_pr_lifecycle_season on pr_lifecycle(season_id);
         create index if not exists idx_phase_history_run on phase_history(run_id);
         create index if not exists idx_tool_violations_run on tool_violations(run_id);
         """
     )
+    _ensure_column(db, "runs", "participant_id", "text not null default ''")
+    _ensure_column(db, "runs", "wake_source", "text not null default ''")
+    _ensure_column(db, "runs", "repo_slug", "text not null default ''")
 
 
 def _replace_data(
@@ -384,6 +533,12 @@ def _replace_data(
     artifacts: list[tuple[str, str, str, str, str]],
     phase_history: list[tuple[str, int, str, str, str, str, str, str]],
     tool_violations: list[tuple[str, int, str, str, str, str, str]],
+    discovery_calls: list[tuple[str, int, str, str, str, str, str]],
+    scheduler_events: list[tuple[str, str, str, str, str, str]],
+    pr_lifecycle: list[tuple[str, str, str, int, str, str]],
+    season_workspaces: list[tuple[str, str, str, str, str]],
+    seasons: list[tuple[str, str, str]],
+    participants: list[tuple[str, str, str]],
     leaderboard: list[dict[str, Any]],
     stats: dict[str, Any],
     skipped: list[str],
@@ -394,13 +549,28 @@ def _replace_data(
     db.execute("delete from artifacts")
     db.execute("delete from phase_history")
     db.execute("delete from tool_violations")
+    db.execute("delete from discovery_calls")
+    db.execute("delete from scheduler_events")
+    db.execute("delete from pr_lifecycle")
+    db.execute("delete from season_workspaces")
+    db.execute("delete from seasons")
+    db.execute("delete from participants")
     db.executemany(
         """
         insert into runs (
-            run_id, season_id, agent_handle, agent_name, run_status, started_at, payload_json
-        ) values (?, ?, ?, ?, ?, ?, ?)
+            run_id, season_id, participant_id, agent_handle, agent_name, run_status,
+            wake_source, repo_slug, started_at, payload_json
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [_run_row(run) for run in runs],
+    )
+    db.executemany(
+        "insert into seasons (season_id, status, payload_json) values (?, ?, ?)",
+        seasons,
+    )
+    db.executemany(
+        "insert into participants (season_id, participant_id, payload_json) values (?, ?, ?)",
+        participants,
     )
     db.executemany(
         "insert into artifacts (run_id, name, visibility, path, payload_json) values (?, ?, ?, ?, ?)",
@@ -422,6 +592,38 @@ def _replace_data(
         """,
         tool_violations,
     )
+    db.executemany(
+        """
+        insert into discovery_calls (
+            run_id, seq, season_id, participant_id, query, github_query_string, payload_json
+        ) values (?, ?, ?, ?, ?, ?, ?)
+        """,
+        discovery_calls,
+    )
+    db.executemany(
+        """
+        insert into scheduler_events (
+            season_id, participant_id, created_at, status, payload_json
+        ) values (?, ?, ?, ?, ?)
+        """,
+        scheduler_events,
+    )
+    db.executemany(
+        """
+        insert into pr_lifecycle (
+            season_id, participant_id, repository, number, state, payload_json
+        ) values (?, ?, ?, ?, ?, ?)
+        """,
+        pr_lifecycle,
+    )
+    db.executemany(
+        """
+        insert into season_workspaces (
+            season_id, participant_id, repo_slug, container_id, payload_json
+        ) values (?, ?, ?, ?, ?)
+        """,
+        season_workspaces,
+    )
     meta = {
         "schema_version": SURFACE_SCHEMA_VERSION,
         "generated_at": generated_at,
@@ -436,18 +638,108 @@ def _replace_data(
     )
 
 
-def _run_row(run: dict[str, Any]) -> tuple[str, str, str, str, str, str, str]:
+def _run_row(run: dict[str, Any]) -> tuple[str, str, str, str, str, str, str, str, str, str]:
     season = run.get("season", {}) if isinstance(run.get("season"), dict) else {}
     agent = run.get("agent", {}) if isinstance(run.get("agent"), dict) else {}
+    repository = run.get("repository", {}) if isinstance(run.get("repository"), dict) else {}
     return (
         str(run.get("run_id") or ""),
         str(season.get("id") or ""),
+        str(agent.get("participant_id") or ""),
         str(agent.get("handle") or agent.get("name") or "builtin"),
         str(agent.get("name") or "builtin"),
         str(run.get("run_status") or "unknown"),
+        str(run.get("wake_source") or ""),
+        str(repository.get("full_name") or ""),
         str(run.get("started_at") or ""),
         json.dumps(run, ensure_ascii=True),
     )
+
+
+def _season_rows(runs: list[dict[str, Any]]) -> list[tuple[str, str, str]]:
+    seasons: dict[str, dict[str, Any]] = {}
+    for run in runs:
+        season = run.get("season", {}) if isinstance(run.get("season"), dict) else {}
+        season_id = str(season.get("id") or "")
+        if not season_id:
+            continue
+        existing = seasons.setdefault(
+            season_id,
+            {
+                "id": season_id,
+                "name": str(season.get("name") or season_id),
+                "phase": str(season.get("phase") or "unknown"),
+                "status": str(season.get("status") or "unknown"),
+                "runs_count": 0,
+                "participants_count": 0,
+                "wake_sources": [],
+            },
+        )
+        existing["runs_count"] = int(existing["runs_count"]) + 1
+        wake_source = str(run.get("wake_source") or "")
+        if wake_source and wake_source not in existing["wake_sources"]:
+            existing["wake_sources"].append(wake_source)
+    participant_counts: dict[str, set[str]] = {}
+    for run in runs:
+        season = run.get("season", {}) if isinstance(run.get("season"), dict) else {}
+        agent = run.get("agent", {}) if isinstance(run.get("agent"), dict) else {}
+        season_id = str(season.get("id") or "")
+        participant_id = str(agent.get("participant_id") or "")
+        if season_id and participant_id:
+            participant_counts.setdefault(season_id, set()).add(participant_id)
+    rows = []
+    for season_id, payload in seasons.items():
+        payload["participants_count"] = len(participant_counts.get(season_id, set()))
+        rows.append((season_id, str(payload.get("status") or "unknown"), json.dumps(payload, ensure_ascii=True)))
+    return rows
+
+
+def _participant_rows(runs: list[dict[str, Any]]) -> list[tuple[str, str, str]]:
+    participants: dict[tuple[str, str], dict[str, Any]] = {}
+    for run in runs:
+        season = run.get("season", {}) if isinstance(run.get("season"), dict) else {}
+        agent = run.get("agent", {}) if isinstance(run.get("agent"), dict) else {}
+        season_id = str(season.get("id") or "")
+        participant_id = str(agent.get("participant_id") or "")
+        if not season_id or not participant_id:
+            continue
+        key = (season_id, participant_id)
+        entry = participants.setdefault(
+            key,
+            {
+                "season_id": season_id,
+                "participant_id": participant_id,
+                "agent_name": str(agent.get("name") or "builtin"),
+                "agent_handle": str(agent.get("handle") or participant_id),
+                "runs_count": 0,
+                "prs_opened": 0,
+                "merged_prs": 0,
+                "failures": 0,
+                "last_run_at": "",
+                "latest_run_id": "",
+                "mean_arena_score": None,
+                "_arena_scores": [],
+            },
+        )
+        entry["runs_count"] = int(entry["runs_count"]) + 1
+        if str(run.get("run_status") or "") != "completed":
+            entry["failures"] = int(entry["failures"]) + 1
+        if _pr_opened(run):
+            entry["prs_opened"] = int(entry["prs_opened"]) + 1
+        if _merged(run):
+            entry["merged_prs"] = int(entry["merged_prs"]) + 1
+        started_at = str(run.get("started_at") or "")
+        if started_at >= str(entry.get("last_run_at") or ""):
+            entry["last_run_at"] = started_at
+            entry["latest_run_id"] = str(run.get("run_id") or "")
+        judgement = run.get("judgement", {}) if isinstance(run.get("judgement"), dict) else {}
+        _append_float(entry["_arena_scores"], judgement.get("arena_score"))
+    rows = []
+    for (season_id, participant_id), payload in participants.items():
+        payload["mean_arena_score"] = _mean(payload["_arena_scores"])
+        payload.pop("_arena_scores", None)
+        rows.append((season_id, participant_id, json.dumps(payload, ensure_ascii=True)))
+    return rows
 
 
 def _phase_history_rows(
@@ -491,6 +783,118 @@ def _tool_violation_rows(
     return rows
 
 
+def _discovery_call_rows(
+    run_id: str,
+    run_dir: Path,
+) -> list[tuple[str, int, str, str, str, str, str]]:
+    rows: list[tuple[str, int, str, str, str, str, str]] = []
+    for seq, payload in enumerate(_read_jsonl(run_dir / "discovery_log.jsonl"), start=1):
+        rows.append(
+            (
+                run_id,
+                seq,
+                str(payload.get("season_id") or ""),
+                str(payload.get("participant_id") or ""),
+                str(payload.get("query") or ""),
+                str(payload.get("github_query_string") or ""),
+                json.dumps(payload, ensure_ascii=True),
+            )
+        )
+    return rows
+
+
+def _scheduler_event_rows(run: dict[str, Any], run_dir: Path) -> list[tuple[str, str, str, str, str]]:
+    rows: list[tuple[str, str, str, str, str]] = []
+    season = run.get("season", {}) if isinstance(run.get("season"), dict) else {}
+    agent = run.get("agent", {}) if isinstance(run.get("agent"), dict) else {}
+    season_id = str(season.get("id") or "")
+    participant_id = str(agent.get("participant_id") or "")
+    if not season_id or not participant_id:
+        return rows
+    for payload in _read_jsonl(run_dir / "operator_events.jsonl"):
+        if payload.get("phase") != "run" or payload.get("status") != "started":
+            continue
+        event = {
+            "season_id": season_id,
+            "participant_id": participant_id,
+            "wake_source": run.get("wake_source") or "",
+            "run_id": run.get("run_id") or "",
+            "status": "started",
+            "created_at": payload.get("ts") or run.get("started_at") or "",
+        }
+        rows.append(
+            (
+                season_id,
+                participant_id,
+                str(event["created_at"]),
+                "started",
+                json.dumps(event, ensure_ascii=True),
+            )
+        )
+    return rows
+
+
+def _pr_lifecycle_rows(run: dict[str, Any], run_dir: Path) -> list[tuple[str, str, str, int, str, str]]:
+    rows: list[tuple[str, str, str, int, str, str]] = []
+    season = run.get("season", {}) if isinstance(run.get("season"), dict) else {}
+    agent = run.get("agent", {}) if isinstance(run.get("agent"), dict) else {}
+    season_id = str(season.get("id") or "")
+    participant_id = str(agent.get("participant_id") or "")
+    for payload in _read_jsonl(run_dir / "pr_review_log.jsonl"):
+        repository = str(payload.get("repository") or "")
+        number = _int(payload.get("number"))
+        if not repository or number is None:
+            continue
+        state = str(payload.get("state") or payload.get("lifecycle_status") or "unknown")
+        item = dict(payload)
+        item.setdefault("season_id", season_id)
+        item.setdefault("participant_id", participant_id)
+        rows.append((season_id, participant_id, repository, number, state, json.dumps(item, ensure_ascii=True)))
+    pr = run.get("pull_request", {}) if isinstance(run.get("pull_request"), dict) else {}
+    repository = str(run.get("repository", {}).get("full_name") or "") if isinstance(run.get("repository"), dict) else ""
+    number = _int(pr.get("number"))
+    if repository and number is not None and not rows:
+        item = {
+            "season_id": season_id,
+            "participant_id": participant_id,
+            "repository": repository,
+            "number": number,
+            "url": pr.get("url") or "",
+            "state": pr.get("state") or "unknown",
+            "run_id": run.get("run_id") or "",
+        }
+        rows.append((season_id, participant_id, repository, number, str(item["state"]), json.dumps(item, ensure_ascii=True)))
+    return rows
+
+
+def _workspace_rows(run: dict[str, Any], run_dir: Path) -> list[tuple[str, str, str, str, str]]:
+    config = _read_json_file(run_dir / "config.json")
+    workspace = config.get("workspace", {}) if isinstance(config.get("workspace"), dict) else {}
+    container_path = workspace.get("persistent_metadata_path")
+    if not container_path:
+        return []
+    season = run.get("season", {}) if isinstance(run.get("season"), dict) else {}
+    agent = run.get("agent", {}) if isinstance(run.get("agent"), dict) else {}
+    repository = run.get("repository", {}) if isinstance(run.get("repository"), dict) else {}
+    season_id = str(season.get("id") or "")
+    participant_id = str(agent.get("participant_id") or "")
+    repo_slug = str(repository.get("full_name") or "")
+    metadata_path = Path(str(container_path))
+    container_id = ""
+    if metadata_path.exists():
+        container_id = metadata_path.read_text(encoding="utf-8", errors="replace").strip()
+    payload = {
+        "season_id": season_id,
+        "participant_id": participant_id,
+        "repo_slug": repo_slug,
+        "container_id": container_id,
+        "metadata_path": str(metadata_path),
+        "last_used_at": _read_text_file(metadata_path.parent / "last_used_at"),
+        "clone_state": _read_json_file(metadata_path.parent / "clone_state.json"),
+    }
+    return [(season_id, participant_id, repo_slug, container_id, json.dumps(payload, ensure_ascii=True))]
+
+
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
@@ -505,6 +909,66 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     except (OSError, json.JSONDecodeError):
         return []
     return rows
+
+
+def _ensure_column(db: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    existing = {str(row[1]) for row in db.execute(f"pragma table_info({table})").fetchall()}
+    if column not in existing:
+        db.execute(f"alter table {table} add column {column} {definition}")
+
+
+def _read_json_file(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _read_text_file(path: Path) -> str:
+    if not path.exists():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+
+
+def _int(value: object) -> int | None:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _pr_opened(run: dict[str, Any]) -> bool:
+    pr = run.get("pull_request", {}) if isinstance(run.get("pull_request"), dict) else {}
+    return bool(pr.get("url")) or pr.get("state") in {"open", "closed", "merged"}
+
+
+def _merged(run: dict[str, Any]) -> bool:
+    outcome = (
+        run.get("maintainer_outcome", {})
+        if isinstance(run.get("maintainer_outcome"), dict)
+        else {}
+    )
+    pr = run.get("pull_request", {}) if isinstance(run.get("pull_request"), dict) else {}
+    return outcome.get("status") == "merged" or pr.get("state") == "merged"
+
+
+def _append_float(values: list[float], value: object) -> None:
+    try:
+        values.append(float(value))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return
+
+
+def _mean(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return round(sum(values) / len(values), 2)
 
 
 def _payloads(rows: Any) -> list[dict[str, Any]]:
