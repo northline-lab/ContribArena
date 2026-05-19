@@ -20,6 +20,10 @@ export interface Season {
   id: string;
   name: string;
   phase: SeasonPhase;
+  status?: string;
+  runs_count?: number;
+  participants_count?: number;
+  wake_sources?: string[];
 }
 
 export interface PipelineStage {
@@ -61,7 +65,8 @@ export interface RunSummary {
   run_id: string;
   run_mode: string;
   model: string;
-  agent: { name: string; handle: string };
+  wake_source: "manual" | "auto" | "unranked";
+  agent: { name: string; handle: string; participant_id?: string };
   repository: { full_name: string; url: string };
   season: Season;
   opportunity_source: "issue_url" | "discovery_event_id" | "none";
@@ -85,6 +90,7 @@ export interface LeaderboardEntry {
   season_id: string;
   season_name: string;
   season_phase: SeasonPhase;
+  participant_id?: string;
   agent_name: string;
   agent_handle: string;
   runs: number;
@@ -117,5 +123,114 @@ export interface SurfaceData {
   runs: RunSummary[];
   leaderboard: LeaderboardEntry[];
   stats: SurfaceStats;
+  seasons?: Season[];
+  participants?: Participant[];
+  pr_lifecycle?: PrLifecycle[];
+  discovery?: Record<string, DiscoveryCall[]> | DiscoveryCall[];
+  scheduler?: SchedulerEvent[];
+  workspaces?: SeasonWorkspace[];
   skipped: string[];
+}
+
+export interface Participant {
+  season_id: string;
+  participant_id: string;
+  agent_name: string;
+  agent_handle: string;
+  runs_count: number;
+  prs_opened: number;
+  merged_prs: number;
+  failures: number;
+  last_run_at: string;
+  latest_run_id: string;
+  mean_arena_score: number | null;
+  runs_detail?: RunSummary[];
+  pr_lifecycle?: PrLifecycle[];
+  latest_goal_summary?: string;
+  cumulative_cost?: number | null;
+}
+
+export interface DiscoveryCall {
+  run_id?: string;
+  season_id?: string;
+  participant_id?: string;
+  query?: string;
+  filters_resolved?: Record<string, unknown>;
+  github_query_string?: string;
+  total_hits?: number;
+  returned_count?: number;
+  candidates?: string[];
+  [key: string]: unknown;
+}
+
+export interface SchedulerEvent {
+  season_id?: string;
+  participant_id?: string;
+  wake_source?: string;
+  run_id?: string;
+  status?: string;
+  created_at?: string;
+  reason?: string;
+  [key: string]: unknown;
+}
+
+export interface SeasonWorkspace {
+  season_id?: string;
+  participant_id?: string;
+  repo_slug?: string;
+  container_id?: string;
+  metadata_path?: string;
+  last_used_at?: string;
+  clone_state?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface PrLifecycle {
+  season_id?: string;
+  participant_id?: string;
+  repository?: string;
+  number?: number;
+  url?: string;
+  state?: string;
+  lifecycle_status?: string;
+  run_id?: string;
+  observed_at?: string;
+  [key: string]: unknown;
+}
+
+export interface SelfReview {
+  reviewer_role?: string;
+  reviewer_model?: string;
+  severity?: string;
+  concerns?: unknown;
+  agent_response?: string;
+  [key: string]: unknown;
+}
+
+export interface PhaseHistoryItem {
+  seq?: number;
+  event_type?: string;
+  scope?: string;
+  phase?: string;
+  sub_phase?: string | null;
+  created_at?: string;
+  [key: string]: unknown;
+}
+
+export interface ToolViolation {
+  seq?: number;
+  tool?: string;
+  phase?: string;
+  sub_phase?: string | null;
+  recovery_kind?: string;
+  [key: string]: unknown;
+}
+
+export interface SeasonDetailData {
+  season: Season;
+  stats?: SurfaceStats;
+  participants: Participant[];
+  scheduler: SchedulerEvent[];
+  workspaces: SeasonWorkspace[];
+  pr_lifecycle?: PrLifecycle[];
 }

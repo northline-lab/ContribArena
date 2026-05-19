@@ -58,17 +58,43 @@ def index_surface_data(
     ]
     leaderboard = _leaderboard(public_runs)
     stats = _stats(public_runs)
+    seasons = _seasons(public_runs)
+    participants = _participants(public_runs)
+    discovery_calls = _discovery_calls(loaded_runs)
+    self_reviews = _self_reviews(loaded_runs)
+    phase_history = _phase_history(loaded_runs)
+    tool_violations = _tool_violations(loaded_runs)
+    pr_lifecycle = _pr_lifecycle(loaded_runs)
+    scheduler_events = _scheduler_events(loaded_runs)
+    season_workspaces = _season_workspaces(loaded_runs)
     generated_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
     files_written: list[Path] = [*artifact_files]
     files_written.append(_write_json(output_dir / "runs.json", {"runs": public_runs}))
     files_written.append(_write_json(output_dir / "leaderboard.json", {"leaderboard": leaderboard}))
     files_written.append(_write_json(output_dir / "stats.json", stats))
+    files_written.append(_write_json(output_dir / "seasons.json", {"seasons": seasons}))
+    files_written.append(_write_json(output_dir / "participants.json", {"participants": participants}))
+    files_written.append(_write_json(output_dir / "pr_lifecycle.json", {"pr_lifecycle": pr_lifecycle}))
+    files_written.append(_write_json(output_dir / "discovery_calls.json", {"discovery": discovery_calls}))
+    files_written.append(_write_json(output_dir / "scheduler_events.json", {"scheduler": scheduler_events}))
+    files_written.append(_write_json(output_dir / "season_workspaces.json", {"workspaces": season_workspaces}))
 
     run_output_dir = output_dir / "runs"
     run_output_dir.mkdir(exist_ok=True)
     for run in public_runs:
-        files_written.append(_write_json(run_output_dir / f"{run['run_id']}.json", run))
+        run_id = str(run["run_id"])
+        run_payload = dict(run)
+        run_payload["phase_history"] = phase_history.get(run_id, [])
+        run_payload["tool_violations"] = tool_violations.get(run_id, [])
+        run_payload["self_review"] = self_reviews.get(run_id, [])
+        files_written.append(_write_json(run_output_dir / f"{run_id}.json", run_payload))
+        files_written.append(
+            _write_json(run_output_dir / f"{run_id}.discovery.json", {"discovery": discovery_calls.get(run_id, [])})
+        )
+        files_written.append(
+            _write_json(run_output_dir / f"{run_id}.self_review.json", {"self_review": self_reviews.get(run_id, [])})
+        )
 
     files_written.append(
         _write_json(
@@ -78,7 +104,21 @@ def index_surface_data(
                 "generated_at": generated_at,
                 "stats": stats,
                 "leaderboard": leaderboard,
-                "runs": public_runs,
+                "runs": [
+                    {
+                        **run,
+                        "phase_history": phase_history.get(str(run.get("run_id") or ""), []),
+                        "tool_violations": tool_violations.get(str(run.get("run_id") or ""), []),
+                        "self_review": self_reviews.get(str(run.get("run_id") or ""), []),
+                    }
+                    for run in public_runs
+                ],
+                "seasons": seasons,
+                "participants": participants,
+                "pr_lifecycle": pr_lifecycle,
+                "discovery": discovery_calls,
+                "scheduler": scheduler_events,
+                "workspaces": season_workspaces,
                 "skipped": skipped,
             },
         )
@@ -356,6 +396,85 @@ def _leaderboard(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     )
 
 
+def _seasons(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seasons: dict[str, dict[str, Any]] = {}
+    participant_counts: dict[str, set[str]] = {}
+    for run in runs:
+        season = run.get("season", {}) if isinstance(run.get("season"), dict) else {}
+        agent = run.get("agent", {}) if isinstance(run.get("agent"), dict) else {}
+        season_id = str(season.get("id") or "")
+        if not season_id:
+            continue
+        payload = seasons.setdefault(
+            season_id,
+            {
+                "id": season_id,
+                "name": str(season.get("name") or season_id),
+                "phase": str(season.get("phase") or "unknown"),
+                "status": str(season.get("status") or "unknown"),
+                "runs_count": 0,
+                "participants_count": 0,
+                "wake_sources": [],
+            },
+        )
+        payload["runs_count"] = int(payload["runs_count"]) + 1
+        wake_source = str(run.get("wake_source") or "")
+        if wake_source and wake_source not in payload["wake_sources"]:
+            payload["wake_sources"].append(wake_source)
+        participant_id = str(agent.get("participant_id") or "")
+        if participant_id:
+            participant_counts.setdefault(season_id, set()).add(participant_id)
+    for season_id, payload in seasons.items():
+        payload["participants_count"] = len(participant_counts.get(season_id, set()))
+    return sorted(seasons.values(), key=lambda row: str(row.get("id") or ""))
+
+
+def _participants(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    participants: dict[tuple[str, str], dict[str, Any]] = {}
+    scores: dict[tuple[str, str], list[float]] = {}
+    for run in runs:
+        season = run.get("season", {}) if isinstance(run.get("season"), dict) else {}
+        agent = run.get("agent", {}) if isinstance(run.get("agent"), dict) else {}
+        season_id = str(season.get("id") or "")
+        participant_id = str(agent.get("participant_id") or "")
+        if not season_id or not participant_id:
+            continue
+        key = (season_id, participant_id)
+        payload = participants.setdefault(
+            key,
+            {
+                "season_id": season_id,
+                "participant_id": participant_id,
+                "agent_name": str(agent.get("name") or "builtin"),
+                "agent_handle": str(agent.get("handle") or participant_id),
+                "runs_count": 0,
+                "prs_opened": 0,
+                "merged_prs": 0,
+                "failures": 0,
+                "last_run_at": "",
+                "latest_run_id": "",
+                "mean_arena_score": None,
+            },
+        )
+        payload["runs_count"] = int(payload["runs_count"]) + 1
+        if str(run.get("run_status") or "") != "completed":
+            payload["failures"] = int(payload["failures"]) + 1
+        if _pr_opened(run):
+            payload["prs_opened"] = int(payload["prs_opened"]) + 1
+        if _merged(run):
+            payload["merged_prs"] = int(payload["merged_prs"]) + 1
+        started_at = str(run.get("started_at") or "")
+        if started_at >= str(payload.get("last_run_at") or ""):
+            payload["last_run_at"] = started_at
+            payload["latest_run_id"] = str(run.get("run_id") or "")
+        judgement = run.get("judgement", {}) if isinstance(run.get("judgement"), dict) else {}
+        scores.setdefault(key, [])
+        _append_float(scores[key], judgement.get("arena_score"))
+    for key, payload in participants.items():
+        payload["mean_arena_score"] = _mean(scores.get(key, []))
+    return sorted(participants.values(), key=lambda row: (str(row.get("season_id") or ""), str(row.get("participant_id") or "")))
+
+
 def _stats(runs: list[dict[str, Any]]) -> dict[str, Any]:
     prs_opened = sum(1 for run in runs if _pr_opened(run))
     judged_runs = sum(1 for run in runs if _judged(run))
@@ -411,6 +530,161 @@ def _merged(run: dict[str, Any]) -> bool:
 def _judged(run: dict[str, Any]) -> bool:
     judgement = run.get("judgement", {}) if isinstance(run.get("judgement"), dict) else {}
     return judgement.get("status") in {"judged", "partial_fallback", "fallback"}
+
+
+def _discovery_calls(loaded_runs: list[_LoadedRun]) -> dict[str, list[dict[str, Any]]]:
+    rows: dict[str, list[dict[str, Any]]] = {}
+    for loaded in loaded_runs:
+        run_id = str(loaded.payload.get("run_id") or "")
+        rows[run_id] = _read_jsonl(loaded.run_dir / "discovery_log.jsonl")
+    return rows
+
+
+def _self_reviews(loaded_runs: list[_LoadedRun]) -> dict[str, list[dict[str, Any]]]:
+    rows: dict[str, list[dict[str, Any]]] = {}
+    for loaded in loaded_runs:
+        run_id = str(loaded.payload.get("run_id") or "")
+        rows[run_id] = _read_jsonl(loaded.run_dir / "phase_review_maintainer_review.jsonl")
+    return rows
+
+
+def _phase_history(loaded_runs: list[_LoadedRun]) -> dict[str, list[dict[str, Any]]]:
+    rows: dict[str, list[dict[str, Any]]] = {}
+    for loaded in loaded_runs:
+        run_id = str(loaded.payload.get("run_id") or "")
+        rows[run_id] = _read_jsonl(loaded.run_dir / "phase_transition.jsonl")
+    return rows
+
+
+def _tool_violations(loaded_runs: list[_LoadedRun]) -> dict[str, list[dict[str, Any]]]:
+    rows: dict[str, list[dict[str, Any]]] = {}
+    for loaded in loaded_runs:
+        run_id = str(loaded.payload.get("run_id") or "")
+        rows[run_id] = _read_jsonl(loaded.run_dir / "tool_violation_log.jsonl")
+    return rows
+
+
+def _pr_lifecycle(loaded_runs: list[_LoadedRun]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for loaded in loaded_runs:
+        season = loaded.payload.get("season", {}) if isinstance(loaded.payload.get("season"), dict) else {}
+        agent = loaded.payload.get("agent", {}) if isinstance(loaded.payload.get("agent"), dict) else {}
+        season_id = str(season.get("id") or "")
+        participant_id = str(agent.get("participant_id") or "")
+        added_for_run = False
+        for payload in _read_jsonl(loaded.run_dir / "pr_review_log.jsonl"):
+            item = dict(payload)
+            item.setdefault("season_id", season_id)
+            item.setdefault("participant_id", participant_id)
+            rows.append(item)
+            added_for_run = True
+        if added_for_run:
+            continue
+        pr = loaded.payload.get("pull_request", {}) if isinstance(loaded.payload.get("pull_request"), dict) else {}
+        repository = loaded.payload.get("repository", {}) if isinstance(loaded.payload.get("repository"), dict) else {}
+        number = pr.get("number")
+        if repository.get("full_name") and number is not None:
+            rows.append(
+                {
+                    "season_id": season_id,
+                    "participant_id": participant_id,
+                    "repository": repository.get("full_name"),
+                    "number": number,
+                    "url": pr.get("url") or "",
+                    "state": pr.get("state") or "unknown",
+                    "run_id": loaded.payload.get("run_id") or "",
+                }
+            )
+    return rows
+
+
+def _scheduler_events(loaded_runs: list[_LoadedRun]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for loaded in loaded_runs:
+        season = loaded.payload.get("season", {}) if isinstance(loaded.payload.get("season"), dict) else {}
+        agent = loaded.payload.get("agent", {}) if isinstance(loaded.payload.get("agent"), dict) else {}
+        season_id = str(season.get("id") or "")
+        participant_id = str(agent.get("participant_id") or "")
+        if not season_id or not participant_id:
+            continue
+        for payload in _read_jsonl(loaded.run_dir / "operator_events.jsonl"):
+            if payload.get("phase") != "run" or payload.get("status") != "started":
+                continue
+            rows.append(
+                {
+                    "season_id": season_id,
+                    "participant_id": participant_id,
+                    "wake_source": loaded.payload.get("wake_source") or "",
+                    "run_id": loaded.payload.get("run_id") or "",
+                    "status": "started",
+                    "created_at": payload.get("ts") or loaded.payload.get("started_at") or "",
+                }
+            )
+    return rows
+
+
+def _season_workspaces(loaded_runs: list[_LoadedRun]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for loaded in loaded_runs:
+        config = _read_json_file(loaded.run_dir / "config.json")
+        workspace = config.get("workspace", {}) if isinstance(config.get("workspace"), dict) else {}
+        metadata_path = workspace.get("persistent_metadata_path")
+        if not metadata_path:
+            continue
+        season = loaded.payload.get("season", {}) if isinstance(loaded.payload.get("season"), dict) else {}
+        agent = loaded.payload.get("agent", {}) if isinstance(loaded.payload.get("agent"), dict) else {}
+        repository = loaded.payload.get("repository", {}) if isinstance(loaded.payload.get("repository"), dict) else {}
+        metadata = Path(str(metadata_path))
+        container_id = ""
+        if metadata.exists():
+            container_id = metadata.read_text(encoding="utf-8", errors="replace").strip()
+        rows.append(
+            {
+                "season_id": str(season.get("id") or ""),
+                "participant_id": str(agent.get("participant_id") or ""),
+                "repo_slug": str(repository.get("full_name") or ""),
+                "container_id": container_id,
+                "metadata_path": str(metadata),
+                "last_used_at": _read_text_file(metadata.parent / "last_used_at"),
+                "clone_state": _read_json_file(metadata.parent / "clone_state.json"),
+            }
+        )
+    return rows
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not line.strip():
+                continue
+            payload = json.loads(line)
+            if isinstance(payload, dict):
+                rows.append(payload)
+    except (OSError, json.JSONDecodeError):
+        return []
+    return rows
+
+
+def _read_json_file(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _read_text_file(path: Path) -> str:
+    if not path.exists():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
 
 
 def _append_float(values: list[float], value: object) -> None:

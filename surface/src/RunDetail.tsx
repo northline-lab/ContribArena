@@ -1,4 +1,6 @@
-import type { RunSummary } from "./types";
+import { useEffect, useState } from "react";
+import { loadRunEvidence, runEvidenceFromSurface } from "./data";
+import type { DiscoveryCall, PhaseHistoryItem, RunSummary, SelfReview, SurfaceData, ToolViolation } from "./types";
 
 const STAGE_LABELS: Record<string, string> = {
   agent: "Planning",
@@ -82,10 +84,54 @@ const DOT_STATUS_COLOR: Record<string, string> = {
   blocked: "var(--ink-faint)",
 };
 
-export function RunDetail({ run }: { run: RunSummary }) {
+const EMPTY_EVIDENCE = { discovery: [], selfReview: [], phaseHistory: [], toolViolations: [] };
+
+function shortJson(value: unknown): string {
+  if (value == null || value === "") return "";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function EmptyEvidence({ label }: { label: string }) {
+  return <div className="evidence-empty">{label}</div>;
+}
+
+export function RunDetail({ run, surface }: { run: RunSummary; surface?: SurfaceData }) {
   const pr = run.pull_request;
   const mo = run.maintainer_outcome;
   const publicArtifacts = run.artifacts.filter((a) => a.visibility === "public");
+  const [evidenceState, setEvidenceState] = useState<{
+    runId: string;
+    loading: boolean;
+    discovery: DiscoveryCall[];
+    selfReview: SelfReview[];
+    phaseHistory: PhaseHistoryItem[];
+    toolViolations: ToolViolation[];
+  }>(() => ({ runId: run.run_id, loading: false, ...(surface ? runEvidenceFromSurface(surface, run.run_id) : EMPTY_EVIDENCE) }));
+
+  useEffect(() => {
+    if (surface) return;
+    let cancelled = false;
+    loadRunEvidence(run.run_id)
+      .then((payload) => {
+        if (!cancelled) setEvidenceState({ runId: run.run_id, loading: false, ...payload });
+      })
+      .catch(() => {
+        if (!cancelled) setEvidenceState({ runId: run.run_id, loading: false, ...EMPTY_EVIDENCE });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [run.run_id, surface]);
+  const evidence = surface
+    ? { runId: run.run_id, loading: false, ...runEvidenceFromSurface(surface, run.run_id) }
+    : evidenceState.runId === run.run_id
+      ? evidenceState
+      : { runId: run.run_id, loading: true, ...EMPTY_EVIDENCE };
 
   return (
     <div className="run-detail-card">
@@ -125,11 +171,22 @@ export function RunDetail({ run }: { run: RunSummary }) {
       <div className="run-meta-row">
         <span>Agent <strong>{run.agent.name}</strong></span>
         <span className="sep">·</span>
+        <span>Participant <a href={`#/participants/${encodeURIComponent(run.agent.participant_id || run.agent.handle || run.agent.name)}`}>{run.agent.participant_id || "unranked"}</a></span>
+        <span className="sep">·</span>
+        <span>Wake <strong>{run.wake_source}</strong></span>
+        <span className="sep">·</span>
         <span>Repo <a href={run.repository.url} target="_blank" rel="noreferrer">{run.repository.full_name}</a></span>
         <span className="sep">·</span>
         <span>Started {fmt(run.started_at)}</span>
         <span className="sep">·</span>
         <span>Duration {dur(run.duration_seconds)}</span>
+      </div>
+
+      <div className="score-breakdown">
+        <span>Judge <strong>{run.judgement.judge_score ?? "not judged"}</strong></span>
+        <span>Adjustment <strong>{run.judgement.real_world_adjustment}</strong></span>
+        <span>Arena <strong>{run.judgement.arena_score ?? "not judged"}</strong></span>
+        <span className={`badge badge-${run.judgement.status}`}>{run.judgement.status}</span>
       </div>
 
       {/* Mini pipeline timeline with timestamps */}
@@ -178,6 +235,68 @@ export function RunDetail({ run }: { run: RunSummary }) {
           </div>
         </div>
       )}
+
+      <div className="evidence-grid">
+        <section className="evidence-panel">
+          <h3>Phase History</h3>
+          {evidence.phaseHistory.length ? (
+            <div className="evidence-list">
+              {evidence.phaseHistory.map((item, idx) => (
+                <div className="evidence-row" key={`${item.seq ?? idx}-${item.event_type ?? ""}`}>
+                  <strong>{item.phase || "unknown"}{item.sub_phase ? `/${item.sub_phase}` : ""}</strong>
+                  <span>{item.event_type || item.scope || "event"}</span>
+                  <em>{fmt(String(item.created_at || ""))}</em>
+                </div>
+              ))}
+            </div>
+          ) : <EmptyEvidence label="No phase history projected for this run." />}
+        </section>
+
+        <section className="evidence-panel">
+          <h3>Discovery Calls</h3>
+          {evidence.discovery.length ? (
+            <div className="evidence-list">
+              {evidence.discovery.map((item, idx) => (
+                <div className="evidence-row evidence-row-wide" key={idx}>
+                  <strong>{item.github_query_string || item.query || "query unavailable"}</strong>
+                  <span>{shortJson(item.filters_resolved)}</span>
+                  <em>{item.returned_count ?? 0} shown / {item.total_hits ?? "?"} hits</em>
+                </div>
+              ))}
+            </div>
+          ) : <EmptyEvidence label="No discovery_log.jsonl entries projected for this run." />}
+        </section>
+
+        <section className="evidence-panel">
+          <h3>Self Pre-Submission Review</h3>
+          {evidence.selfReview.length ? (
+            <div className="evidence-list">
+              {evidence.selfReview.map((item, idx) => (
+                <div className="evidence-row evidence-row-wide" key={idx}>
+                  <strong>Self pre-submission review by {item.reviewer_model || item.reviewer_role || "model"}</strong>
+                  <span>Severity: {item.severity || "unknown"}</span>
+                  <em>{shortJson(item.concerns || item.agent_response)}</em>
+                </div>
+              ))}
+            </div>
+          ) : <EmptyEvidence label="No self-review artifact projected for this run." />}
+        </section>
+
+        <section className="evidence-panel">
+          <h3>Tool Violations</h3>
+          {evidence.toolViolations.length ? (
+            <div className="evidence-list">
+              {evidence.toolViolations.map((item, idx) => (
+                <div className="evidence-row" key={`${item.seq ?? idx}-${item.tool ?? ""}`}>
+                  <strong>{item.tool || "tool"}</strong>
+                  <span>{item.phase || "unknown"}{item.sub_phase ? `/${item.sub_phase}` : ""}</span>
+                  <em>{item.recovery_kind || "violation"}</em>
+                </div>
+              ))}
+            </div>
+          ) : <EmptyEvidence label="No phase/tool violations recorded." />}
+        </section>
+      </div>
 
       {/* Log + Maintainer comment side by side */}
       <div className="run-bottom-row">

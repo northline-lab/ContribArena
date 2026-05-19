@@ -1,6 +1,26 @@
 import { useState, useEffect } from "react";
-import type { LeaderboardEntry, SurfaceData, RunSummary } from "./types";
-import { dataSourceLabel, loadSurfaceData } from "./data";
+import type {
+  LeaderboardEntry,
+  Participant,
+  PrLifecycle,
+  RunSummary,
+  SchedulerEvent,
+  Season,
+  SeasonDetailData,
+  SeasonWorkspace,
+  SurfaceData,
+} from "./types";
+import {
+  apiEnabled,
+  dataSourceLabel,
+  defaultSeasonId,
+  filterSurfaceBySeason,
+  loadParticipantDetail,
+  loadSeasonDetail,
+  loadSurfaceData,
+  participantsFromSurface,
+  seasonsFromSurface,
+} from "./data";
 import { Pipeline } from "./Pipeline";
 import { Leaderboard } from "./Leaderboard";
 import { FeaturedRun } from "./FeaturedRun";
@@ -43,6 +63,9 @@ type Route =
   | { page: "leaderboard" }
   | { page: "runs" }
   | { page: "agents" }
+  | { page: "participants" }
+  | { page: "participant"; participantId: string }
+  | { page: "season"; seasonId?: string }
   | { page: "methodology" }
   | { page: "run"; runId: string };
 
@@ -52,6 +75,10 @@ function parseRoute(hash: string): Route {
   if (path === "leaderboard") return { page: "leaderboard" };
   if (path === "runs") return { page: "runs" };
   if (path === "agents") return { page: "agents" };
+  if (path === "participants") return { page: "participants" };
+  if (path.startsWith("participants/")) return { page: "participant", participantId: decodeURIComponent(path.slice(13)) };
+  if (path === "season") return { page: "season" };
+  if (path.startsWith("seasons/")) return { page: "season", seasonId: decodeURIComponent(path.slice(8)) };
   if (path === "methodology") return { page: "methodology" };
   return { page: "home" };
 }
@@ -71,6 +98,48 @@ function compactDate(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function useSeasonSelection(data: SurfaceData | null): [string, (seasonId: string) => void] {
+  const [selectedSeason, setSelectedSeasonState] = useState(() => new URLSearchParams(window.location.search).get("season") || "");
+
+  const setSelectedSeason = (seasonId: string) => {
+    setSelectedSeasonState(seasonId);
+    const url = new URL(window.location.href);
+    if (seasonId && seasonId !== "all") url.searchParams.set("season", seasonId);
+    else url.searchParams.delete("season");
+    window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  };
+
+  return [selectedSeason || (data ? defaultSeasonId(data) : "all"), setSelectedSeason];
+}
+
+function score(v: number | null | undefined) {
+  if (v == null) return "–";
+  return v.toFixed(1);
+}
+
+function SeasonSelector({
+  seasons,
+  value,
+  onChange,
+}: {
+  seasons: Season[];
+  value: string;
+  onChange: (seasonId: string) => void;
+}) {
+  if (!seasons.length) return null;
+  return (
+    <label className="season-selector">
+      <span>Season</span>
+      <select value={value} onChange={(event) => onChange(event.target.value)}>
+        {seasons.map((season) => (
+          <option value={season.id} key={season.id}>{season.name || season.id}</option>
+        ))}
+        <option value="all">All runs</option>
+      </select>
+    </label>
+  );
 }
 
 function RunsPage({ runs }: { runs: RunSummary[] }) {
@@ -121,7 +190,7 @@ function RunsPage({ runs }: { runs: RunSummary[] }) {
           <a className="run-row" href={`#/runs/${encodeURIComponent(run.run_id)}`} key={run.run_id}>
             <span>
               <strong>{run.repository.full_name || "unknown repo"}</strong>
-              <em>{run.agent.handle || run.agent.name} · {run.contribution_class}</em>
+              <em>{run.agent.participant_id || run.agent.handle || run.agent.name} · {run.wake_source} · {run.contribution_class}</em>
             </span>
             <span>{run.judgement.arena_score ?? "–"}</span>
             <span>{run.quality_gate.status}</span>
@@ -169,6 +238,260 @@ function AgentsPage({ leaderboard }: { leaderboard: LeaderboardEntry[] }) {
   );
 }
 
+function ParticipantsPage({ participants }: { participants: Participant[] }) {
+  return (
+    <section className="subpage">
+      <div className="subpage-head">
+        <p className="eyebrow">Season participants</p>
+        <h2>Participants</h2>
+        <p>Each row is keyed by season-scoped participant identity, not a generic agent handle.</p>
+      </div>
+      <ParticipantTable participants={participants} />
+    </section>
+  );
+}
+
+function ParticipantTable({ participants }: { participants: Participant[] }) {
+  return (
+    <div className="participant-table-wrap">
+      <table className="info-table">
+        <thead>
+          <tr>
+            <th>Participant</th>
+            <th>Runs</th>
+            <th>PRs</th>
+            <th>Merged</th>
+            <th>Failures</th>
+            <th>Arena</th>
+            <th>Last run</th>
+          </tr>
+        </thead>
+        <tbody>
+          {participants.map((participant) => (
+            <tr key={participant.participant_id}>
+              <td>
+                <a href={`#/participants/${encodeURIComponent(participant.participant_id)}`}>
+                  {participant.participant_id}
+                </a>
+                <span className="table-subtext">{participant.agent_name} · {participant.agent_handle}</span>
+              </td>
+              <td>{participant.runs_count}</td>
+              <td>{participant.prs_opened}</td>
+              <td>{participant.merged_prs}</td>
+              <td>{participant.failures}</td>
+              <td>{score(participant.mean_arena_score)}</td>
+              <td>{compactDate(participant.last_run_at)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {!participants.length && <div className="empty-state">No season participants projected yet.</div>}
+    </div>
+  );
+}
+
+function ParticipantDetailPage({
+  surface,
+  participantId,
+  seasonId,
+}: {
+  surface: SurfaceData;
+  participantId: string;
+  seasonId: string;
+}) {
+  const [state, setState] = useState<{
+    key: string;
+    participant: Participant | null;
+    loading: boolean;
+  }>({ key: "", participant: null, loading: true });
+  const key = `${seasonId}:${participantId}`;
+
+  useEffect(() => {
+    let cancelled = false;
+    loadParticipantDetail(surface, participantId, seasonId)
+      .then((item) => {
+        if (!cancelled) setState({ key, participant: item, loading: false });
+      })
+      .catch(() => {
+        if (!cancelled) setState({ key, participant: null, loading: false });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [surface, participantId, seasonId, key]);
+
+  const loading = state.key !== key || state.loading;
+  const participant = loading ? null : state.participant;
+  if (loading) return <div className="loading-state">Loading participant...</div>;
+  if (participant === null) return <div className="empty-state">Participant not found: {participantId}</div>;
+
+  return (
+    <section className="subpage">
+      <div className="subpage-head">
+        <p className="eyebrow">Participant detail</p>
+        <h2>{participant.agent_name}</h2>
+        <p>{participant.participant_id}</p>
+      </div>
+      <MetricGrid
+        items={[
+          ["Runs", participant.runs_count],
+          ["PRs opened", participant.prs_opened],
+          ["Merged PRs", participant.merged_prs],
+          ["Failures", participant.failures],
+          ["Mean arena", score(participant.mean_arena_score)],
+          ["Cost", participant.cumulative_cost ?? "not projected"],
+        ]}
+      />
+      <EvidenceSection title="Runs">
+        {(participant.runs_detail ?? []).length ? (
+          <div className="run-list">
+            {(participant.runs_detail ?? []).map((run) => (
+              <a className="run-row" href={`#/runs/${encodeURIComponent(run.run_id)}`} key={run.run_id}>
+                <span>
+                  <strong>{run.repository.full_name}</strong>
+                  <em>{run.run_status} · {run.wake_source}</em>
+                </span>
+                <span>{run.judgement.arena_score ?? "–"}</span>
+                <span>{run.quality_gate.status}</span>
+                <span>{compactDate(run.started_at)}</span>
+              </a>
+            ))}
+          </div>
+        ) : <div className="empty-state">No run detail projected for this participant.</div>}
+      </EvidenceSection>
+      <EvidenceSection title="PR Lifecycle">
+        {(participant.pr_lifecycle ?? []).length ? (
+          <TimelineList items={(participant.pr_lifecycle ?? []).map((item) => ({
+            key: `${item.repository}-${item.number}`,
+            title: `${item.repository || "repo"}#${item.number ?? "?"}`,
+            detail: item.lifecycle_status || item.state || "unknown",
+            meta: item.observed_at || item.run_id || "",
+          }))} />
+        ) : <div className="empty-state">No PR lifecycle rows projected for this participant.</div>}
+      </EvidenceSection>
+      <EvidenceSection title="Goal Evolution">
+        <div className="empty-state">{participant.latest_goal_summary || "Latest goal summary and recent goal events are not projected yet."}</div>
+      </EvidenceSection>
+    </section>
+  );
+}
+
+function SeasonDetailPage({ surface, seasonId }: { surface: SurfaceData; seasonId: string }) {
+  const [state, setState] = useState<{
+    seasonId: string;
+    detail: SeasonDetailData | null;
+    loading: boolean;
+  }>({ seasonId: "", detail: null, loading: true });
+
+  useEffect(() => {
+    let cancelled = false;
+    loadSeasonDetail(surface, seasonId)
+      .then((item) => {
+        if (!cancelled) setState({ seasonId, detail: item, loading: false });
+      })
+      .catch(() => {
+        if (!cancelled) setState({ seasonId, detail: null, loading: false });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [surface, seasonId]);
+
+  const loading = state.seasonId !== seasonId || state.loading;
+  const detail = loading ? null : state.detail;
+  if (!detail) return <div className="loading-state">{loading ? "Loading season..." : "Season not found."}</div>;
+
+  return (
+    <section className="subpage">
+      <div className="subpage-head">
+        <p className="eyebrow">Season detail</p>
+        <h2>{detail.season.name || detail.season.id}</h2>
+        <p>{detail.season.id} · {detail.season.phase}</p>
+      </div>
+      <MetricGrid
+        items={[
+          ["Status", detail.season.status || "unknown"],
+          ["Runs", detail.season.runs_count ?? detail.stats?.runs ?? 0],
+          ["Participants", detail.season.participants_count ?? detail.participants.length],
+          ["PRs opened", detail.stats?.prs_opened ?? 0],
+          ["Merged PRs", detail.stats?.merged_prs ?? 0],
+          ["Judged runs", detail.stats?.judged_runs ?? 0],
+        ]}
+      />
+      <EvidenceSection title="Participants">
+        <ParticipantTable participants={detail.participants} />
+      </EvidenceSection>
+      <EvidenceSection title="Scheduler">
+        <TimelineList items={detail.scheduler.map((event: SchedulerEvent, idx) => ({
+          key: `${event.participant_id}-${idx}`,
+          title: event.participant_id || "participant",
+          detail: `${event.status || "event"} · ${event.wake_source || "wake"}`,
+          meta: event.created_at || event.run_id || event.reason || "",
+        }))} empty="No scheduler events projected for this season." />
+      </EvidenceSection>
+      <EvidenceSection title="Workspace Inventory">
+        <TimelineList items={detail.workspaces.map((workspace: SeasonWorkspace, idx) => ({
+          key: `${workspace.participant_id}-${workspace.repo_slug}-${idx}`,
+          title: `${workspace.participant_id || "participant"} · ${workspace.repo_slug || "repo"}`,
+          detail: workspace.container_id || "container not recorded",
+          meta: workspace.last_used_at || workspace.metadata_path || "",
+        }))} empty="No persistent workspace rows projected for this season." />
+      </EvidenceSection>
+      <EvidenceSection title="PR Lifecycle">
+        <TimelineList items={(detail.pr_lifecycle ?? []).map((item: PrLifecycle) => ({
+          key: `${item.participant_id}-${item.repository}-${item.number}`,
+          title: `${item.repository || "repo"}#${item.number ?? "?"}`,
+          detail: `${item.participant_id || "participant"} · ${item.lifecycle_status || item.state || "unknown"}`,
+          meta: item.run_id || item.observed_at || "",
+        }))} empty="No PR lifecycle rows projected for this season." />
+      </EvidenceSection>
+    </section>
+  );
+}
+
+function EvidenceSection({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <section className="evidence-block">
+      <h3>{title}</h3>
+      {children}
+    </section>
+  );
+}
+
+function MetricGrid({ items }: { items: Array<[string, React.ReactNode]> }) {
+  return (
+    <div className="metric-grid">
+      {items.map(([label, value]) => (
+        <div className="metric-tile" key={label}>
+          <span>{label}</span>
+          <strong>{value}</strong>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function TimelineList({
+  items,
+  empty = "No rows projected.",
+}: {
+  items: Array<{ key: string; title: string; detail: string; meta: string }>;
+  empty?: string;
+}) {
+  if (!items.length) return <div className="empty-state">{empty}</div>;
+  return (
+    <div className="timeline-list">
+      {items.map((item) => (
+        <div className="timeline-list-row" key={item.key}>
+          <strong>{item.title}</strong>
+          <span>{item.detail}</span>
+          <em>{item.meta}</em>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function MethodologyPage() {
   return (
     <section className="subpage methodology-page">
@@ -200,6 +523,7 @@ export default function App() {
   const [data, setData] = useState<SurfaceData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const route = useHashRoute();
+  const [selectedSeason, setSelectedSeason] = useSeasonSelection(data);
 
   useEffect(() => {
     loadSurfaceData()
@@ -207,7 +531,11 @@ export default function App() {
       .catch((e) => setError(String(e)));
   }, []);
 
-  const featuredRun = data ? pickFeaturedRun(data.runs) : null;
+  const seasons = data ? seasonsFromSurface(data) : [];
+  const scopedData = data ? filterSurfaceBySeason(data, selectedSeason) : null;
+  const participants = data ? participantsFromSurface(data, selectedSeason) : [];
+  const featuredRun = scopedData ? pickFeaturedRun(scopedData.runs) : null;
+  const effectiveSeasonId = route.page === "season" && route.seasonId ? route.seasonId : selectedSeason;
   const routeRun = data && route.page === "run"
     ? data.runs.find((run) => run.run_id === route.runId)
     : null;
@@ -221,13 +549,15 @@ export default function App() {
           <span>ContribArena</span>
         </a>
         <nav className="nav">
-          <a href="#" className={route.page === "home" ? "active" : ""}>How&nbsp;It&nbsp;Works</a>
+          <a href="#" className={route.page === "home" ? "active" : ""}>Arena</a>
           <a href="#/leaderboard" className={route.page === "leaderboard" ? "active" : ""}>Leaderboard</a>
           <a href="#/runs" className={route.page === "runs" || route.page === "run" ? "active" : ""}>Runs</a>
-          <a href="#/agents" className={route.page === "agents" ? "active" : ""}>Agents</a>
+          <a href="#/participants" className={route.page === "participants" || route.page === "participant" ? "active" : ""}>Participants</a>
+          <a href="#/season" className={route.page === "season" ? "active" : ""}>Season</a>
           <a href="#/methodology" className={route.page === "methodology" ? "active" : ""}>Methodology</a>
         </nav>
         <div className="header-actions">
+          <SeasonSelector seasons={seasons} value={selectedSeason} onChange={setSelectedSeason} />
           <a className="github-star" href="https://github.com" target="_blank" rel="noreferrer">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
@@ -235,7 +565,6 @@ export default function App() {
             Star on GitHub
             <span className="star-count">2.1k</span>
           </a>
-          <button className="btn-primary">Get Started <span aria-hidden="true">→</span></button>
         </div>
       </header>
 
@@ -283,16 +612,18 @@ export default function App() {
       )}
 
       {/* ── Main Content ── */}
-      {data && (
+      {data && scopedData && (
         <>
-          <div className="data-source">Data source: {dataSourceLabel()} · Generated {data.generated_at || "unknown"}</div>
+          <div className="data-source">
+            Data source: {dataSourceLabel()} · Generated {data.generated_at || "unknown"} · {apiEnabled() ? "live API" : "static bundle"}
+          </div>
           <div className={route.page === "home" ? "main-content" : "page-content"}>
             {route.page === "home" && (
               <>
                 <span className="annotation rankings-note">transparent<br />rankings</span>
                 <span className="annotation artifacts-note">real repo</span>
                 <div>
-                  <Leaderboard entries={data.leaderboard} generatedAt={data.generated_at} />
+                  <Leaderboard entries={scopedData.leaderboard} generatedAt={data.generated_at} />
                 </div>
 
                 <div className="detail-column">
@@ -300,12 +631,17 @@ export default function App() {
                 </div>
               </>
             )}
-            {route.page === "leaderboard" && <Leaderboard entries={data.leaderboard} generatedAt={data.generated_at} />}
-            {route.page === "runs" && <RunsPage runs={data.runs} />}
-            {route.page === "agents" && <AgentsPage leaderboard={data.leaderboard} />}
+            {route.page === "leaderboard" && <Leaderboard entries={scopedData.leaderboard} generatedAt={data.generated_at} />}
+            {route.page === "runs" && <RunsPage runs={scopedData.runs} />}
+            {route.page === "agents" && <AgentsPage leaderboard={scopedData.leaderboard} />}
+            {route.page === "participants" && <ParticipantsPage participants={participants} />}
+            {route.page === "participant" && (
+              <ParticipantDetailPage surface={data} participantId={route.participantId} seasonId={selectedSeason} />
+            )}
+            {route.page === "season" && <SeasonDetailPage surface={data} seasonId={effectiveSeasonId} />}
             {route.page === "methodology" && <MethodologyPage />}
             {route.page === "run" && (
-              routeRun ? <RunDetail run={routeRun} /> : <div className="empty-state">Run not found: {route.runId}</div>
+              routeRun ? <RunDetail run={routeRun} surface={data} /> : <div className="empty-state">Run not found: {route.runId}</div>
             )}
           </div>
         </>

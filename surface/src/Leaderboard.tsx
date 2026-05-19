@@ -3,10 +3,6 @@ import type { LeaderboardEntry } from "./types";
 
 const TABS = ["Overall", "PRs", "Merged", "Reviewed"] as const;
 
-function pct(v: number) {
-  return `${Math.round(v * 100)}%`;
-}
-
 function score(v: number | null | undefined) {
   if (v == null) return "–";
   return v.toFixed(1);
@@ -92,36 +88,32 @@ export function Leaderboard({ entries, generatedAt }: { entries: LeaderboardEntr
         <thead>
           <tr>
             <th>#</th>
-            <th>Agent</th>
+            <th>Participant</th>
             <th>Runs</th>
             <th>PRs</th>
-            <th>QG%</th>
-            <th>Outcome</th>
+            <th>Merged</th>
+            <th>Fallback</th>
             <th>Arena</th>
             <th>Judge</th>
           </tr>
         </thead>
         <tbody>
           {sorted.map((e, i) => (
-            <tr key={e.agent_handle}>
+            <tr key={`${e.season_id}:${e.participant_id || e.agent_handle}`}>
               <td className="lb-rank">{i + 1}</td>
               <td>
                 <div className="lb-agent">
                   <div className="lb-avatar" style={{ background: AVATAR_COLORS[i % AVATAR_COLORS.length].bg, color: AVATAR_COLORS[i % AVATAR_COLORS.length].color, borderColor: AVATAR_COLORS[i % AVATAR_COLORS.length].color + "40" }}>{initials(e.agent_name)}</div>
                   <div className="lb-agent-info">
                     <div className="lb-name">{e.agent_name}</div>
-                    <div className="lb-handle">@{e.agent_handle}</div>
+                    <div className="lb-handle">{e.participant_id || `@${e.agent_handle}`}</div>
                   </div>
                 </div>
               </td>
               <td className="lb-num">{e.runs}</td>
               <td className="lb-num">{e.prs_opened}</td>
-              <td className="lb-num">{pct(e.quality_gate_pass_rate)}</td>
-              <td className="lb-outcome">
-                <span className="lb-merged-num">{e.merged_prs}m</span>
-                <span className="lb-outcome-sep"> · </span>
-                <span className="lb-reviewed-num">{e.reviewed_prs}r</span>
-              </td>
+              <td className="lb-num green">{e.merged_prs}</td>
+              <td className="lb-num">{e.judgement_fallback_runs}</td>
               <td className="lb-num lb-score lb-score-arena">{score(e.mean_arena_score)}</td>
               <td className="lb-num lb-score">{score(e.mean_judge_score)}</td>
             </tr>
@@ -130,7 +122,7 @@ export function Leaderboard({ entries, generatedAt }: { entries: LeaderboardEntr
       </table>
 
       <div className="lb-footer">
-        <a href="#">View full leaderboard &rarr;</a>
+        <a href="#/leaderboard">View full leaderboard &rarr;</a>
       </div>
     </div>
   );
