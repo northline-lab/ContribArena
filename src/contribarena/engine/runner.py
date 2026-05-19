@@ -160,7 +160,17 @@ class Runner:
         budget = BudgetTracker(config.run.budget)
         capture = ArtifactCapture()
         memory = MemoryService(config.memory, run_id=run_id, repo_full_name=repo_slug)
-        goals = GoalService(config, run_id=run_id)
+        goals = GoalService(
+            config,
+            run_id=run_id,
+            evidence_ref_validator=lambda ref: _resolve_evidence_ref(
+                ref,
+                capture=capture,
+                artifacts=artifacts,
+                workspace=workspace,
+            ),
+        )
+        _seed_issue_goal(config, goals)
         memory.set_goal_context(goals.context)
         if memory.enabled:
             memory_context = memory.start_run_context(
@@ -238,6 +248,9 @@ class Runner:
                 operator=operator,
                 memory=memory,
                 goals=goals,
+                model_provider=TracingModelProvider(ContribArenaModelProvider(config.models), trace)
+                if config.run.model != "local-stub"
+                else None,
             )
             trace.write(RunState.AGENT_INITIALIZED, "agent.initialized", {"agent": "builtin"})
             operator.write(
@@ -479,6 +492,8 @@ class Runner:
         invocation_context = AgentInvocationContext()
         provider = TracingModelProvider(ContribArenaModelProvider(config.models), trace)
         while True:
+            invocation_context.current_phase = goals.context.current_phase
+            invocation_context.current_sub_phase = goals.context.current_sub_phase
             seq = loop_state.counters.invocations_used + 1
             continuation = seq > 1
             trace.write(
@@ -685,7 +700,7 @@ def _invocation_usage_payload(
 
 def _submitted_patch(capture: ArtifactCapture) -> str:
     for result in reversed(capture.aci_results):
-        if result.tool == "aci_submit_patch" and result.success:
+        if result.tool in {"aci_submit_patch_finalize", "aci_submit_patch"} and result.success:
             return result.output or ""
     return ""
 
@@ -700,6 +715,52 @@ def _write_capture_artifacts(artifacts: ArtifactWriter, capture: ArtifactCapture
     artifacts.write_json(
         "trajectory.json",
         [step.model_dump(mode="json") for step in capture.steps],
+    )
+    artifacts.write_text(
+        "tool_violation_log.jsonl",
+        "\n".join(json.dumps(row, ensure_ascii=True) for row in capture.tool_violations)
+        + ("\n" if capture.tool_violations else ""),
+        kind="jsonl",
+        required=False,
+    )
+    _write_jsonl_artifact(
+        artifacts,
+        "phase_scout_project_comparison.jsonl",
+        capture.phase_scout_project_rows,
+    )
+    _write_jsonl_artifact(
+        artifacts,
+        "phase_scout_opportunity_comparison.jsonl",
+        capture.phase_scout_opportunity_rows,
+    )
+    _write_jsonl_artifact(
+        artifacts,
+        "phase_scout_duplicate_check.jsonl",
+        capture.phase_scout_duplicate_rows,
+    )
+    _write_jsonl_artifact(
+        artifacts,
+        "phase_review_maintainer_review.jsonl",
+        capture.phase_review_maintainer_rows,
+    )
+    _write_jsonl_artifact(
+        artifacts,
+        "phase_review_response.jsonl",
+        capture.phase_review_response_rows,
+    )
+
+
+def _write_jsonl_artifact(
+    artifacts: ArtifactWriter,
+    name: str,
+    rows: list[dict[str, object]],
+) -> None:
+    artifacts.write_text(
+        name,
+        "\n".join(json.dumps(row, ensure_ascii=True) for row in rows)
+        + ("\n" if rows else ""),
+        kind="jsonl",
+        required=False,
     )
 
 
@@ -739,6 +800,100 @@ def _write_goal_artifacts(artifacts: ArtifactWriter, goals: GoalService) -> None
         kind="jsonl",
         required=False,
     )
+    artifacts.write_text(
+        "phase_transition.jsonl",
+        goals.phase_transition_text(),
+        kind="jsonl",
+        required=False,
+    )
+
+
+def _seed_issue_goal(config: RunConfig, goals: GoalService) -> None:
+    if config.issue is None or goals.state.short_term is not None:
+        return
+    title = config.issue.title.strip() or "configured issue"
+    goals.update(
+        objective=f"Resolve the configured issue: {title}",
+        status="active",
+        scope="contribution",
+        evidence="Harness seeded issue-solving contribution goal.",
+    )
+
+
+def _resolve_evidence_ref(
+    ref: str,
+    *,
+    capture: ArtifactCapture,
+    artifacts: ArtifactWriter,
+    workspace: DockerWorkspaceManager,
+) -> bool:
+    if ref.startswith("tool_call:"):
+        return _resolve_tool_call_ref(ref.removeprefix("tool_call:"), capture)
+    if ref.startswith("artifact:"):
+        return _resolve_artifact_ref(ref.removeprefix("artifact:"), capture, artifacts)
+    if ref.startswith("workspace:"):
+        path = ref.removeprefix("workspace:")
+        result = workspace.run(f"test -e {shlex.quote(path)}", timeout_seconds=5)
+        return result.exit_code == 0 and not result.timed_out
+    if ref.startswith("git:"):
+        sha = ref.removeprefix("git:")
+        result = workspace.run(
+            f"cd repo && git cat-file -e {shlex.quote(sha)}^{{commit}}",
+            timeout_seconds=5,
+        )
+        return result.exit_code == 0 and not result.timed_out
+    return False
+
+
+def _resolve_tool_call_ref(value: str, capture: ArtifactCapture) -> bool:
+    if value.isdigit():
+        index = int(value)
+        return 1 <= index <= len(capture.steps)
+    return any(
+        str(step.step) == value
+        or step.tool == value
+        or f"{step.tool}:{step.step}" == value
+        for step in capture.steps
+    )
+
+
+def _resolve_artifact_ref(
+    value: str,
+    capture: ArtifactCapture,
+    artifacts: ArtifactWriter,
+) -> bool:
+    if "#L" not in value:
+        return False
+    name, line_text = value.rsplit("#L", 1)
+    try:
+        line = int(line_text)
+    except ValueError:
+        return False
+    if line <= 0:
+        return False
+    rows = _phase_artifact_rows(name, capture)
+    if rows is not None:
+        return line <= len(rows)
+    path = artifacts.run_dir / name
+    if not path.exists() or not path.is_file():
+        return False
+    try:
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            return any(index == line for index, _ in enumerate(handle, start=1))
+    except OSError:
+        return False
+
+
+def _phase_artifact_rows(name: str, capture: ArtifactCapture) -> list[dict[str, object]] | None:
+    rows_by_name = {
+        "phase_scout_project_comparison.jsonl": capture.phase_scout_project_rows,
+        "phase_scout_opportunity_comparison.jsonl": capture.phase_scout_opportunity_rows,
+        "phase_scout_duplicate_check.jsonl": capture.phase_scout_duplicate_rows,
+        "phase_review_maintainer_review.jsonl": capture.phase_review_maintainer_rows,
+        "phase_review_response.jsonl": capture.phase_review_response_rows,
+        "tool_violation_log.jsonl": capture.tool_violations,
+    }
+    return rows_by_name.get(name)
 
 
 def _write_run_summary_artifact(

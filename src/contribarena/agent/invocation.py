@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from contribarena.models import AgentFinalResult
+from contribarena.models.goals import RunPhase, SubPhase
 
 
 InvocationStopReason = Literal[
@@ -32,3 +33,5 @@ class AgentInvocationContext:
     """State shared across SDK invocations within one ContribArena run."""
 
     sdk_session: Any | None = None
+    current_phase: RunPhase = "scout"
+    current_sub_phase: SubPhase = "project"

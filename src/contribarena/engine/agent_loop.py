@@ -78,6 +78,9 @@ class InvocationProgressDelta:
 @dataclass
 class LoopCounters:
     invocations_used: int = 0
+    scout_invocations_used: int = 0
+    work_invocations_used: int = 0
+    review_invocations_used: int = 0
     consecutive_no_progress: int = 0
     recovery_count: int = 0
 
@@ -119,6 +122,8 @@ LoopOutcome = Literal[
     "failed_to_recover_recovery_exhausted",
     "budget_exhausted",
     "goal_abandon_limit",
+    "repo_switch_limit",
+    "opportunity_switch_limit",
     "model_runtime",
 ]
 
@@ -146,6 +151,13 @@ def review_invocation(
     """Review one invocation and mutate AgentLoopState counters/notes."""
 
     state.counters.invocations_used += 1
+    phase = goals.context.current_phase
+    if phase == "scout":
+        state.counters.scout_invocations_used += 1
+    elif phase == "work":
+        state.counters.work_invocations_used += 1
+    elif phase == "review":
+        state.counters.review_invocations_used += 1
     if invocation.legacy_final_result is not None:
         state.legacy_final_result = invocation.legacy_final_result
     if invocation.content.strip():
@@ -201,6 +213,25 @@ def review_invocation(
                 harness_status="blocked",
             ),
         )
+    if terminal_recovery is not None and terminal_recovery.terminal_status in {
+        "repo_switch_limit",
+        "opportunity_switch_limit",
+    }:
+        return AgentLoopReview(
+            decision="terminal",
+            reason=terminal_recovery.terminal_status,
+            outcome=terminal_recovery.terminal_status,
+            progress=progress,
+            delta=delta,
+            terminal=TerminalState(
+                status="blocked",
+                reason=terminal_recovery.terminal_status,
+                layer="budget",
+                message=terminal_recovery.error or terminal_recovery.output,
+                agent_status="blocked",
+                harness_status="blocked",
+            ),
+        )
     if state.counters.recovery_count >= config.run.budget.max_recoveries:
         return AgentLoopReview(
             decision="terminal",
@@ -216,6 +247,47 @@ def review_invocation(
                 message="model action recovery budget exhausted",
                 agent_status="failed",
                 harness_status="failed",
+            ),
+        )
+
+    if state.counters.invocations_used >= config.run.budget.max_invocations:
+        return AgentLoopReview(
+            decision="terminal",
+            reason="budget_exhausted",
+            outcome="budget_exhausted",
+            progress=progress,
+            delta=delta,
+            terminal=TerminalState(
+                status="blocked",
+                reason="budget_exhausted",
+                layer="budget",
+                message=f"global max_invocations exceeded: {config.run.budget.max_invocations}",
+                agent_status="blocked",
+                harness_status="blocked",
+            ),
+        )
+
+    phase_budget = _phase_invocation_budget(config, goals.context.current_phase)
+    phase_used = _phase_invocations_used(state, goals.context.current_phase)
+    if phase_used >= phase_budget and goals.context.current_phase != "scout":
+        reason = (
+            "scout_budget_exhausted"
+            if goals.context.current_phase == "scout"
+            else "budget_exhausted"
+        )
+        return AgentLoopReview(
+            decision="terminal",
+            reason=reason,
+            outcome="budget_exhausted",
+            progress=progress,
+            delta=delta,
+            terminal=TerminalState(
+                status="blocked",
+                reason=reason,
+                layer="budget",
+                message=f"{goals.context.current_phase} max_invocations exceeded: {phase_budget}",
+                agent_status="blocked",
+                harness_status="blocked",
             ),
         )
 
@@ -238,6 +310,42 @@ def review_invocation(
                 f"No observable progress in the previous invocation. "
                 f"{remaining} more invocations remain."
             )
+
+    if phase_used >= phase_budget and goals.context.current_phase == "scout":
+        goals.record_budget_event(
+            event_type="scout_budget_exhausted",
+            phase="scout",
+            sub_phase=goals.context.current_sub_phase,
+            evidence=f"max_scout_invocations reached: {phase_budget}",
+        )
+        state.recovery_warning = (
+            "Scout invocation budget is exhausted. Select an opportunity with "
+            "aci_goal_update(scope='contribution', status='active', evidence_refs_json='[...]') "
+            "or abandon the current repo/opportunity with evidence."
+        )
+        if progress.goal_status == "active":
+            return AgentLoopReview(
+                decision="continue",
+                reason="scout_budget_exhausted_select_or_abandon",
+                outcome="scout_budget_exhausted",
+                progress=progress,
+                delta=delta,
+            )
+        return AgentLoopReview(
+            decision="terminal",
+            reason="scout_budget_exhausted",
+            outcome="budget_exhausted",
+            progress=progress,
+            delta=delta,
+            terminal=TerminalState(
+                status="blocked",
+                reason="scout_budget_exhausted",
+                layer="budget",
+                message=f"scout max_invocations exceeded: {phase_budget}",
+                agent_status="blocked",
+                harness_status="blocked",
+            ),
+        )
 
     if _has_successful_submit(capture):
         return AgentLoopReview(
@@ -262,22 +370,6 @@ def review_invocation(
                 message="consecutive invocations made no observable progress",
                 agent_status="failed",
                 harness_status="failed",
-            ),
-        )
-    if state.counters.invocations_used >= config.run.budget.max_invocations:
-        return AgentLoopReview(
-            decision="terminal",
-            reason="budget_exhausted",
-            outcome="budget_exhausted",
-            progress=progress,
-            delta=delta,
-            terminal=TerminalState(
-                status="blocked",
-                reason="budget_exhausted",
-                layer="budget",
-                message=f"max_invocations exceeded: {config.run.budget.max_invocations}",
-                agent_status="blocked",
-                harness_status="blocked",
             ),
         )
     if progress.goal_status == "active" or progress.lifecycle_gaps:
@@ -334,6 +426,26 @@ def invocation_delta(
         memory_events=memory_events,
         recoveries=sum(1 for item in aci_slice if item.tool == "aci_recover_invalid_action"),
     )
+
+
+def _phase_invocation_budget(config: RunConfig, phase: str) -> int:
+    if phase == "scout":
+        return config.run.budget.scout.max_scout_invocations
+    if phase == "work":
+        return config.run.budget.work.max_invocations
+    if phase == "review":
+        return config.run.budget.review.max_invocations
+    return config.run.budget.max_invocations
+
+
+def _phase_invocations_used(state: AgentLoopState, phase: str) -> int:
+    if phase == "scout":
+        return state.counters.scout_invocations_used
+    if phase == "work":
+        return state.counters.work_invocations_used
+    if phase == "review":
+        return state.counters.review_invocations_used
+    return state.counters.invocations_used
 
 
 def agent_loop_progress(capture: ArtifactCapture, goals: GoalService) -> AgentLoopProgress:
@@ -543,7 +655,20 @@ def _terminal_recovery(capture: ArtifactCapture):
 
 
 def _has_successful_submit(capture: ArtifactCapture) -> bool:
+    if any(item.tool == "aci_submit_patch_finalize" and item.success for item in capture.aci_results):
+        return True
+    if _draft_submit_requires_review(capture):
+        return False
     return any(item.tool == "aci_submit_patch" and item.success for item in capture.aci_results)
+
+
+def _draft_submit_requires_review(capture: ArtifactCapture) -> bool:
+    return any(
+        item.tool == "aci_goal_update"
+        and item.success
+        and '"scope":"contribution"' in (item.output or "")
+        for item in capture.aci_results
+    )
 
 
 def _result_candidate(config: RunConfig, legacy: AgentFinalResult | None) -> RepoCandidate:

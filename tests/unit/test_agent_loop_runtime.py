@@ -376,6 +376,84 @@ class AgentLoopRuntimeTest(unittest.TestCase):
             self.assertEqual(0, state.counters.consecutive_no_progress)
             self.assertEqual(1, state.counters.invocations_used)
 
+    def test_scout_invocation_budget_records_scout_budget_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(Path(tmp), max_invocations=5)
+            config.run.budget.scout.max_scout_invocations = 1
+            capture = ArtifactCapture()
+            goals = GoalService(config, run_id="run")
+            goals.update(objective="Find a repository.", status="active", scope="repo")
+            state = AgentLoopState()
+            before = capture_cursor(capture, goals, None)
+            capture.record_command(
+                CommandResult(
+                    command="git clone https://github.com/example/repo repo",
+                    exit_code=0,
+                    duration_seconds=1.0,
+                )
+            )
+
+            review = review_invocation(
+                config=config,
+                capture=capture,
+                goals=goals,
+                memory=None,
+                before=before,
+                state=state,
+                invocation=AgentInvocationResult(content="Repository cloned."),
+            )
+
+            self.assertEqual("continue", review.decision)
+            self.assertEqual("scout_budget_exhausted_select_or_abandon", review.reason)
+            self.assertIsNone(review.terminal)
+            self.assertIn("scout_budget_exhausted", goals.events_text())
+
+    def test_phase_invocation_budgets_are_independent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(Path(tmp), max_invocations=5)
+            config.run.budget.scout.max_scout_invocations = 2
+            config.run.budget.work.max_invocations = 1
+            capture = ArtifactCapture()
+            goals = GoalService(config, run_id="run")
+            state = AgentLoopState()
+            goals.update(objective="Find a repository.", status="active", scope="repo")
+            capture.record_command(
+                CommandResult(
+                    command="git clone https://github.com/example/repo repo",
+                    exit_code=0,
+                    duration_seconds=1.0,
+                )
+            )
+            scout_review = review_invocation(
+                config=config,
+                capture=capture,
+                goals=goals,
+                memory=None,
+                before=capture_cursor(capture, goals, None),
+                state=state,
+                invocation=AgentInvocationResult(content="Scout progress."),
+            )
+            goals.update(objective="Implement the fix.", status="active", scope="contribution")
+            before_work = capture_cursor(capture, goals, None)
+            capture.record_aci_result(AciResult(tool="aci_view", success=True, output="old"))
+
+            work_review = review_invocation(
+                config=config,
+                capture=capture,
+                goals=goals,
+                memory=None,
+                before=before_work,
+                state=state,
+                invocation=AgentInvocationResult(content="Work progress."),
+            )
+
+            self.assertEqual("continue", scout_review.decision)
+            self.assertEqual(1, state.counters.scout_invocations_used)
+            self.assertEqual(1, state.counters.work_invocations_used)
+            self.assertEqual("terminal", work_review.decision)
+            self.assertEqual("budget_exhausted", work_review.reason)
+            self.assertEqual("work max_invocations exceeded: 1", work_review.terminal.message)
+
     def test_continuation_state_redacts_notes_and_tool_summaries(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = _config(Path(tmp))

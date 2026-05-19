@@ -18,6 +18,13 @@ from contribarena.tools.github_pr import GitHubPullRequestClient
 from contribarena.tools.repo_eligibility import repo_check_eligibility
 from contribarena.tools.repo_issues import repo_get_issues
 from contribarena.tools.repo_metadata import repo_get_metadata
+from contribarena.tools.repo_readme import repo_get_readme
+from contribarena.tools.repo_prs import (
+    repo_get_issue_linkage,
+    repo_get_open_prs,
+    repo_get_recent_merged_prs,
+    repo_search_prs_by_title,
+)
 from contribarena.tools.repo_search import repo_search
 
 
@@ -141,6 +148,137 @@ class GithubToolsTest(unittest.TestCase):
 
         self.assertEqual(7, issues[0].number)
         self.assertEqual(["good first issue"], issues[0].labels)
+
+    def test_repo_issues_rest_include_prs_is_opt_in(self) -> None:
+        class FakeClient:
+            def gh_json(self, args: list[str]) -> GitHubResponse:
+                return GitHubResponse(ok=False, source="gh", error="missing gh")
+
+            def rest_json(self, *args: object, **kwargs: object) -> GitHubResponse:
+                return GitHubResponse(
+                    ok=True,
+                    source="httpx",
+                    data=[
+                        {"number": 7, "title": "Issue", "html_url": "https://example/7"},
+                        {
+                            "number": 8,
+                            "title": "PR",
+                            "html_url": "https://example/8",
+                            "pull_request": {},
+                        },
+                    ],
+                )
+
+        with patch("contribarena.tools.repo_issues.GitHubClient", FakeClient):
+            issues_only = repo_get_issues(_candidate())
+            with_prs = repo_get_issues(_candidate(), include_prs=True)
+
+        self.assertEqual([7], [item.number for item in issues_only])
+        self.assertEqual([7, 8], [item.number for item in with_prs])
+
+    def test_repo_readme_uses_rest_text(self) -> None:
+        class FakeClient:
+            def rest_text(self, path: str) -> GitHubResponse:
+                self.path = path
+                return GitHubResponse(ok=True, source="httpx", data="# Project\n")
+
+        with patch("contribarena.tools.repo_readme.GitHubClient", FakeClient):
+            readme = repo_get_readme(_candidate())
+
+        self.assertTrue(readme.success)
+        self.assertEqual("owner/project", readme.full_name)
+        self.assertIn("# Project", readme.content)
+
+    def test_repo_pr_tools_normalize_pr_payloads(self) -> None:
+        class FakeClient:
+            def gh_json(self, args: list[str]) -> GitHubResponse:
+                state = args[args.index("--state") + 1]
+                return GitHubResponse(
+                    ok=True,
+                    source="gh",
+                    data=[
+                        {
+                            "number": 11,
+                            "title": f"{state} fix parser edge case",
+                            "url": "https://github.com/owner/project/pull/11",
+                            "state": state,
+                            "author": {"login": "contrib"},
+                            "body": "Fixes #7",
+                            "labels": [{"name": "bug"}],
+                            "createdAt": "2026-05-01T00:00:00Z",
+                            "updatedAt": "2026-05-02T00:00:00Z",
+                            "mergedAt": "2026-05-03T00:00:00Z" if state == "merged" else None,
+                            "isDraft": False,
+                            "closingIssuesReferences": [{"number": 7}],
+                        }
+                    ],
+                )
+
+            def rest_json(self, *args: object, **kwargs: object) -> GitHubResponse:
+                raise AssertionError("REST fallback should not be used")
+
+        with patch("contribarena.tools.repo_prs.GitHubClient", FakeClient):
+            open_prs = repo_get_open_prs(_candidate())
+            merged_prs = repo_get_recent_merged_prs(_candidate())
+            searched = repo_search_prs_by_title(_candidate(), "parser edge")
+
+        self.assertEqual(11, open_prs[0].number)
+        self.assertEqual([7], open_prs[0].linked_issues)
+        self.assertEqual("2026-05-03T00:00:00Z", merged_prs[0].merged_at)
+        self.assertEqual(2, len(searched))
+
+    def test_repo_issue_linkage_uses_issue_and_pr_signals(self) -> None:
+        class FakeClient:
+            def gh_json(self, args: list[str]) -> GitHubResponse:
+                return GitHubResponse(
+                    ok=True,
+                    source="gh",
+                    data=[
+                        {
+                            "number": 12,
+                            "title": "Fix issue",
+                            "url": "https://github.com/owner/project/pull/12",
+                            "state": "open",
+                            "author": {"login": "contrib"},
+                            "body": "Fixes #7",
+                            "labels": [],
+                            "createdAt": "2026-05-01T00:00:00Z",
+                            "updatedAt": "2026-05-02T00:00:00Z",
+                            "mergedAt": None,
+                            "isDraft": False,
+                            "closingIssuesReferences": [{"number": 7}],
+                        }
+                    ],
+                )
+
+            def rest_json(
+                self,
+                method: str,
+                path: str,
+                params: dict | None = None,
+                json_body: dict | None = None,
+                token_env: str | None = None,
+            ) -> GitHubResponse:
+                if path.endswith("/issues/7"):
+                    return GitHubResponse(
+                        ok=True,
+                        source="httpx",
+                        data={"assignees": [{"login": "maintainer"}]},
+                    )
+                if path.endswith("/issues/7/comments"):
+                    return GitHubResponse(
+                        ok=True,
+                        source="httpx",
+                        data=[{"body": "Please avoid duplicating PR #12"}],
+                    )
+                raise AssertionError(path)
+
+        with patch("contribarena.tools.repo_prs.GitHubClient", FakeClient):
+            linkage = repo_get_issue_linkage(_candidate(), 7)
+
+        self.assertEqual(["maintainer"], linkage.assignees)
+        self.assertEqual(12, linkage.linked_prs[0].number)
+        self.assertIn("duplicating", linkage.recent_comments[0])
 
     def test_repo_eligibility_runs_rule_checks(self) -> None:
         class FakeClient:

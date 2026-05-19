@@ -61,6 +61,11 @@ class FakeM02Agent:
         model_provider: object = None,
         **kwargs: object,
     ) -> AgentFinalResult:
+        tools.aci_goal_update(  # type: ignore[attr-defined]
+            "Submit a verified low-risk patch.",
+            "active",
+            scope="contribution",
+        )
         command = tools.workspace_run(  # type: ignore[attr-defined]
             "git clone https://github.com/example/repo.git repo && cd repo && git status --short"
         )
@@ -73,6 +78,7 @@ class FakeM02Agent:
         tools.aci_suggest_verification("repo")  # type: ignore[attr-defined]
         tools.aci_verify("python3 -m compileall .", "repo")  # type: ignore[attr-defined]
         tools.aci_submit_patch()  # type: ignore[attr-defined]
+        tools.aci_submit_patch_finalize()  # type: ignore[attr-defined]
 
         return AgentFinalResult(
             status="completed",
@@ -176,10 +182,12 @@ class FakeMemoryAgent:
         tools.aci_replace("repo/app.py", "old", "new")  # type: ignore[attr-defined]
         tools.aci_verify("python3 -m compileall .", "repo")  # type: ignore[attr-defined]
         tools.aci_submit_patch()  # type: ignore[attr-defined]
+        tools.aci_submit_patch_finalize()  # type: ignore[attr-defined]
         tools.aci_goal_update(  # type: ignore[attr-defined]
             "",
             "complete",
             "Submitted patch and compileall verification succeeded.",
+            evidence_refs_json='["tool_call:aci_submit_patch_finalize"]',
         )
         return AgentFinalResult(
             status="completed",
@@ -273,10 +281,12 @@ class FakeGoalCompletingAgent:
         tools.aci_replace("repo/app.py", "old", "new")  # type: ignore[attr-defined]
         tools.aci_verify("python3 -m compileall .", "repo")  # type: ignore[attr-defined]
         tools.aci_submit_patch()  # type: ignore[attr-defined]
+        tools.aci_submit_patch_finalize()  # type: ignore[attr-defined]
         goal = tools.aci_goal_update(  # type: ignore[attr-defined]
             "",
             "complete",
             "Submitted patch and compileall verification succeeded.",
+            evidence_refs_json='["tool_call:aci_submit_patch_finalize"]',
         )
         self.goal_update = json.loads(goal.output) if goal.success else {}
         return AgentFinalResult(
@@ -323,6 +333,11 @@ class FakeSessionContinuationAgent:
         invocation_context = kwargs.get("invocation_context")
         self.context_ids.append(id(invocation_context))
         if len(self.context_ids) == 1:
+            tools.aci_goal_update(  # type: ignore[attr-defined]
+                "Submit a verified patch.",
+                "active",
+                scope="contribution",
+            )
             tools.workspace_run(  # type: ignore[attr-defined]
                 "git clone https://github.com/example/repo.git repo && cd repo && git status --short"
             )
@@ -332,15 +347,18 @@ class FakeSessionContinuationAgent:
                 "Submit a verified patch.",
                 "active",
                 "Edited repo/app.py; verification still pending.",
+                scope="contribution",
             )
             return AgentInvocationResult(content="Edited; continue for verification.")
 
         tools.aci_verify("python3 -m compileall .", "repo")  # type: ignore[attr-defined]
         tools.aci_submit_patch()  # type: ignore[attr-defined]
+        tools.aci_submit_patch_finalize()  # type: ignore[attr-defined]
         tools.aci_goal_update(  # type: ignore[attr-defined]
             "",
             "complete",
             "Verified and submitted patch.",
+            evidence_refs_json='["tool_call:aci_submit_patch_finalize"]',
         )
         return AgentInvocationResult(content="Verified and submitted.")
 
@@ -466,6 +484,97 @@ class FakeIssueAgent:
                 else ""
             ),
         )
+
+
+class FakePhasedExternalAgent(FakeIssueAgent):
+    def run(
+        self,
+        config: RunConfig,
+        tools: object,
+        prompt: str,
+        model_provider: object = None,
+        **kwargs: object,
+    ) -> AgentFinalResult:
+        tools.workspace_run(  # type: ignore[attr-defined]
+            "git clone https://github.com/example/repo.git repo && cd repo && git status --short"
+        )
+        tools.aci_view("repo/README.md")  # type: ignore[attr-defined]
+        tools.aci_goal_update(  # type: ignore[attr-defined]
+            "Find a low-risk opportunity in example/repo.",
+            "active",
+            "Selected example/repo after configured external discovery audit.",
+            scope="opportunity",
+            evidence_refs_json='["tool_call:aci_view"]',
+            next_objective="Find a non-duplicate low-risk issue.",
+        )
+        tools.repo_get_open_prs(  # type: ignore[attr-defined]
+            RepoCandidate(owner="example", repo="repo", url="https://github.com/example/repo"),
+            10,
+        )
+        tools.aci_goal_update(  # type: ignore[attr-defined]
+            "Implement the selected low-risk marker fix.",
+            "active",
+            "Duplicate check found no matching open PR.",
+            scope="contribution",
+            evidence_refs_json='["tool_call:repo.open_prs"]',
+            next_objective="Implement and verify the marker fix.",
+        )
+        return super().run(config, tools, prompt, model_provider, **kwargs)
+
+
+class FakeM010Agent:
+    def run(
+        self,
+        config: RunConfig,
+        tools: object,
+        prompt: str,
+        model_provider: object = None,
+        **kwargs: object,
+    ) -> AgentInvocationResult:
+        candidate = RepoCandidate(owner="example", repo="repo", url="https://github.com/example/repo")
+        tools.repo_search()  # type: ignore[attr-defined]
+        tools.repo_check_eligibility(candidate)  # type: ignore[attr-defined]
+        tools.repo_get_metadata(candidate)  # type: ignore[attr-defined]
+        tools.workspace_run(  # type: ignore[attr-defined]
+            "git clone https://github.com/example/repo.git repo && cd repo && git status --short"
+        )
+        tools.aci_view("repo/README.md")  # type: ignore[attr-defined]
+        tools.aci_goal_update(  # type: ignore[attr-defined]
+            "Find a low-risk opportunity in example/repo.",
+            "active",
+            "Project audit selected example/repo.",
+            scope="opportunity",
+            evidence_refs_json='["tool_call:repo.metadata"]',
+            next_objective="Find a non-duplicate low-risk opportunity.",
+        )
+        tools.repo_get_issues(candidate)  # type: ignore[attr-defined]
+        tools.repo_get_open_prs(candidate, 10)  # type: ignore[attr-defined]
+        tools.repo_search_prs_by_title(candidate, "marker", 10)  # type: ignore[attr-defined]
+        tools.aci_goal_update(  # type: ignore[attr-defined]
+            "Replace the old marker with the new marker.",
+            "active",
+            "Issue and duplicate checks found no conflicting PR.",
+            scope="contribution",
+            evidence_refs_json='["tool_call:repo.open_prs"]',
+            next_objective="Edit, verify, review, and finalize the patch.",
+        )
+        tools.aci_view("repo/app.py")  # type: ignore[attr-defined]
+        tools.aci_replace("repo/app.py", "return 'old'", "return 'new'")  # type: ignore[attr-defined]
+        tools.aci_verify("python3 -m compileall .", "repo")  # type: ignore[attr-defined]
+        tools.aci_submit_patch()  # type: ignore[attr-defined]
+        tools.aci_dispute_review(  # type: ignore[attr-defined]
+            "concern-1",
+            "The draft is intentionally minimal and verified by compileall evidence.",
+            '["tool_call:aci_verify"]',
+        )
+        tools.aci_submit_patch_finalize()  # type: ignore[attr-defined]
+        tools.aci_goal_update(  # type: ignore[attr-defined]
+            "",
+            "complete",
+            "Review completed and patch finalized.",
+            evidence_refs_json='["tool_call:aci_submit_patch_finalize"]',
+        )
+        return AgentInvocationResult(content="M0.10 path complete.")
 
 
 class FakeActionRecoveryAgent:
@@ -1379,7 +1488,7 @@ class RunnerM02Test(unittest.TestCase):
                     ),
                 ):
                     result = _run_with_fake_docker(
-                        FakeIssueAgent(repo_default_branch="develop"),
+                        FakePhasedExternalAgent(repo_default_branch="develop"),
                         config,
                         tmp_path,
                         pr_client=pr_client,
@@ -1445,7 +1554,7 @@ class RunnerM02Test(unittest.TestCase):
                     ),
                 ):
                     result = _run_with_fake_docker(
-                        FakeIssueAgent(repo_default_branch="main"),
+                        FakePhasedExternalAgent(repo_default_branch="main"),
                         config,
                         tmp_path,
                         pr_client=pr_client,
@@ -1487,7 +1596,7 @@ class RunnerM02Test(unittest.TestCase):
                     ),
                 ):
                     result = _run_with_fake_docker(
-                        FakeIssueAgent(
+                        FakePhasedExternalAgent(
                             repo_default_branch="main",
                             edit_path="repo/docs/guide.md",
                         ),
@@ -1538,7 +1647,7 @@ class RunnerM02Test(unittest.TestCase):
                     ),
                 ):
                     result = _run_with_fake_docker(
-                        FakeIssueAgent(
+                        FakePhasedExternalAgent(
                             repo_default_branch="main",
                             edit_path="repo/tests/fixtures/sample.txt",
                         ),
@@ -1566,7 +1675,7 @@ class RunnerM02Test(unittest.TestCase):
                     side_effect=RuntimeError("network unavailable"),
                 ):
                     result = _run_with_fake_docker(
-                        FakeIssueAgent(repo_default_branch="main"),
+                        FakePhasedExternalAgent(repo_default_branch="main"),
                         config,
                         tmp_path,
                         pr_client=pr_client,
@@ -1789,9 +1898,9 @@ class RunnerM02Test(unittest.TestCase):
             dimension_packets = json.loads(
                 (result.run_dir / "judge_dimension_packets.json").read_text()
             )
-            self.assertIn("solution_correctness", dimension_packets)
-            self.assertIn("patch_excerpt", dimension_packets["solution_correctness"])
-            self.assertNotIn("model", dimension_packets["solution_correctness"])
+            self.assertIn("execution_correctness", dimension_packets)
+            self.assertIn("patch_excerpt", dimension_packets["execution_correctness"])
+            self.assertNotIn("model", dimension_packets["execution_correctness"])
 
             judgement = json.loads((result.run_dir / "judgement.json").read_text())
             self.assertEqual("fallback", judgement["status"])
@@ -1799,7 +1908,7 @@ class RunnerM02Test(unittest.TestCase):
             self.assertEqual("judge_dimension_packets.json", judgement["judge_dimension_packets"])
             self.assertEqual("mean", judgement["judge_panel"]["aggregation"])
             self.assertEqual(["judge_a", "judge_b"], [j["judge_id"] for j in judgement["judges"]])
-            self.assertEqual(6, len(judgement["aggregate_rubric"]))
+            self.assertEqual(8, len(judgement["aggregate_rubric"]))
             self.assertAlmostEqual(
                 1.0,
                 sum(score["weight"] for score in judgement["aggregate_rubric"]),
@@ -1818,7 +1927,7 @@ class RunnerM02Test(unittest.TestCase):
                 next(
                     score["weight"]
                     for score in judgement["aggregate_rubric"]
-                    if score["dimension"] == "solution_correctness"
+                    if score["dimension"] == "execution_correctness"
                 ),
             )
             self.assertGreater(judgement["judge_score"], 0)
@@ -2049,6 +2158,43 @@ class RunnerM02Test(unittest.TestCase):
             ]
             self.assertEqual("continue", reviews[0]["decision"])
             self.assertEqual("patch_submitted", reviews[1]["outcome"])
+
+    def test_m010_shadow_path_emits_phase_review_and_judgement_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _config(tmp_path / "runs")
+
+            result = _run_with_fake_docker(FakeM010Agent(), config, tmp_path)
+
+            self.assertEqual("completed", result.status)
+            phase_events = [
+                json.loads(line)
+                for line in (result.run_dir / "phase_transition.jsonl").read_text().splitlines()
+            ]
+            phases = {(event["phase"], event["sub_phase"]) for event in phase_events}
+            self.assertIn(("scout", "opportunity"), phases)
+            self.assertIn(("work", None), phases)
+            self.assertIn(("review", None), phases)
+            self.assertIn("draft_submitted", {event["event_type"] for event in phase_events})
+            project_rows = (result.run_dir / "phase_scout_project_comparison.jsonl").read_text()
+            opportunity_rows = (
+                result.run_dir / "phase_scout_opportunity_comparison.jsonl"
+            ).read_text()
+            duplicate_rows = (result.run_dir / "phase_scout_duplicate_check.jsonl").read_text()
+            review_rows = (result.run_dir / "phase_review_maintainer_review.jsonl").read_text()
+            response_rows = (result.run_dir / "phase_review_response.jsonl").read_text()
+            self.assertIn("repo.metadata", project_rows)
+            self.assertIn("repo.issues", opportunity_rows)
+            self.assertIn("repo.open_prs", duplicate_rows)
+            self.assertIn("review_simulator_unavailable", review_rows)
+            self.assertIn("severity", review_rows)
+            self.assertIn("aci_dispute_review", response_rows)
+            self.assertIn("aci_submit_patch_finalize", response_rows)
+            judgement = json.loads((result.run_dir / "judgement.json").read_text())
+            self.assertEqual("m0_10_default", judgement["judge_panel"]["panel_id"])
+            dimension_names = {item["dimension"] for item in judgement["aggregate_rubric"]}
+            self.assertIn("duplicate_avoidance", dimension_names)
+            self.assertIn("review_readiness", dimension_names)
 
     def test_runner_exposes_tracked_prs_in_runtime_memory_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

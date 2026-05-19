@@ -10,6 +10,12 @@ class ArtifactCapture:
         self.aci_results: list[AciResult] = []
         self.steps: list[AgentStep] = []
         self.undo_stack: list[str] = []
+        self.tool_violations: list[dict[str, object]] = []
+        self.phase_scout_project_rows: list[dict[str, object]] = []
+        self.phase_scout_opportunity_rows: list[dict[str, object]] = []
+        self.phase_scout_duplicate_rows: list[dict[str, object]] = []
+        self.phase_review_maintainer_rows: list[dict[str, object]] = []
+        self.phase_review_response_rows: list[dict[str, object]] = []
 
     def record_command(self, result: CommandResult) -> None:
         self.commands.append(result)
@@ -25,3 +31,18 @@ class ArtifactCapture:
 
     def record_undo_diff(self, diff: str) -> None:
         self.undo_stack.append(diff)
+
+    def record_tool_violation(self, payload: dict[str, object]) -> None:
+        self.tool_violations.append(payload)
+
+    def record_phase_artifact(self, name: str, payload: dict[str, object]) -> None:
+        if name == "phase_scout_project_comparison":
+            self.phase_scout_project_rows.append(payload)
+        elif name == "phase_scout_opportunity_comparison":
+            self.phase_scout_opportunity_rows.append(payload)
+        elif name == "phase_scout_duplicate_check":
+            self.phase_scout_duplicate_rows.append(payload)
+        elif name == "phase_review_maintainer_review":
+            self.phase_review_maintainer_rows.append(payload)
+        elif name == "phase_review_response":
+            self.phase_review_response_rows.append(payload)

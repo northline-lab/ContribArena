@@ -8,7 +8,10 @@ from contribarena.tools.github_client import GitHubClient, repo_api_path
 
 
 def repo_get_issues(
-    candidate: RepoCandidate, filters: dict[str, Any] | None = None
+    candidate: RepoCandidate,
+    filters: dict[str, Any] | None = None,
+    *,
+    include_prs: bool = False,
 ) -> list[IssueCandidate]:
     normalized = filters or {}
     limit = int(normalized.get("limit") or 50)
@@ -50,7 +53,7 @@ def repo_get_issues(
     issues = [
         _from_rest(item)
         for item in rest_response.data or []
-        if isinstance(item, dict) and "pull_request" not in item
+        if isinstance(item, dict) and (include_prs or "pull_request" not in item)
     ]
     return _apply_local_filters(issues, rest_response.data, normalized)
 

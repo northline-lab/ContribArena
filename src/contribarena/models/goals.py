@@ -5,7 +5,11 @@ from typing import Literal
 from pydantic import BaseModel
 
 
-GoalStatus = Literal["active", "complete", "abandoned"]
+GoalStatus = Literal["active", "complete", "abandoned", "superseded"]
+GoalScope = Literal["repo", "opportunity", "contribution"]
+RunPhase = Literal["scout", "work", "review", "completed"]
+ScoutSubPhase = Literal["project", "opportunity"]
+SubPhase = ScoutSubPhase | None
 
 
 class ShortTermGoal(BaseModel):
@@ -13,9 +17,12 @@ class ShortTermGoal(BaseModel):
     goal_id: str
     objective: str
     status: GoalStatus = "active"
+    scope: GoalScope = "repo"
     created_at: str
     updated_at: str
     evidence_summary: str = ""
+    evidence_refs: list[str] = []
+    next_objective: str = ""
 
 
 class GoalContext(BaseModel):
@@ -23,6 +30,8 @@ class GoalContext(BaseModel):
     enabled: bool = True
     long_term_objective: str = ""
     short_term: ShortTermGoal | None = None
+    current_phase: RunPhase = "scout"
+    current_sub_phase: SubPhase = "project"
     update_tool: str = "aci_goal_update"
     note: str = (
         "Long-term goal is config-owned and read-only. Short-term goal is the "
@@ -39,8 +48,13 @@ class GoalEvent(BaseModel):
     run_id: str
     goal_id: str = ""
     status: GoalStatus | None = None
+    scope: GoalScope | None = None
+    phase: RunPhase = "scout"
+    sub_phase: SubPhase = "project"
     objective: str = ""
     evidence_summary: str = ""
+    evidence_refs: list[str] = []
+    next_objective: str = ""
     created_at: str
     redacted: bool = True
 
@@ -48,6 +62,8 @@ class GoalEvent(BaseModel):
 class GoalState(BaseModel):
     schema_version: Literal["1"] = "1"
     short_term: ShortTermGoal | None = None
+    current_phase: RunPhase = "scout"
+    current_sub_phase: SubPhase = "project"
 
 
 class GoalUpdateResult(BaseModel):

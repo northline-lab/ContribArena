@@ -58,7 +58,7 @@ class CliTest(unittest.TestCase):
                 os.environ["PATH"] = old_path
 
             self.assertEqual(0, result.exit_code, result.output)
-            run_dirs = list(output_dir.iterdir())
+            run_dirs = [path for path in output_dir.iterdir() if path.is_dir()]
             self.assertEqual(1, len(run_dirs))
             names = {path.name for path in run_dirs[0].iterdir()}
             self.assertTrue(
@@ -202,6 +202,57 @@ class CliTest(unittest.TestCase):
             self.assertIn("compatible/beta", result.output)
             self.assertEqual(["compatible/alpha", "compatible/beta"], seen_models)
 
+    def test_run_applies_m010_budget_overrides(self) -> None:
+        runner = CliRunner()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.yaml"
+            self.assertEqual(
+                0,
+                runner.invoke(app, ["init", "--output", str(config_path)]).exit_code,
+            )
+            captured = {}
+
+            def fake_run(self, config, output_dir=None, verbose=False):
+                captured["budget"] = config.run.budget
+                return RunResult(
+                    run_id="run-a",
+                    run_dir=root / "runs" / "run-a",
+                    status="completed",
+                    tool_calls=0,
+                )
+
+            with patch("contribarena.cli.Runner.run", fake_run):
+                result = runner.invoke(
+                    app,
+                    [
+                        "run",
+                        "--config",
+                        str(config_path),
+                        "--max-candidate-repos",
+                        "3",
+                        "--max-opportunities",
+                        "4",
+                        "--max-duplicate-checks",
+                        "5",
+                        "--max-repo-switches",
+                        "1",
+                        "--max-opportunity-switches",
+                        "2",
+                        "--max-review-rounds",
+                        "0",
+                    ],
+                )
+
+            self.assertEqual(0, result.exit_code, result.output)
+            budget = captured["budget"]
+            self.assertEqual(3, budget.scout.max_candidate_repos_considered)
+            self.assertEqual(4, budget.scout.max_opportunities_considered)
+            self.assertEqual(5, budget.scout.max_duplicate_checks)
+            self.assertEqual(1, budget.work.max_repo_switches)
+            self.assertEqual(2, budget.work.max_opportunity_switches)
+            self.assertEqual(0, budget.review.max_review_rounds)
+
     def test_controller_reports_disabled_starter_config(self) -> None:
         runner = CliRunner()
         with tempfile.TemporaryDirectory() as tmp:
@@ -306,6 +357,22 @@ class CliTest(unittest.TestCase):
             self.assertIn("Run:         run-a", show.output)
             self.assertIn("Artifacts:", show.output)
 
+            phases = runner.invoke(
+                app,
+                [
+                    "inspect-phases",
+                    "run-a",
+                    "--config",
+                    str(config_path),
+                    "--input-dir",
+                    str(runs_dir),
+                ],
+            )
+            self.assertEqual(0, phases.exit_code, phases.output)
+            self.assertIn("Phase History:", phases.output)
+            self.assertIn("work goal_created", phases.output)
+            self.assertIn("Tool Violations:", phases.output)
+
             artifact = runner.invoke(
                 app,
                 [
@@ -385,6 +452,26 @@ def _write_run_summary(path: Path) -> None:
         encoding="utf-8",
     )
     (path / "patch.diff").write_text("diff --git a/app.py b/app.py\n", encoding="utf-8")
+    (path / "phase_transition.jsonl").write_text(
+        json.dumps(
+            {
+                "schema_version": "1",
+                "event_id": "event-a",
+                "source": "goal_events.jsonl",
+                "run_id": "run-a",
+                "goal_id": "goal-a",
+                "event_type": "goal_created",
+                "scope": "contribution",
+                "status": "active",
+                "phase": "work",
+                "sub_phase": None,
+                "created_at": "2026-05-15T00:00:10Z",
+            },
+            ensure_ascii=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def _write_fake_docker(path: Path) -> None:

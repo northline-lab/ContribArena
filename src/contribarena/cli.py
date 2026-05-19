@@ -55,6 +55,12 @@ def run(
         "--model",
         help="Override run.model for this invocation, for example compatible/qwen36plus.",
     ),
+    max_candidate_repos: int | None = typer.Option(None, "--max-candidate-repos", min=1),
+    max_opportunities: int | None = typer.Option(None, "--max-opportunities", min=1),
+    max_duplicate_checks: int | None = typer.Option(None, "--max-duplicate-checks", min=1),
+    max_repo_switches: int | None = typer.Option(None, "--max-repo-switches", min=0),
+    max_opportunity_switches: int | None = typer.Option(None, "--max-opportunity-switches", min=0),
+    max_review_rounds: int | None = typer.Option(None, "--max-review-rounds", min=0),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Execute a ContribArena agent run."""
@@ -62,6 +68,15 @@ def run(
         run_config = load_run_config(config)
         if model:
             run_config = _with_model_override(run_config, model)
+        run_config = _with_budget_overrides(
+            run_config,
+            max_candidate_repos=max_candidate_repos,
+            max_opportunities=max_opportunities,
+            max_duplicate_checks=max_duplicate_checks,
+            max_repo_switches=max_repo_switches,
+            max_opportunity_switches=max_opportunity_switches,
+            max_review_rounds=max_review_rounds,
+        )
         result = Runner().run(run_config, output_dir=output_dir, verbose=verbose)
     except ContribArenaError as exc:
         typer.echo(str(exc), err=True)
@@ -251,6 +266,52 @@ def show_run(
     _print_run_summary(run)
 
 
+@app.command("inspect-phases")
+def inspect_phases(
+    run_id: str = typer.Argument(...),
+    config: Path = typer.Option(..., "--config", "-c"),
+    input_dir: Path | None = typer.Option(None, "--input-dir"),
+    refresh: bool = typer.Option(False, "--refresh"),
+) -> None:
+    """Show phase transitions and phase-gate violations for one run."""
+    try:
+        run_config = load_run_config(config)
+        artifact_root = input_dir or _config_relative(config, run_config.artifacts.output_root)
+        read_model_path = _read_model_path(config, run_config, artifact_root)
+        model = SurfaceReadModel(read_model_path)
+        if refresh or not read_model_path.exists():
+            model.refresh_from_artifacts(artifact_root)
+        if model.run(run_id) is None:
+            typer.echo(f"Run not found: {run_id}", err=True)
+            raise typer.Exit(1)
+        phases = model.phase_history(run_id)
+        violations = model.tool_violations(run_id)
+    except ContribArenaError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(exc.exit_code) from exc
+    typer.echo(f"Run: {run_id}")
+    typer.echo("Phase History:")
+    if phases:
+        for row in phases:
+            sub_phase = f"/{row['sub_phase']}" if row.get("sub_phase") else ""
+            typer.echo(
+                f"  {row['seq']}. {row['phase']}{sub_phase} "
+                f"{row['event_type']} scope={row['scope']} {row['created_at']}"
+            )
+    else:
+        typer.echo("  none")
+    typer.echo("Tool Violations:")
+    if violations:
+        for row in violations:
+            sub_phase = f"/{row['sub_phase']}" if row.get("sub_phase") else ""
+            typer.echo(
+                f"  {row['seq']}. {row['tool']} in {row['phase']}{sub_phase} "
+                f"({row['recovery_kind']})"
+            )
+    else:
+        typer.echo("  none")
+
+
 @app.command()
 def judge(
     config: Path = typer.Option(..., "--config", "-c"),
@@ -378,6 +439,55 @@ def _read_model_path(config_path: Path, run_config: Any, artifact_root: Path) ->
 def _with_model_override(run_config: Any, model: str) -> Any:
     return run_config.model_copy(
         update={"run": run_config.run.model_copy(update={"model": model})},
+        deep=True,
+    )
+
+
+def _with_budget_overrides(
+    run_config: Any,
+    *,
+    max_candidate_repos: int | None = None,
+    max_opportunities: int | None = None,
+    max_duplicate_checks: int | None = None,
+    max_repo_switches: int | None = None,
+    max_opportunity_switches: int | None = None,
+    max_review_rounds: int | None = None,
+) -> Any:
+    budget = run_config.run.budget
+    scout_updates = {
+        key: value
+        for key, value in {
+            "max_candidate_repos_considered": max_candidate_repos,
+            "max_opportunities_considered": max_opportunities,
+            "max_duplicate_checks": max_duplicate_checks,
+        }.items()
+        if value is not None
+    }
+    work_updates = {
+        key: value
+        for key, value in {
+            "max_repo_switches": max_repo_switches,
+            "max_opportunity_switches": max_opportunity_switches,
+        }.items()
+        if value is not None
+    }
+    review_updates = {
+        key: value
+        for key, value in {"max_review_rounds": max_review_rounds}.items()
+        if value is not None
+    }
+    if not scout_updates and not work_updates and not review_updates:
+        return run_config
+    updated_budget = budget.model_copy(
+        update={
+            "scout": budget.scout.model_copy(update=scout_updates),
+            "work": budget.work.model_copy(update=work_updates),
+            "review": budget.review.model_copy(update=review_updates),
+        },
+        deep=True,
+    )
+    return run_config.model_copy(
+        update={"run": run_config.run.model_copy(update={"budget": updated_budget})},
         deep=True,
     )
 

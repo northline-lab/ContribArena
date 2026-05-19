@@ -84,10 +84,68 @@ class ContributorAgent:
             return _to_json(tools.repo_get_metadata(_candidate_ref(config, owner, repo)))
 
         @function_tool
+        def repo_get_readme(owner: str, repo: str, max_chars: int = 6000) -> str:
+            """Return the repository README text for project-fit scouting."""
+            return _to_json(
+                tools.repo_get_readme(_candidate_ref(config, owner, repo), max_chars=max_chars)
+            )
+
+        @function_tool
         def repo_get_issues(owner: str, repo: str, filters_json: str = "{}") -> str:
             """Return read-only candidate issues for a repository."""
             filters = json.loads(filters_json) if filters_json else None
             return _to_json(tools.repo_get_issues(_candidate_ref(config, owner, repo), filters))
+
+        @function_tool
+        def repo_get_open_prs(owner: str, repo: str, limit: int = 30) -> str:
+            """Return read-only open pull requests for duplicate checking."""
+            return _to_json(tools.repo_get_open_prs(_candidate_ref(config, owner, repo), limit))
+
+        @function_tool
+        def repo_get_recent_merged_prs(owner: str, repo: str, limit: int = 30) -> str:
+            """Return read-only recently merged pull requests for duplicate checking."""
+            return _to_json(
+                tools.repo_get_recent_merged_prs(_candidate_ref(config, owner, repo), limit)
+            )
+
+        @function_tool
+        def repo_search_prs_by_title(
+            owner: str, repo: str, query: str, limit: int = 20
+        ) -> str:
+            """Search recent pull requests by title text for duplicate checking."""
+            return _to_json(
+                tools.repo_search_prs_by_title(_candidate_ref(config, owner, repo), query, limit)
+            )
+
+        @function_tool
+        def repo_get_issue_linkage(owner: str, repo: str, issue_number: int) -> str:
+            """Return issue assignees, linked pull requests, and recent comments."""
+            return _to_json(
+                tools.repo_get_issue_linkage(_candidate_ref(config, owner, repo), issue_number)
+            )
+
+        @function_tool
+        def repo_get_pr_review_history(owner: str, repo: str, limit: int = 20) -> str:
+            """Return recent pull request review summaries for maintainer-style context."""
+            return _to_json(
+                tools.repo_get_pr_review_history(_candidate_ref(config, owner, repo), limit)
+            )
+
+        @function_tool
+        def repo_setup_probe(
+            owner: str,
+            repo: str,
+            max_probe_seconds: int | None = None,
+            install_dependencies: bool = False,
+        ) -> str:
+            """Lightly probe repository setup with a shallow clone and bounded detection."""
+            return _to_json(
+                tools.repo_setup_probe(
+                    _candidate_ref(config, owner, repo),
+                    max_probe_seconds=max_probe_seconds,
+                    install_dependencies=install_dependencies,
+                )
+            )
 
         @function_tool
         def workspace_run(cmd: str, timeout_seconds: int | None = None) -> str:
@@ -215,9 +273,21 @@ class ContributorAgent:
             objective: str = "",
             status: str = "active",
             evidence: str = "",
+            scope: str = "",
+            evidence_refs_json: str = "[]",
+            next_objective: str = "",
         ) -> str:
-            """Create or update the single short-term runtime goal. status must be exactly "active", "complete", or "abandoned"; complete/abandoned require evidence."""
-            return _to_json(tools.aci_goal_update(objective, status, evidence))
+            """Create or update the short-term runtime goal. status is active, complete, abandoned, or superseded; scope is repo, opportunity, or contribution; terminal/switch updates require evidence_refs_json."""
+            return _to_json(
+                tools.aci_goal_update(
+                    objective,
+                    status,
+                    evidence,
+                    scope,
+                    evidence_refs_json,
+                    next_objective,
+                )
+            )
 
         @function_tool(name_override=RECOVERY_TOOL_NAME)
         def aci_recover_invalid_action(
@@ -238,6 +308,22 @@ class ContributorAgent:
             """Return the current workspace git diff as the shadow submission patch."""
             return _to_json(tools.aci_submit_patch(path, no_command_verification_rationale))
 
+        @function_tool
+        def aci_submit_patch_finalize(path: str = "repo") -> str:
+            """Finalize the latest draft patch after Review so the quality gate can run."""
+            return _to_json(tools.aci_submit_patch_finalize(path))
+
+        @function_tool
+        def aci_dispute_review(
+            concern_id: str,
+            rebuttal_text: str,
+            evidence_refs_json: str = "[]",
+        ) -> str:
+            """Dispute one pre-review concern with evidence; does not rerun the simulator."""
+            return _to_json(
+                tools.aci_dispute_review(concern_id, rebuttal_text, evidence_refs_json)
+            )
+
         agent = Agent(
             name="contribarena-contributor",
             instructions=build_agent_instructions(config),
@@ -245,7 +331,14 @@ class ContributorAgent:
                 repo_search,
                 repo_check_eligibility,
                 repo_get_metadata,
+                repo_get_readme,
                 repo_get_issues,
+                repo_get_open_prs,
+                repo_get_recent_merged_prs,
+                repo_search_prs_by_title,
+                repo_get_issue_linkage,
+                repo_get_pr_review_history,
+                repo_setup_probe,
                 workspace_run,
                 aci_view,
                 aci_search,
@@ -264,6 +357,8 @@ class ContributorAgent:
                 aci_goal_update,
                 aci_recover_invalid_action,
                 aci_submit_patch,
+                aci_dispute_review,
+                aci_submit_patch_finalize,
             ],
             model=config.run.model,
             model_settings=ModelSettings(
@@ -322,14 +417,33 @@ class ContributorAgent:
             candidate = _first_config_candidate(config)
         eligibility = tools.repo_check_eligibility(candidate)
         metadata = tools.repo_get_metadata(candidate)
+        tools.repo_get_readme(candidate)
+        tools.workspace_run("pwd")
+        tools.aci_goal_update(
+            "Find a low-risk opportunity in the configured repository.",
+            "active",
+            "Repository audit completed by local stub.",
+            scope="opportunity",
+            evidence_refs_json='["tool_call:repo.metadata"]',
+            next_objective="Check issues and duplicate PRs for one low-risk opportunity.",
+        )
         issues = tools.repo_get_issues(candidate)
+        tools.repo_get_open_prs(candidate, limit=10)
+        tools.aci_goal_update(
+            "Submit a deterministic local-stub validation result.",
+            "active",
+            "Issue and duplicate scan completed by local stub.",
+            scope="contribution",
+            evidence_refs_json='["tool_call:repo.open_prs"]',
+            next_objective="Return the structured local-stub result.",
+        )
         command = tools.workspace_run("pwd")
 
         opportunity = OpportunitySummary(
             title="Inspect repository and identify a low-risk follow-up",
             rationale="M0.0 local fallback creates a structured result when LLM dependencies are unavailable.",
             risk="low",
-            source=_issue_source(issues[0]) if issues else "",
+            source=_issue_source(issues[0]) if isinstance(issues, list) and issues else "",
         )
         return AgentFinalResult(
             status="completed" if eligibility.eligible else "blocked",
@@ -393,18 +507,21 @@ def build_agent_instructions(config: RunConfig) -> str:
         "unified-editor provenance for changed source files. "
         "If an edit or verification fails, inspect the smallest relevant context, fix "
         "once, or use aci_undo before trying a safer edit. Ask aci_suggest_verification "
-        "when unsure how to test, verify locally with aci_verify or workspace_run, call "
-        "aci_submit_patch, then finish with the structured ContribArena result. Use "
+        "when unsure how to test, verify locally with aci_verify or workspace_run. In Work, call "
+        "aci_submit_patch to enter Review; in Review, respond with aci_dispute_review, "
+        "bounded edit plus aci_submit_patch, or aci_submit_patch_finalize. Use "
         "operator_report_progress at phase boundaries or when discovery, selection, "
         "verification, governance, or PR work would otherwise look silent; keep it short, "
         "evidence-linked, and do not expose hidden chain-of-thought. Call "
         "aci_runtime_get_context(scope='run') early; it returns guidance availability, "
-        "goal context, memory hints, and tracked PR summaries. Treat "
+        "goal context, current phase/sub_phase, memory hints, and tracked PR summaries. Treat "
         "the long-term goal as direction, not a replacement for this run's concrete task. "
-        "Use aci_goal_update only for the single short-term goal, and mark it complete "
-        "only after evidence proves the objective is done. If aci_goal_update returns "
-        "terminal_status=goal_abandon_limit, end this run with a final structured "
-        "blocked result. If guidance is available, "
+        "Use aci_goal_update only for the single short-term goal; phase transitions derive "
+        "from goal scope/status plus draft submission events. Status complete, abandoned, "
+        "or superseded requires evidence_refs_json with tool_call:<id>, artifact:<path>#L<line>, "
+        "workspace:<path>, or git:<sha>. If aci_goal_update returns "
+        "terminal_status=goal_abandon_limit, repo_switch_limit, or opportunity_switch_limit, "
+        "end this run with a final structured blocked result. If guidance is available, "
         "read the returned path relative to the workspace root, not repo/. "
         "Then inspect repository-local guidance such as AGENTS.md, CONTRIBUTING.md, "
         "and .github templates when present. You have a working "

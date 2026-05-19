@@ -10,6 +10,26 @@ DEFAULT_MEMORY_RELATIVE = Path(".contribarena/memory")
 DEFAULT_READ_MODEL_RELATIVE = Path(".contribarena/read_model.sqlite")
 
 
+class ScoutBudgetConfig(BaseModel):
+    max_candidate_repos_considered: int = Field(default=6, ge=1)
+    max_opportunities_considered: int = Field(default=8, ge=1)
+    max_duplicate_checks: int = Field(default=12, ge=1)
+    max_probe_seconds_per_repo: int = Field(default=60, ge=1)
+    max_scout_invocations: int = Field(default=6, ge=1)
+
+
+class WorkBudgetConfig(BaseModel):
+    max_repo_switches: int = Field(default=2, ge=0)
+    max_opportunity_switches: int = Field(default=3, ge=0)
+    max_strategy_switches_per_opportunity: int = Field(default=2, ge=0)
+    max_invocations: int = Field(default=4, ge=1)
+
+
+class ReviewBudgetConfig(BaseModel):
+    max_review_rounds: int = Field(default=2, ge=0)
+    max_invocations: int = Field(default=3, ge=1)
+
+
 class BudgetConfig(BaseModel):
     max_steps: int = Field(default=80, ge=1)
     max_tokens: int | None = Field(default=None, ge=1)
@@ -17,6 +37,9 @@ class BudgetConfig(BaseModel):
     max_invocations: int = Field(default=5, ge=1)
     max_consecutive_no_progress: int = Field(default=2, ge=1)
     max_recoveries: int = Field(default=8, ge=1)
+    scout: ScoutBudgetConfig = Field(default_factory=ScoutBudgetConfig)
+    work: WorkBudgetConfig = Field(default_factory=WorkBudgetConfig)
+    review: ReviewBudgetConfig = Field(default_factory=ReviewBudgetConfig)
 
 
 class RunSection(BaseModel):
@@ -159,12 +182,14 @@ class JudgementOutcomeAdjustments(BaseModel):
 
 def _default_judgement_dimension_weights() -> dict[str, float]:
     return {
-        "project_selection_quality": 0.10,
-        "opportunity_identification_quality": 0.15,
-        "repository_understanding_and_plan": 0.15,
-        "solution_correctness": 0.25,
-        "verification_evidence_quality": 0.15,
-        "maintainer_acceptability": 0.20,
+        "project_fit": 0.08,
+        "opportunity_quality": 0.12,
+        "duplicate_avoidance": 0.10,
+        "repository_understanding": 0.08,
+        "execution_correctness": 0.25,
+        "verification_quality": 0.12,
+        "review_readiness": 0.13,
+        "agentic_judgment": 0.12,
     }
 
 
@@ -175,8 +200,8 @@ class JudgementConfig(BaseModel):
     season_phase: Literal["owned_repo_calibration", "external_live", "archived", "unknown"] = (
         "owned_repo_calibration"
     )
-    rubric_version: str = "m0.7"
-    panel_id: str = "m0_7_default"
+    rubric_version: str = "m0.10"
+    panel_id: str = "m0_10_default"
     judges: list[JudgementJudgeConfig] = Field(default_factory=list)
     dimension_weights: dict[str, float] = Field(
         default_factory=_default_judgement_dimension_weights

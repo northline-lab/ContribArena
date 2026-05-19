@@ -60,6 +60,8 @@ class SurfaceReadModel:
         )
         public_runs: list[dict[str, Any]] = []
         artifact_rows: list[tuple[str, str, str, str, str]] = []
+        phase_rows: list[tuple[str, int, str, str, str, str, str, str]] = []
+        violation_rows: list[tuple[str, int, str, str, str, str, str]] = []
         for loaded in loaded_runs:
             run = _api_run(loaded.payload, loaded.run_dir, skipped)
             public_runs.append(run)
@@ -76,6 +78,8 @@ class SurfaceReadModel:
                         json.dumps(artifact, ensure_ascii=True),
                     )
                 )
+            phase_rows.extend(_phase_history_rows(run_id, loaded.run_dir))
+            violation_rows.extend(_tool_violation_rows(run_id, loaded.run_dir))
         leaderboard = _leaderboard(public_runs)
         stats = _stats(public_runs)
         generated_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
@@ -84,6 +88,8 @@ class SurfaceReadModel:
                 db=db,
                 runs=public_runs,
                 artifacts=artifact_rows,
+                phase_history=phase_rows,
+                tool_violations=violation_rows,
                 leaderboard=leaderboard,
                 stats=stats,
                 skipped=skipped,
@@ -169,6 +175,49 @@ class SurfaceReadModel:
         with self._connect() as db:
             row = db.execute("select payload_json from runs where run_id = ?", (run_id,)).fetchone()
         return json.loads(row[0]) if row else None
+
+    def phase_history(self, run_id: str) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute(
+                """
+                select seq, event_type, scope, phase, sub_phase, created_at, payload_json
+                from phase_history where run_id = ? order by seq
+                """,
+                (run_id,),
+            ).fetchall()
+        return [
+            {
+                "seq": row["seq"],
+                "event_type": row["event_type"],
+                "scope": row["scope"],
+                "phase": row["phase"],
+                "sub_phase": row["sub_phase"],
+                "created_at": row["created_at"],
+                "payload": json.loads(row["payload_json"]),
+            }
+            for row in rows
+        ]
+
+    def tool_violations(self, run_id: str) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute(
+                """
+                select seq, tool, phase, sub_phase, recovery_kind, payload_json
+                from tool_violations where run_id = ? order by seq
+                """,
+                (run_id,),
+            ).fetchall()
+        return [
+            {
+                "seq": row["seq"],
+                "tool": row["tool"],
+                "phase": row["phase"],
+                "sub_phase": row["sub_phase"],
+                "recovery_kind": row["recovery_kind"],
+                "payload": json.loads(row["payload_json"]),
+            }
+            for row in rows
+        ]
 
     def agents(self) -> list[dict[str, Any]]:
         rows = self.leaderboard()
@@ -298,9 +347,32 @@ def _create_schema(db: sqlite3.Connection) -> None:
             payload_json text not null,
             primary key (run_id, name)
         );
+        create table if not exists phase_history (
+            run_id text not null,
+            seq integer not null,
+            event_type text not null,
+            scope text not null,
+            phase text not null,
+            sub_phase text not null,
+            created_at text not null,
+            payload_json text not null,
+            primary key (run_id, seq)
+        );
+        create table if not exists tool_violations (
+            run_id text not null,
+            seq integer not null,
+            tool text not null,
+            phase text not null,
+            sub_phase text not null,
+            recovery_kind text not null,
+            payload_json text not null,
+            primary key (run_id, seq)
+        );
         create index if not exists idx_runs_season on runs(season_id);
         create index if not exists idx_runs_agent on runs(agent_handle);
         create index if not exists idx_runs_status on runs(run_status);
+        create index if not exists idx_phase_history_run on phase_history(run_id);
+        create index if not exists idx_tool_violations_run on tool_violations(run_id);
         """
     )
 
@@ -310,6 +382,8 @@ def _replace_data(
     db: sqlite3.Connection,
     runs: list[dict[str, Any]],
     artifacts: list[tuple[str, str, str, str, str]],
+    phase_history: list[tuple[str, int, str, str, str, str, str, str]],
+    tool_violations: list[tuple[str, int, str, str, str, str, str]],
     leaderboard: list[dict[str, Any]],
     stats: dict[str, Any],
     skipped: list[str],
@@ -318,6 +392,8 @@ def _replace_data(
 ) -> None:
     db.execute("delete from runs")
     db.execute("delete from artifacts")
+    db.execute("delete from phase_history")
+    db.execute("delete from tool_violations")
     db.executemany(
         """
         insert into runs (
@@ -329,6 +405,22 @@ def _replace_data(
     db.executemany(
         "insert into artifacts (run_id, name, visibility, path, payload_json) values (?, ?, ?, ?, ?)",
         artifacts,
+    )
+    db.executemany(
+        """
+        insert into phase_history (
+            run_id, seq, event_type, scope, phase, sub_phase, created_at, payload_json
+        ) values (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        phase_history,
+    )
+    db.executemany(
+        """
+        insert into tool_violations (
+            run_id, seq, tool, phase, sub_phase, recovery_kind, payload_json
+        ) values (?, ?, ?, ?, ?, ?, ?)
+        """,
+        tool_violations,
     )
     meta = {
         "schema_version": SURFACE_SCHEMA_VERSION,
@@ -356,6 +448,63 @@ def _run_row(run: dict[str, Any]) -> tuple[str, str, str, str, str, str, str]:
         str(run.get("started_at") or ""),
         json.dumps(run, ensure_ascii=True),
     )
+
+
+def _phase_history_rows(
+    run_id: str,
+    run_dir: Path,
+) -> list[tuple[str, int, str, str, str, str, str, str]]:
+    rows: list[tuple[str, int, str, str, str, str, str, str]] = []
+    for seq, payload in enumerate(_read_jsonl(run_dir / "phase_transition.jsonl"), start=1):
+        rows.append(
+            (
+                run_id,
+                seq,
+                str(payload.get("event_type") or ""),
+                str(payload.get("scope") or ""),
+                str(payload.get("phase") or ""),
+                str(payload.get("sub_phase") or ""),
+                str(payload.get("created_at") or ""),
+                json.dumps(payload, ensure_ascii=True),
+            )
+        )
+    return rows
+
+
+def _tool_violation_rows(
+    run_id: str,
+    run_dir: Path,
+) -> list[tuple[str, int, str, str, str, str, str]]:
+    rows: list[tuple[str, int, str, str, str, str, str]] = []
+    for seq, payload in enumerate(_read_jsonl(run_dir / "tool_violation_log.jsonl"), start=1):
+        rows.append(
+            (
+                run_id,
+                seq,
+                str(payload.get("tool") or ""),
+                str(payload.get("phase") or ""),
+                str(payload.get("sub_phase") or ""),
+                str(payload.get("recovery_kind") or ""),
+                json.dumps(payload, ensure_ascii=True),
+            )
+        )
+    return rows
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not line.strip():
+                continue
+            payload = json.loads(line)
+            if isinstance(payload, dict):
+                rows.append(payload)
+    except (OSError, json.JSONDecodeError):
+        return []
+    return rows
 
 
 def _payloads(rows: Any) -> list[dict[str, Any]]:

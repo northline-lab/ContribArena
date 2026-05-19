@@ -83,6 +83,49 @@ class IssueCandidate(BaseModel):
     updated_at: str | None = None
 
 
+class PullRequestCandidate(BaseModel):
+    number: int
+    title: str
+    url: str = ""
+    state: str = ""
+    author: str = ""
+    body: str = ""
+    labels: list[str] = Field(default_factory=list)
+    created_at: str | None = None
+    updated_at: str | None = None
+    merged_at: str | None = None
+    draft: bool = False
+    linked_issues: list[int] = Field(default_factory=list)
+
+
+class IssueLinkage(BaseModel):
+    issue_number: int
+    assignees: list[str] = Field(default_factory=list)
+    linked_prs: list[PullRequestCandidate] = Field(default_factory=list)
+    recent_comments: list[str] = Field(default_factory=list)
+
+
+class RepoSetupProbeResult(BaseModel):
+    full_name: str
+    success: bool
+    probe_failed: bool = False
+    default_branch: str = "main"
+    package_managers: list[str] = Field(default_factory=list)
+    test_commands: list[str] = Field(default_factory=list)
+    ci_files: list[str] = Field(default_factory=list)
+    setup_difficulty: str = "unknown"
+    duration_seconds: float = 0.0
+    error: str = ""
+
+
+class RepoReadmeResult(BaseModel):
+    full_name: str
+    success: bool
+    path: str = "README"
+    content: str = ""
+    error: str = ""
+
+
 class EligibilityResult(BaseModel):
     eligible: bool
     reasons: list[str] = Field(default_factory=list)

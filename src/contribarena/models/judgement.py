@@ -6,12 +6,14 @@ from pydantic import BaseModel, Field
 
 
 JudgementDimension = Literal[
-    "project_selection_quality",
-    "opportunity_identification_quality",
-    "repository_understanding_and_plan",
-    "solution_correctness",
-    "verification_evidence_quality",
-    "maintainer_acceptability",
+    "project_fit",
+    "opportunity_quality",
+    "duplicate_avoidance",
+    "repository_understanding",
+    "execution_correctness",
+    "verification_quality",
+    "review_readiness",
+    "agentic_judgment",
 ]
 
 JudgementStatus = Literal[
@@ -44,6 +46,7 @@ class JudgementPanel(BaseModel):
 class JudgementRubricScore(BaseModel):
     dimension: JudgementDimension
     evidence: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
     score: int = Field(ge=0, le=5)
     max_score: int = 5
     weight: float = Field(default=0, ge=0)
@@ -112,3 +115,11 @@ class JudgePacket(BaseModel):
     patch_excerpt: str = ""
     pr_description_excerpt: str = ""
     verification_excerpt: str = ""
+    phase_scout_project_excerpt: str = ""
+    phase_scout_opportunity_excerpt: str = ""
+    phase_scout_duplicate_excerpt: str = ""
+    phase_review_maintainer_excerpt: str = ""
+    phase_review_response_excerpt: str = ""
+    goal_events_excerpt: str = ""
+    phase_transition_excerpt: str = ""
+    tool_violation_excerpt: str = ""

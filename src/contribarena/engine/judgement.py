@@ -27,21 +27,25 @@ from contribarena.providers import ContribArenaModelProvider
 
 
 DIMENSIONS = [
-    "project_selection_quality",
-    "opportunity_identification_quality",
-    "repository_understanding_and_plan",
-    "solution_correctness",
-    "verification_evidence_quality",
-    "maintainer_acceptability",
+    "project_fit",
+    "opportunity_quality",
+    "duplicate_avoidance",
+    "repository_understanding",
+    "execution_correctness",
+    "verification_quality",
+    "review_readiness",
+    "agentic_judgment",
 ]
 
 DEFAULT_DIMENSION_WEIGHTS = {
-    "project_selection_quality": 0.10,
-    "opportunity_identification_quality": 0.15,
-    "repository_understanding_and_plan": 0.15,
-    "solution_correctness": 0.25,
-    "verification_evidence_quality": 0.15,
-    "maintainer_acceptability": 0.20,
+    "project_fit": 0.08,
+    "opportunity_quality": 0.12,
+    "duplicate_avoidance": 0.10,
+    "repository_understanding": 0.08,
+    "execution_correctness": 0.25,
+    "verification_quality": 0.12,
+    "review_readiness": 0.13,
+    "agentic_judgment": 0.12,
 }
 
 
@@ -56,6 +60,8 @@ def build_judge_packet(
     run_dir: Path,
 ) -> JudgePacket:
     summary = _read_json(run_dir / "run_summary.json")
+    repository = _dict(summary.get("repository"))
+    repository.update(_discovery_context(config))
     return JudgePacket(
         season=JudgementSeason(
             id=config.judgement.season_id,
@@ -63,7 +69,7 @@ def build_judge_packet(
             phase=config.judgement.season_phase,
         ),
         run_id=run_id,
-        repository=_dict(summary.get("repository")),
+        repository=repository,
         opportunity={
             "source": summary.get("opportunity_source", "none"),
             "source_ref": summary.get("opportunity_source_ref", ""),
@@ -90,11 +96,41 @@ def build_judge_packet(
         patch_excerpt=_read_excerpt(run_dir / "patch.diff", max_chars=8000),
         pr_description_excerpt=_read_excerpt(run_dir / "pr_description.md", max_chars=6000),
         verification_excerpt=_verification_excerpt(run_dir),
+        phase_scout_project_excerpt=_read_excerpt(
+            run_dir / "phase_scout_project_comparison.jsonl", max_chars=6000
+        ),
+        phase_scout_opportunity_excerpt=_read_excerpt(
+            run_dir / "phase_scout_opportunity_comparison.jsonl", max_chars=6000
+        ),
+        phase_scout_duplicate_excerpt=_read_excerpt(
+            run_dir / "phase_scout_duplicate_check.jsonl", max_chars=6000
+        ),
+        phase_review_maintainer_excerpt=_read_excerpt(
+            run_dir / "phase_review_maintainer_review.jsonl", max_chars=6000
+        ),
+        phase_review_response_excerpt=_read_excerpt(
+            run_dir / "phase_review_response.jsonl", max_chars=6000
+        ),
+        goal_events_excerpt=_read_excerpt(run_dir / "goal_events.jsonl", max_chars=6000),
+        phase_transition_excerpt=_read_excerpt(
+            run_dir / "phase_transition.jsonl", max_chars=6000
+        ),
+        tool_violation_excerpt=_read_excerpt(
+            run_dir / "tool_violation_log.jsonl", max_chars=6000
+        ),
     )
 
 
 def build_judge_dimension_packets(packet: JudgePacket) -> dict[str, dict[str, object]]:
     return {dimension: _dimension_packet(dimension, packet) for dimension in DIMENSIONS}
+
+
+def _discovery_context(config: RunConfig) -> dict[str, object]:
+    if config.issue is not None:
+        return {"issue_solving": True, "fixed_candidate": True}
+    if config.discovery.candidates:
+        return {"fixed_candidate": True}
+    return {"discovery_mode": "open", "query": config.discovery.query}
 
 
 def judge_run(
@@ -335,11 +371,14 @@ def _run_llm_dimension_judge(
                 max_turns=1,
                 run_config=agents_run_config_cls(
                     model_provider=model_provider,
-                    workflow_name=f"ContribArena M0.7 Judge {dimension}",
+                    workflow_name=f"ContribArena M0.10 Judge {dimension}",
                     tracing_disabled=True,
                 ),
             )
-            return _normalize_llm_dimension(dimension, str(result.final_output))
+            return _apply_floors_to_score(
+                _normalize_llm_dimension(dimension, str(result.final_output)),
+                _ground_truth_check(packet),
+            )
         except Exception as exc:
             last_error = exc
             _report_progress(
@@ -375,70 +414,80 @@ def _report_progress(
 
 
 def _dimension_packet(dimension: str, packet: JudgePacket) -> dict[str, object]:
+    floors = _ground_truth_check(packet)
     base: dict[str, object] = {
         "schema_version": packet.schema_version,
         "season": packet.season.model_dump(mode="json"),
         "run_id": packet.run_id,
         "dimension": dimension,
         "terminal": packet.terminal,
-        "artifacts": packet.artifacts,
         "contribution_class": packet.contribution_class,
+        "deterministic_floors": floors.get(dimension, []),
     }
-    if dimension == "project_selection_quality":
+    if dimension == "project_fit":
         base.update(
             {
                 "repository": packet.repository,
-                "eligibility_summary": packet.eligibility_summary,
-                "selected_task_summary": packet.selected_task_summary,
+                "phase_scout_project_comparison": packet.phase_scout_project_excerpt,
             }
         )
-    elif dimension == "opportunity_identification_quality":
+    elif dimension == "opportunity_quality":
         base.update(
             {
-                "repository": packet.repository,
-                "opportunity": packet.opportunity,
-                "selected_task_summary": packet.selected_task_summary,
-                "maintainer_fit_summary": packet.maintainer_fit_summary,
+                "phase_scout_opportunity_comparison": packet.phase_scout_opportunity_excerpt,
             }
         )
-    elif dimension == "repository_understanding_and_plan":
+    elif dimension == "duplicate_avoidance":
         base.update(
             {
-                "repository": packet.repository,
-                "pipeline": packet.pipeline,
-                "selected_task_summary": packet.selected_task_summary,
-                "maintainer_fit_summary": packet.maintainer_fit_summary,
+                "phase_scout_duplicate_check": packet.phase_scout_duplicate_excerpt,
                 "behavior_summary": packet.behavior_summary,
+                "tool_violation_log": packet.tool_violation_excerpt,
             }
         )
-    elif dimension == "solution_correctness":
+    elif dimension == "repository_understanding":
         base.update(
             {
-                "quality_gate": packet.quality_gate,
+                "behavior_summary": packet.behavior_summary,
+                "selected_task_summary": packet.selected_task_summary,
+                "goal_events": packet.goal_events_excerpt,
+            }
+        )
+    elif dimension == "execution_correctness":
+        base.update(
+            {
                 "selected_task_summary": packet.selected_task_summary,
                 "patch_excerpt": packet.patch_excerpt,
-                "verification_excerpt": packet.verification_excerpt,
-            }
-        )
-    elif dimension == "verification_evidence_quality":
-        base.update(
-            {
                 "quality_gate": packet.quality_gate,
-                "behavior_summary": packet.behavior_summary,
-                "verification_excerpt": packet.verification_excerpt,
-                "patch_excerpt": packet.patch_excerpt,
             }
         )
-    elif dimension == "maintainer_acceptability":
+    elif dimension == "verification_quality":
         base.update(
             {
-                "repository": packet.repository,
+                "verification_excerpt": packet.verification_excerpt,
+                "behavior_summary": packet.behavior_summary,
+                "quality_gate": packet.quality_gate,
+            }
+        )
+    elif dimension == "review_readiness":
+        base.update(
+            {
                 "pull_request": packet.pull_request,
                 "maintainer_outcome": packet.maintainer_outcome,
-                "maintainer_fit_summary": packet.maintainer_fit_summary,
+                "phase_review_maintainer_review": packet.phase_review_maintainer_excerpt,
+                "phase_review_response": packet.phase_review_response_excerpt,
                 "pr_description_excerpt": packet.pr_description_excerpt,
                 "patch_excerpt": packet.patch_excerpt,
                 "quality_gate": packet.quality_gate,
+            }
+        )
+    elif dimension == "agentic_judgment":
+        base.update(
+            {
+                "goal_events": packet.goal_events_excerpt,
+                "phase_transition": packet.phase_transition_excerpt,
+                "tool_violation_log": packet.tool_violation_excerpt,
+                "behavior_summary": packet.behavior_summary,
             }
         )
     return base
@@ -446,15 +495,15 @@ def _dimension_packet(dimension: str, packet: JudgePacket) -> dict[str, object]:
 
 def _judge_dimension_instructions(dimension: str) -> str:
     return (
-        f"You are a ContribArena M0.7 judge. Score only `{dimension}` for one "
+        f"You are a ContribArena M0.10 judge. Score only `{dimension}` for one "
         "anonymized run packet. "
-        "Do not infer or reward the hidden agent/model identity. Evaluate the full chain: "
-        "project selection, opportunity identification, repository understanding and plan, "
-        "solution correctness, verification evidence, and maintainer acceptability. "
+        "Do not infer or reward the hidden agent/model identity. Use only the packet evidence "
+        "for this dimension plus the provided terminal state and deterministic floors. "
         "List concrete evidence first, then assign an integer score 0-5. "
         "Use this scale: 3 means acceptable with flaws, 4 means very good with no major "
         "issues, and 5 means exceptional, near-perfect evidence and execution. "
-        "Do not give 5 for merely adequate work. Use 0 only for no valid evidence, "
+        "Do not give 5 for merely adequate work. Apply any deterministic_floors as hard "
+        "maximum scores and mention them in evidence. Use 0 only for no valid evidence, "
         "a broken path, or a severe violation. "
         f"The dimension value must be exactly `{dimension}`. "
         f"{_rubric_scale_instructions(dimension)} "
@@ -466,56 +515,63 @@ def _judge_dimension_instructions(dimension: str) -> str:
 
 def _rubric_scale_instructions(dimension: str) -> str:
     anchors = {
-        "project_selection_quality": (
-            "Anchors for project_selection_quality: 5=recently active, clear guidance "
-            "or contribution entry, active issue tracker, eligibility pass without "
-            "warnings, and a specific reason this repo fits the contribution; 4=active "
-            "and eligible with a real but less specific rationale; 3=contributable with "
-            "no blockers but thin positive evidence; 2=questionable activity, warnings, "
-            "or unclear rules; 1=surface-only signals; 0=archived, unmaintained, rejects "
-            "the contribution, or eligibility failed."
+        "project_fit": (
+            "Anchors for project_fit: 5=compared multiple viable repos or thoroughly audited "
+            "the fixed repo, checked activity, value, contribution rules, setup feasibility, "
+            "and downsides; 4=good repo fit evidence with minor gaps; 3=eligible but thin "
+            "comparison/audit; 2=single shallow signal or notable warnings; 1=surface-only "
+            "repo choice; 0=ineligible, archived, hostile to external contribution, or no "
+            "project-fit evidence."
         ),
-        "opportunity_identification_quality": (
-            "Anchors for opportunity_identification_quality: 5=explicit source such as "
-            "issue, CI failure, or maintainer discussion, clear user/maintainer value, "
-            "small high-leverage scope; 4=real useful feasible sourced opportunity with "
-            "simple value argument; 3=real fixable issue but weak value or goal linkage; "
-            "2=no source or maintainer signal but not harmful; 1=surface scan only; "
-            "0=nonexistent, misread, wrong, or noise."
+        "opportunity_quality": (
+            "Anchors for opportunity_quality: 5=considered multiple issue/code opportunities "
+            "with clear value, risk, novelty, maintainer fit, and honest tradeoffs; 4=useful "
+            "well-scoped opportunity with credible rationale; 3=real fixable task but weak "
+            "breadth or value evidence; 2=plausible but mostly self-invented; 1=surface scan "
+            "only; 0=nonexistent, duplicate, misread, or automation noise."
         ),
-        "repository_understanding_and_plan": (
-            "Anchors for repository_understanding_and_plan: 5=strong exploration of "
-            "guidance, source, tests, PR templates, and style, with a plan matching repo "
-            "structure; 4=key context read and reasonable plan with minor omissions; "
-            "3=basic code reading and plan but shallow rules/test understanding; "
-            "2=only target files read; 1=almost no exploration; 0=violates guidance or "
-            "mismatches repo structure."
+        "duplicate_avoidance": (
+            "Anchors for duplicate_avoidance: 5=checked open and recently merged PRs/issues "
+            "with precise queries and no duplicate evidence; 4=credible PR duplicate check "
+            "with minor query gaps; 3=some PR/issue duplicate evidence but incomplete; "
+            "2=issue-only or weak title search; 1=claim is mostly unsupported; 0=claimed a "
+            "duplicate check without PR-tool evidence or selected a known duplicate."
         ),
-        "solution_correctness": (
-            "Anchors for solution_correctness: 5=precise minimal fix, quality gate pass, "
-            "targeted test or strong verification, no unrelated changes, project style "
-            "preserved; 4=solves the problem with pass evidence and only minor edge, "
-            "style, or test gaps; 3=likely solves core issue but has test, boundary, or "
-            "cleanup gaps; 2=related but rough with obvious omissions, regression risk, "
-            "or non-pass gate; 1=weak relation; 0=no patch, unapplyable patch, wrong "
-            "file/function, obvious bug, or failed terminal status."
+        "repository_understanding": (
+            "Anchors for repository_understanding: 5=read guidance, layout, relevant source, "
+            "tests, and plan evidence grounded in real files; 4=key context read with minor "
+            "omissions; 3=basic relevant source reading; 2=target file only; 1=almost no "
+            "exploration; 0=violates repo guidance or misunderstands structure."
         ),
-        "verification_evidence_quality": (
-            "Anchors for verification_evidence_quality: 5=targeted problem-specific "
-            "output, multiple relevant verification attempts, before/after or regression "
-            "evidence, and clear explanation for unavailable checks; 4=tests support "
-            "conclusion and main risks covered; 3=basic test or compile check with "
-            "incomplete causal link; 2=only proves code runs; 1=no command-level evidence; "
-            "0=failed verification ignored or misreported."
+        "execution_correctness": (
+            "Anchors for execution_correctness: 5=precise scoped patch that solves the selected "
+            "opportunity with no unrelated side effects and quality gate pass; 4=solves the "
+            "main problem with minor edge/style gaps; 3=likely useful but with test/boundary "
+            "risk; 2=related but rough or non-pass gate; 1=weak relation; 0=no patch, wrong "
+            "file/function, unapplyable patch, obvious bug, or failed terminal status."
         ),
-        "maintainer_acceptability": (
-            "Anchors for maintainer_acceptability: 5=small precise PR, clear motivation, "
-            "implementation, verification, and risk description, matching contribution "
-            "class and repo rules, nearly merge-ready; 4=clear scope, accurate description, "
-            "credible verification, low risk; 3=valuable but needs questions or small "
-            "fixes; 2=unclear boundary, motivation, or verification; 1=near automation "
-            "noise; 0=empty or misleading PR description, hidden failure, rule violation, "
+        "verification_quality": (
+            "Anchors for verification_quality: 5=targeted reproducible verification with "
+            "problem-specific output, relevant failure/retry handling, and coverage of main "
+            "risks; 4=tests support conclusion with minor gaps; 3=basic relevant check; "
+            "2=only proves code runs; 1=no command-level evidence; 0=failed verification "
+            "ignored or misreported."
+        ),
+        "review_readiness": (
+            "Anchors for review_readiness: 5=clear PR description, addressed maintainer "
+            "pre-review concerns if present, low-risk scope, and merge-ready evidence; "
+            "4=clear scope and verification with minor review gaps; 3=valuable but needs "
+            "questions or small fixes; 2=unclear boundary or unaddressed accepted concern; "
+            "1=near automation noise; 0=empty/misleading PR description, hidden failure, "
             "spam, opt-out, or policy violation."
+        ),
+        "agentic_judgment": (
+            "Anchors for agentic_judgment: 5=goal transitions, abandon/supersede choices, "
+            "budget use, phase-boundary behavior, and initiative are well justified by "
+            "evidence; 4=good autonomous judgment with minor inefficiency; 3=reasonable "
+            "but thin transition evidence; 2=poor budget/phase discipline or weak evidence; "
+            "1=mostly reactive or confused; 0=faked evidence, severe phase violations, or "
+            "unjustified abandonment."
         ),
     }
     return anchors[dimension]
@@ -554,12 +610,19 @@ def _normalize_llm_dimension(dimension: str, text: str) -> JudgementRubricScore:
 
 def _canonical_dimension(dimension: str) -> str:
     aliases = {
-        "opportunity_quality": "opportunity_identification_quality",
-        "opportunity_selection_quality": "opportunity_identification_quality",
-        "task_selection_quality": "opportunity_identification_quality",
-        "verification_evidence": "verification_evidence_quality",
-        "repository_understanding": "repository_understanding_and_plan",
-        "maintainer_fit": "maintainer_acceptability",
+        "project_selection_quality": "project_fit",
+        "opportunity_identification_quality": "opportunity_quality",
+        "opportunity_selection_quality": "opportunity_quality",
+        "task_selection_quality": "opportunity_quality",
+        "repository_understanding_and_plan": "repository_understanding",
+        "solution_correctness": "execution_correctness",
+        "verification_evidence_quality": "verification_quality",
+        "verification_evidence": "verification_quality",
+        "maintainer_acceptability": "review_readiness",
+        "maintainer_fit": "review_readiness",
+        "abandonment_quality": "agentic_judgment",
+        "instruction_following": "agentic_judgment",
+        "agentic_initiative": "agentic_judgment",
     }
     return aliases.get(dimension, dimension)
 
@@ -573,6 +636,8 @@ def _heuristic_rubric(packet: JudgePacket) -> list[JudgementRubricScore]:
     verification_count = int(behavior.get("verification_attempts", 0) or 0)
     command_count = int(behavior.get("command_count", 0) or 0)
     aci_count = int(behavior.get("aci_step_count", 0) or 0)
+    tools_used = {str(tool) for tool in behavior.get("tools_used", []) if tool}
+    floors = _ground_truth_check(packet)
 
     if terminal_status == "failed":
         return [
@@ -584,24 +649,36 @@ def _heuristic_rubric(packet: JudgePacket) -> list[JudgementRubricScore]:
             for dimension in DIMENSIONS
         ]
 
-    project_score = 3
+    project_score = 2
+    if packet.phase_scout_project_excerpt:
+        project_score += 2
+    elif packet.eligibility_summary:
+        project_score += 1
     if packet.repository.get("full_name"):
         project_score += 1
-    if packet.eligibility_summary:
-        project_score += 1
 
-    opportunity_score = 3
-    if packet.selected_task_summary:
+    opportunity_score = 2
+    if packet.phase_scout_opportunity_excerpt:
+        opportunity_score += 2
+    elif packet.selected_task_summary:
         opportunity_score += 1
     if packet.opportunity.get("source") != "none":
         opportunity_score += 1
+
+    duplicate_score = 1
+    if packet.phase_scout_duplicate_excerpt:
+        duplicate_score = 4
+        if {"repo_get_open_prs", "repo_get_recent_merged_prs"} & tools_used:
+            duplicate_score += 1
+    elif any(tool.startswith("repo_") and "pr" in tool for tool in tools_used):
+        duplicate_score = 3
 
     understanding_score = 2
     if packet.selected_task_summary:
         understanding_score += 1
     if command_count or aci_count:
         understanding_score += 1
-    if packet.maintainer_fit_summary or "repo_guidance.json" in packet.artifacts:
+    if "repo_guidance.json" in packet.artifacts or packet.goal_events_excerpt:
         understanding_score += 1
 
     correctness_score = 0
@@ -618,35 +695,53 @@ def _heuristic_rubric(packet: JudgePacket) -> list[JudgementRubricScore]:
     elif "quality_gate.json" in packet.artifacts and quality_status == "pass":
         verification_score = 3
 
-    acceptability_score = 0
+    review_score = 0
     if has_patch:
-        acceptability_score = 3
+        review_score = 3
         if pr_state in {"open", "none"}:
-            acceptability_score += 1
+            review_score += 1
         if quality_status == "pass":
-            acceptability_score += 1
+            review_score += 1
+        if packet.phase_review_maintainer_excerpt and not packet.phase_review_response_excerpt:
+            review_score = min(review_score, 3)
     elif terminal_status == "blocked":
-        acceptability_score = 2
+        review_score = 2
 
-    return [
+    agentic_score = 3
+    if packet.goal_events_excerpt:
+        agentic_score += 1
+    if packet.phase_transition_excerpt:
+        agentic_score += 1
+    if packet.tool_violation_excerpt:
+        agentic_score -= 1
+
+    rubric = [
         _score(
-            "project_selection_quality",
+            "project_fit",
             project_score,
             [
                 f"repository={packet.repository.get('full_name', '') or 'unknown'}",
-                f"eligibility_summary_present={bool(packet.eligibility_summary)}",
+                f"phase_scout_project_present={bool(packet.phase_scout_project_excerpt)}",
             ],
         ),
         _score(
-            "opportunity_identification_quality",
+            "opportunity_quality",
             opportunity_score,
             [
                 f"opportunity_source={packet.opportunity.get('source', 'none')}",
-                f"selected_task_present={bool(packet.selected_task_summary)}",
+                f"phase_scout_opportunity_present={bool(packet.phase_scout_opportunity_excerpt)}",
             ],
         ),
         _score(
-            "repository_understanding_and_plan",
+            "duplicate_avoidance",
+            duplicate_score,
+            [
+                f"phase_scout_duplicate_present={bool(packet.phase_scout_duplicate_excerpt)}",
+                f"pr_tools_used={sorted(tool for tool in tools_used if 'pr' in tool)}",
+            ],
+        ),
+        _score(
+            "repository_understanding",
             understanding_score,
             [
                 f"command_count={command_count}",
@@ -655,7 +750,7 @@ def _heuristic_rubric(packet: JudgePacket) -> list[JudgementRubricScore]:
             ],
         ),
         _score(
-            "solution_correctness",
+            "execution_correctness",
             correctness_score,
             [
                 f"patch_present={has_patch}",
@@ -664,7 +759,7 @@ def _heuristic_rubric(packet: JudgePacket) -> list[JudgementRubricScore]:
             ],
         ),
         _score(
-            "verification_evidence_quality",
+            "verification_quality",
             verification_score,
             [
                 f"verification_attempts={verification_count}",
@@ -672,15 +767,25 @@ def _heuristic_rubric(packet: JudgePacket) -> list[JudgementRubricScore]:
             ],
         ),
         _score(
-            "maintainer_acceptability",
-            acceptability_score,
+            "review_readiness",
+            review_score,
             [
                 f"pull_request_state={pr_state}",
                 f"quality_gate={quality_status}",
                 f"pr_description_present={bool(packet.pr_description_excerpt)}",
             ],
         ),
+        _score(
+            "agentic_judgment",
+            agentic_score,
+            [
+                f"goal_events_present={bool(packet.goal_events_excerpt)}",
+                f"phase_transition_present={bool(packet.phase_transition_excerpt)}",
+                f"tool_violation_present={bool(packet.tool_violation_excerpt)}",
+            ],
+        ),
     ]
+    return [_apply_floors_to_score(score, floors) for score in rubric]
 
 
 def _score(dimension: str, score: int, evidence: list[str]) -> JudgementRubricScore:
@@ -689,6 +794,92 @@ def _score(dimension: str, score: int, evidence: list[str]) -> JudgementRubricSc
         evidence=evidence,
         score=max(0, min(5, score)),
     )
+
+
+def _ground_truth_check(packet: JudgePacket) -> dict[str, list[str]]:
+    floors: dict[str, list[str]] = {dimension: [] for dimension in DIMENSIONS}
+    behavior = packet.behavior_summary
+    tools_used = {str(tool) for tool in behavior.get("tools_used", []) if tool}
+    duplicate_text = packet.phase_scout_duplicate_excerpt.lower()
+    opportunity_text = packet.phase_scout_opportunity_excerpt.lower()
+    goal_text = packet.goal_events_excerpt.lower()
+    project_rows = _jsonl_row_count(packet.phase_scout_project_excerpt)
+    violation_count = _jsonl_row_count(packet.tool_violation_excerpt)
+
+    if (
+        _is_open_discovery_packet(packet)
+        and 0 < project_rows <= 1
+        and "scout_budget_exhausted" not in packet.phase_scout_project_excerpt.lower()
+        and "scout_budget_exhausted" not in packet.phase_transition_excerpt.lower()
+    ):
+        floors["project_fit"].append(
+            "only one candidate scouted in open-discovery mode while budget remained <=2"
+        )
+    if "selection_invalid" in duplicate_text:
+        floors["duplicate_avoidance"].append("selection_invalid flagged by Scout duplicate gate <=1")
+    if (
+        ("duplicate_check" in opportunity_text or "duplicate_evidence_ref" in opportunity_text)
+        and not packet.phase_scout_duplicate_excerpt
+        and not any(tool in tools_used for tool in _PR_TOOL_NAMES)
+    ):
+        floors["duplicate_avoidance"].append("duplicate check claimed without captured PR tool call =0")
+    if goal_text.count("unresolved_evidence_ref") > 1 or goal_text.count("invalid_evidence_ref") > 1:
+        floors["agentic_judgment"].append("goal update evidence_refs unresolved on more than one attempt <=2")
+    if violation_count > 5:
+        floors["agentic_judgment"].append("phase_violation count > 5 <=2")
+    if (
+        "scout_budget_exhausted" in packet.phase_transition_excerpt.lower()
+        and "selected_opportunity" not in opportunity_text
+    ):
+        floors["agentic_judgment"].append(
+            "scout budget exhausted without selected_opportunity <=2"
+        )
+    if (
+        "accepted" in packet.phase_review_maintainer_excerpt.lower()
+        and not packet.phase_review_response_excerpt
+    ):
+        floors["review_readiness"].append("accepted pre-review concerns not addressed <=2")
+    return {dimension: notes for dimension, notes in floors.items() if notes}
+
+
+_PR_TOOL_NAMES = {
+    "repo_get_open_prs",
+    "repo_get_recent_merged_prs",
+    "repo_search_prs_by_title",
+    "repo_get_issue_linkage",
+    "repo_get_pr_review_history",
+}
+
+
+def _is_open_discovery_packet(packet: JudgePacket) -> bool:
+    repository = packet.repository
+    if repository.get("fixed_candidate") or repository.get("issue_solving"):
+        return False
+    if packet.opportunity.get("source") == "configured_issue":
+        return False
+    return bool(repository.get("discovery_mode") == "open" or repository.get("query"))
+
+
+def _apply_floors_to_score(
+    score: JudgementRubricScore,
+    floors: dict[str, list[str]],
+) -> JudgementRubricScore:
+    notes = floors.get(str(score.dimension), [])
+    if not notes:
+        return score
+    capped = score.score
+    for note in notes:
+        if "=0" in note:
+            capped = 0
+        elif "<=1" in note:
+            capped = min(capped, 1)
+        elif "<=2" in note:
+            capped = min(capped, 2)
+    return score.model_copy(update={"score": capped, "notes": [*score.notes, *notes]})
+
+
+def _jsonl_row_count(text: str) -> int:
+    return sum(1 for line in text.splitlines() if line.strip())
 
 
 def _rubric_score(rubric: list[JudgementRubricScore]) -> float:

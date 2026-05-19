@@ -5,8 +5,11 @@ import json
 import time
 from typing import Any, Callable, TypeVar, cast
 
+from agents.models.interface import ModelProvider
+
 from contribarena.config.schema import RunConfig
 from contribarena.engine.goals import GoalService
+from contribarena.engine.maintainer_review import run_maintainer_prereview
 from contribarena.engine.middleware.artifact import ArtifactCapture
 from contribarena.engine.middleware.budget import BudgetTracker
 from contribarena.engine.operator_events import (
@@ -36,11 +39,83 @@ from contribarena.tools.aci import (
 from contribarena.tools.repo_eligibility import repo_check_eligibility
 from contribarena.tools.repo_issues import repo_get_issues
 from contribarena.tools.repo_metadata import repo_get_metadata
+from contribarena.tools.repo_prs import (
+    repo_get_issue_linkage,
+    repo_get_open_prs,
+    repo_get_pr_review_history,
+    repo_get_recent_merged_prs,
+    repo_search_prs_by_title,
+)
+from contribarena.tools.repo_readme import repo_get_readme
 from contribarena.tools.repo_search import repo_search
+from contribarena.tools.repo_setup_probe import repo_setup_probe
 from contribarena.tools.workspace_patch import workspace_apply_patch
 from contribarena.tools.workspace_run import workspace_run
 
 T = TypeVar("T")
+PhaseKey = tuple[str, str | None]
+
+
+ALLOWED_PHASES: dict[str, set[PhaseKey]] = {
+    "repo.search": {("scout", "project")},
+    "repo.eligibility": {("scout", "project"), ("scout", "opportunity")},
+    "repo.metadata": {("scout", "project"), ("scout", "opportunity")},
+    "repo.readme": {("scout", "project"), ("scout", "opportunity")},
+    "repo.setup_probe": {("scout", "project")},
+    "repo.issues": {("scout", "opportunity")},
+    "repo.open_prs": {("scout", "opportunity")},
+    "repo.recent_merged_prs": {("scout", "opportunity")},
+    "repo.search_prs_by_title": {("scout", "opportunity")},
+    "repo.issue_linkage": {("scout", "opportunity")},
+    "repo.pr_review_history": {("scout", "opportunity"), ("review", None)},
+    "aci_view": {("scout", "project"), ("scout", "opportunity"), ("work", None), ("review", None)},
+    "aci_search": {("scout", "opportunity"), ("work", None), ("review", None)},
+    "aci_find_files": {
+        ("scout", "project"),
+        ("scout", "opportunity"),
+        ("work", None),
+        ("review", None),
+    },
+    "aci_apply_patch": {("work", None), ("review", None)},
+    "aci_replace": {("work", None), ("review", None)},
+    "aci_insert": {("work", None), ("review", None)},
+    "aci_create": {("work", None), ("review", None)},
+    "aci_undo": {("work", None), ("review", None)},
+    "aci_verify": {("work", None), ("review", None)},
+    "aci_suggest_verification": {("work", None), ("review", None)},
+    "aci_clean_generated": {("work", None), ("review", None)},
+    "aci_submit_patch": {("work", None), ("review", None)},
+    "aci_submit_patch_finalize": {("review", None)},
+    "aci_dispute_review": {("review", None)},
+}
+
+ALWAYS_ALLOWED_TOOLS = {
+    "aci_goal_update",
+    "aci_memory_get_context",
+    "aci_memory_search",
+    "aci_memory_note",
+    "aci_memory_plan_update",
+    "aci_runtime_get_context",
+    "aci_recover_invalid_action",
+    "operator_report_progress",
+    "workspace.run",
+    "workspace.apply_patch",
+}
+
+SCOUT_PROJECT_BUDGET_TOOLS = {
+    "repo.eligibility",
+    "repo.metadata",
+    "repo.readme",
+    "repo.setup_probe",
+}
+SCOUT_OPPORTUNITY_BUDGET_TOOLS = {"repo.issues"}
+SCOUT_DUPLICATE_BUDGET_TOOLS = {
+    "repo.open_prs",
+    "repo.recent_merged_prs",
+    "repo.search_prs_by_title",
+    "repo.issue_linkage",
+    "repo.pr_review_history",
+}
 
 
 @dataclass
@@ -53,6 +128,13 @@ class ToolRegistry:
     operator: OperatorProgressWriter | None = None
     memory: MemoryService | None = None
     goals: GoalService | None = None
+    model_provider: ModelProvider | None = None
+
+    def current_phase_key(self) -> PhaseKey:
+        if self.goals is None:
+            return ("scout", "project")
+        context = self.goals.context
+        return (context.current_phase, context.current_sub_phase)
 
     def repo_search(self, query: str = "", filters: object | None = None) -> object:
         return self._record(
@@ -78,12 +160,91 @@ class ToolRegistry:
             payload={"candidate": str(candidate)},
         )
 
+    def repo_get_readme(self, candidate: object, max_chars: int = 6000) -> object:
+        return self._record(
+            state=RunState.REPO_PROFILED,
+            event="repo.readme",
+            fn=lambda: repo_get_readme(candidate, max_chars=max_chars),  # type: ignore[arg-type]
+            payload={"candidate": str(candidate), "max_chars": max_chars},
+        )
+
     def repo_get_issues(self, candidate: object, filters: object | None = None) -> object:
         return self._record(
             state=RunState.OPPORTUNITIES_RANKED,
             event="repo.issues",
             fn=lambda: repo_get_issues(candidate, filters=filters),  # type: ignore[arg-type]
             payload={"candidate": str(candidate), "filters": str(filters)},
+        )
+
+    def repo_get_open_prs(self, candidate: object, limit: int = 30) -> object:
+        return self._record(
+            state=RunState.OPPORTUNITIES_RANKED,
+            event="repo.open_prs",
+            fn=lambda: repo_get_open_prs(candidate, limit=limit),  # type: ignore[arg-type]
+            payload={"candidate": str(candidate), "limit": limit},
+        )
+
+    def repo_get_recent_merged_prs(self, candidate: object, limit: int = 30) -> object:
+        return self._record(
+            state=RunState.OPPORTUNITIES_RANKED,
+            event="repo.recent_merged_prs",
+            fn=lambda: repo_get_recent_merged_prs(candidate, limit=limit),  # type: ignore[arg-type]
+            payload={"candidate": str(candidate), "limit": limit},
+        )
+
+    def repo_search_prs_by_title(
+        self, candidate: object, query: str, limit: int = 20
+    ) -> object:
+        return self._record(
+            state=RunState.OPPORTUNITIES_RANKED,
+            event="repo.search_prs_by_title",
+            fn=lambda: repo_search_prs_by_title(candidate, query, limit=limit),  # type: ignore[arg-type]
+            payload={"candidate": str(candidate), "query": query, "limit": limit},
+        )
+
+    def repo_get_issue_linkage(self, candidate: object, issue_number: int) -> object:
+        return self._record(
+            state=RunState.OPPORTUNITIES_RANKED,
+            event="repo.issue_linkage",
+            fn=lambda: repo_get_issue_linkage(candidate, issue_number),  # type: ignore[arg-type]
+            payload={"candidate": str(candidate), "issue_number": issue_number},
+        )
+
+    def repo_get_pr_review_history(self, candidate: object, limit: int = 20) -> object:
+        return self._record(
+            state=RunState.OPPORTUNITIES_RANKED,
+            event="repo.pr_review_history",
+            fn=lambda: repo_get_pr_review_history(candidate, limit=limit),  # type: ignore[arg-type]
+            payload={"candidate": str(candidate), "limit": limit},
+        )
+
+    def repo_setup_probe(
+        self,
+        candidate: object,
+        max_probe_seconds: int | None = None,
+        install_dependencies: bool = False,
+    ) -> object:
+        seconds = max_probe_seconds or self.config.run.budget.scout.max_probe_seconds_per_repo
+
+        def run() -> object:
+            probe, command = repo_setup_probe(
+                self.workspace,
+                candidate,  # type: ignore[arg-type]
+                max_probe_seconds=seconds,
+                install_dependencies=install_dependencies,
+            )
+            self.capture.record_command(command)
+            return probe
+
+        return self._record(
+            state=RunState.WORKSPACE_CHECKED,
+            event="repo.setup_probe",
+            fn=run,
+            payload={
+                "candidate": str(candidate),
+                "max_probe_seconds": seconds,
+                "install_dependencies": install_dependencies,
+            },
         )
 
     def workspace_run(self, cmd: str, timeout_seconds: int | None = None) -> CommandResult:
@@ -163,6 +324,10 @@ class ToolRegistry:
         rationale: str = "",
         expected_files: list[str] | None = None,
     ) -> AciResult:
+        if self.current_phase_key()[0] == "review" and _review_resubmit_rounds_used(
+            self.capture
+        ) >= self.config.run.budget.review.max_review_rounds:
+            return _review_round_limit_result("aci_apply_patch")
         return self._record_aci(
             state=RunState.WORKSPACE_CHECKED,
             event="aci.apply_patch",
@@ -180,6 +345,29 @@ class ToolRegistry:
                 "paths": _operation_values(operations, "path"),
                 "expected_files": expected_files or [],
                 "rationale": truncate_for_operator(rationale, 240),
+            },
+        )
+
+    def aci_dispute_review(
+        self,
+        concern_id: str,
+        rebuttal_text: str,
+        evidence_refs_json: str = "[]",
+    ) -> AciResult:
+        return self._record_aci(
+            state=RunState.WORKSPACE_CHECKED,
+            event="aci.dispute_review",
+            phase="review",
+            tool="aci_dispute_review",
+            fn=lambda: self._dispute_review_execution(
+                concern_id,
+                rebuttal_text,
+                evidence_refs_json,
+            ),
+            payload={
+                "concern_id": concern_id,
+                "rebuttal_bytes": len(rebuttal_text.encode("utf-8")),
+                "evidence_refs_json": evidence_refs_json,
             },
         )
 
@@ -510,23 +698,41 @@ class ToolRegistry:
         objective: str = "",
         status: str = "active",
         evidence: str = "",
+        scope: str = "",
+        evidence_refs_json: str = "[]",
+        next_objective: str = "",
     ) -> AciResult:
         def run() -> AciResult:
             if self.goals is None or not self.goals.enabled:
                 return _goal_error("goal_disabled", "Goal tracking is disabled for this run.")
-            if (
-                status == "active"
-                and self.goals.abandoned_count >= self.config.goal.max_abandoned_goals_per_run
+            try:
+                evidence_refs = json.loads(evidence_refs_json) if evidence_refs_json else []
+            except json.JSONDecodeError as exc:
+                return _goal_error(
+                    "invalid_evidence_refs",
+                    f"evidence_refs_json must decode to a JSON list: {exc}",
+                )
+            if not isinstance(evidence_refs, list) or not all(
+                isinstance(item, str) for item in evidence_refs
             ):
                 return _goal_error(
-                    "goal_abandon_limit",
-                    "This run has reached the short-term goal abandon limit.",
-                    terminal_status="goal_abandon_limit",
+                    "invalid_evidence_refs",
+                    "evidence_refs_json must decode to a JSON list of strings.",
                 )
-            update = self.goals.update(objective=objective, status=status, evidence=evidence)
+            budget_error = self._goal_transition_budget_error(status, scope or None)
+            if budget_error is not None:
+                return budget_error
+            update = self.goals.update(
+                objective=objective,
+                status=status,
+                evidence=evidence,
+                scope=scope or None,
+                evidence_refs=evidence_refs,
+                next_objective=next_objective,
+            )
             if self.memory is not None:
                 self.memory.set_goal_context(self.goals.context)
-            terminal_status = None
+            terminal_status = _terminal_status_for_goal_event(update.event)
             if (
                 update.success
                 and update.event is not None
@@ -548,11 +754,80 @@ class ToolRegistry:
             tool="aci_goal_update",
             payload={
                 "status": status,
+                "scope": scope,
                 "objective_bytes": len(objective.encode("utf-8")),
                 "evidence_bytes": len(evidence.encode("utf-8")),
+                "evidence_refs": len(evidence_refs_json.encode("utf-8")),
+                "next_objective_bytes": len(next_objective.encode("utf-8")),
             },
             fn=run,
         )
+
+    def _goal_transition_budget_error(
+        self,
+        status: str,
+        scope: str | None,
+    ) -> AciResult | None:
+        if self.goals is None:
+            return None
+        normalized_scope = scope or (
+            self.goals.state.short_term.scope if self.goals.state.short_term is not None else ""
+        )
+        if status == "abandoned" and normalized_scope == "repo":
+            if self.goals.abandoned_count_for_scope("repo") >= self.config.run.budget.work.max_repo_switches:
+                return _goal_error(
+                    "repo_switch_limit",
+                    "This run has reached max_repo_switches.",
+                    terminal_status="repo_switch_limit",
+                )
+        if status == "abandoned" and normalized_scope == "opportunity":
+            if (
+                self.goals.abandoned_count_for_scope("opportunity")
+                >= self.config.run.budget.work.max_opportunity_switches
+            ):
+                return _goal_error(
+                    "opportunity_switch_limit",
+                    "This run has reached max_opportunity_switches.",
+                    terminal_status="opportunity_switch_limit",
+                )
+        if status == "superseded" and normalized_scope == "contribution":
+            strategy_switches = sum(
+                1
+                for event in self.goals.events
+                if event.event_type == "goal_superseded" and event.scope == "contribution"
+            )
+            if strategy_switches >= self.config.run.budget.work.max_strategy_switches_per_opportunity:
+                return _goal_error(
+                    "strategy_switch_limit",
+                    "This opportunity has reached max_strategy_switches_per_opportunity; abandon or finalize.",
+                )
+        if status == "active" and normalized_scope == "repo":
+            if self.goals.abandoned_count_for_scope("repo") >= self.config.run.budget.work.max_repo_switches:
+                return _goal_error(
+                    "repo_switch_limit",
+                    "This run has reached max_repo_switches.",
+                    terminal_status="repo_switch_limit",
+                )
+        if status == "active" and normalized_scope == "opportunity":
+            if (
+                self.goals.abandoned_count_for_scope("opportunity")
+                >= self.config.run.budget.work.max_opportunity_switches
+            ):
+                return _goal_error(
+                    "opportunity_switch_limit",
+                    "This run has reached max_opportunity_switches.",
+                    terminal_status="opportunity_switch_limit",
+                )
+        if (
+            status == "active"
+            and self.goals.abandoned_count >= self.config.goal.max_abandoned_goals_per_run
+        ):
+            return _goal_error(
+                "goal_abandon_limit",
+                "This run has reached the short-term goal abandon limit.",
+                terminal_status="goal_abandon_limit",
+            )
+        return None
 
     def aci_recover_invalid_action(
         self,
@@ -601,6 +876,31 @@ class ToolRegistry:
             },
         )
 
+    def aci_submit_patch_finalize(self, path: str = "repo") -> AciResult:
+        return self._record_aci(
+            state=RunState.WORKSPACE_CHECKED,
+            event="aci.submit_patch_finalize",
+            phase="submission",
+            tool="aci_submit_patch_finalize",
+            fn=lambda: AciExecution(
+                result=AciResult(
+                    tool="aci_submit_patch_finalize",
+                    success=bool(_latest_successful_submit(self.capture)),
+                    output=_latest_successful_submit(self.capture).output
+                    if _latest_successful_submit(self.capture) is not None
+                    else "",
+                    error=None
+                    if _latest_successful_submit(self.capture) is not None
+                    else "finalize requires a successful draft aci_submit_patch first",
+                    recovery_kind=None
+                    if _latest_successful_submit(self.capture) is not None
+                    else "missing_draft_submission",
+                    review_notes="finalized draft submission for quality gate",
+                )
+            ),
+            payload={"path": path},
+        )
+
     def _undo_execution(self) -> AciExecution:
         if not self.capture.undo_stack:
             return AciExecution(
@@ -618,6 +918,10 @@ class ToolRegistry:
         path: str,
         no_command_verification_rationale: str = "",
     ) -> AciExecution:
+        if self.current_phase_key()[0] == "review" and _review_resubmit_rounds_used(
+            self.capture
+        ) >= self.config.run.budget.review.max_review_rounds:
+            return AciExecution(result=_review_round_limit_result("aci_submit_patch"))
         execution = aci_submit_patch(self.workspace, path)
         review_notes = _review_submission(
             self.capture,
@@ -644,6 +948,100 @@ class ToolRegistry:
             execution.result = execution.result.model_copy(update={"review_notes": notes})
         return execution
 
+    def _dispute_review_execution(
+        self,
+        concern_id: str,
+        rebuttal_text: str,
+        evidence_refs_json: str,
+    ) -> AciExecution:
+        concern_id = concern_id.strip()
+        rebuttal_text = rebuttal_text.strip()
+        if not concern_id:
+            return AciExecution(
+                result=AciResult(
+                    tool="aci_dispute_review",
+                    success=False,
+                    output="concern_id is required",
+                    error="concern_id is required",
+                    recovery_kind="invalid_tool_arguments",
+                )
+            )
+        if len(rebuttal_text) < 20:
+            return AciExecution(
+                result=AciResult(
+                    tool="aci_dispute_review",
+                    success=False,
+                    output="rebuttal_text must explain the evidence-backed disagreement",
+                    error="rebuttal_text must explain the evidence-backed disagreement",
+                    recovery_kind="invalid_tool_arguments",
+                )
+            )
+        try:
+            refs = json.loads(evidence_refs_json) if evidence_refs_json else []
+        except json.JSONDecodeError as exc:
+            return AciExecution(
+                result=AciResult(
+                    tool="aci_dispute_review",
+                    success=False,
+                    output=f"evidence_refs_json must decode to a JSON list: {exc}",
+                    error=f"evidence_refs_json must decode to a JSON list: {exc}",
+                    recovery_kind="invalid_evidence_refs",
+                )
+            )
+        if not isinstance(refs, list) or not all(isinstance(item, str) for item in refs):
+            return AciExecution(
+                result=AciResult(
+                    tool="aci_dispute_review",
+                    success=False,
+                    output="evidence_refs_json must decode to a JSON list of strings.",
+                    error="evidence_refs_json must decode to a JSON list of strings.",
+                    recovery_kind="invalid_evidence_refs",
+                )
+            )
+        if not refs:
+            return AciExecution(
+                result=AciResult(
+                    tool="aci_dispute_review",
+                    success=False,
+                    output="aci_dispute_review requires evidence_refs.",
+                    error="aci_dispute_review requires evidence_refs.",
+                    recovery_kind="missing_evidence_refs",
+                )
+            )
+        if self.goals is not None:
+            ref_error = self.goals.validate_evidence_refs([str(item) for item in refs])
+            if ref_error is not None:
+                return AciExecution(
+                    result=AciResult(
+                        tool="aci_dispute_review",
+                        success=False,
+                        output=ref_error.error_message or "invalid evidence_refs",
+                        error=ref_error.error_message or "invalid evidence_refs",
+                        recovery_kind=ref_error.error_kind or "invalid_evidence_refs",
+                    )
+                )
+        self.capture.record_phase_artifact(
+            "phase_review_response",
+            {
+                "schema_version": "1",
+                "tool_call_id": f"aci_dispute_review:{len(self.capture.steps) + 1}",
+                "tool": "aci_dispute_review",
+                "phase": "review",
+                "action": "dispute",
+                "concern_id": concern_id,
+                "rebuttal": truncate_for_operator(rebuttal_text, 1000),
+                "evidence_refs": refs,
+                "ts": time.time(),
+            },
+        )
+        return AciExecution(
+            result=AciResult(
+                tool="aci_dispute_review",
+                success=True,
+                output="review concern disputed with evidence; no simulator rerun triggered",
+            )
+        )
+
     def _record(
         self,
         state: str,
@@ -651,6 +1049,12 @@ class ToolRegistry:
         fn: Callable[[], T],
         payload: dict[str, Any],
     ) -> T:
+        scout_limit = self._scout_budget_exhausted(event, payload)
+        if scout_limit is not None:
+            return cast(T, scout_limit)
+        violation = self._phase_violation(event, payload)
+        if violation is not None:
+            return cast(T, violation)
         self.budget.record_step()
         start = time.monotonic()
         self.trace.write(state, f"{event}.started", payload)
@@ -674,6 +1078,7 @@ class ToolRegistry:
             raise
         duration = time.monotonic() - start
         self.trace.write(state, f"{event}.finished", {"result": _safe_result(result)})
+        self._record_phase_projection(event, payload, result)
         self._write_operator_event(event, "finished", result, payload)
         self.capture.record_step(
             AgentStep(
@@ -697,6 +1102,9 @@ class ToolRegistry:
         fn: Callable[[], AciExecution],
         payload: dict[str, Any],
     ) -> AciResult:
+        violation = self._phase_violation(tool, payload, phase=phase)
+        if violation is not None:
+            return violation
         self.budget.record_step()
         start = time.monotonic()
         self.trace.write(state, f"{event}.started", payload)
@@ -728,6 +1136,7 @@ class ToolRegistry:
             _annotate_aci_result(tool, execution.result),
         )
         self.capture.record_aci_result(result)
+        self._record_phase_projection(tool, payload, result)
         if execution.undo_diff:
             self.capture.record_undo_diff(execution.undo_diff)
         if phase == "recovery":
@@ -763,10 +1172,32 @@ class ToolRegistry:
                 {"tool": tool, "files_modified": result.files_modified},
             )
         if tool == "aci_submit_patch" and result.success:
+            if self.goals is not None:
+                self.goals.record_draft_submitted(
+                    evidence="aci_submit_patch produced a draft patch."
+                )
+                if self.memory is not None:
+                    self.memory.set_goal_context(self.goals.context)
+            round_number = _next_maintainer_review_round(self.capture)
+            review = run_maintainer_prereview(
+                config=self.config,
+                model_provider=self.model_provider,
+                capture=self.capture,
+                patch=result.output or "",
+                round_number=round_number,
+            )
+            self.capture.record_phase_artifact(
+                "phase_review_maintainer_review",
+                review.row,
+            )
             self.trace.write(
                 RunState.WORKSPACE_PATCH_CAPTURED,
                 "workspace.patch_captured",
-                {"bytes": len((result.output or "").encode("utf-8"))},
+                {
+                    "bytes": len((result.output or "").encode("utf-8")),
+                    "review_round": round_number,
+                    "review_status": review.row.get("status"),
+                },
             )
         if self.memory is not None:
             try:
@@ -812,6 +1243,9 @@ class ToolRegistry:
         fn: Callable[[], AciResult],
         phase: str = "memory",
     ) -> AciResult:
+        violation = self._phase_violation(tool, payload, phase=phase)
+        if violation is not None:
+            return violation
         self.budget.record_step()
         start = time.monotonic()
         self.trace.write(RunState.AGENT_ACTING, f"{event}.started", payload)
@@ -819,6 +1253,7 @@ class ToolRegistry:
         duration = time.monotonic() - start
         self.capture.record_aci_result(result)
         self.trace.write(RunState.AGENT_ACTING, f"{event}.finished", {"result": _safe_result(result)})
+        self._record_phase_projection(tool, payload, result)
         self._write_operator_event(event, "finished", result, payload, phase=phase, tool=tool)
         self.capture.record_step(
             AgentStep(
@@ -836,6 +1271,68 @@ class ToolRegistry:
             )
         )
         return result
+
+    def _record_phase_projection(
+        self,
+        tool: str,
+        payload: dict[str, Any],
+        result: object,
+    ) -> None:
+        phase, sub_phase = self.current_phase_key()
+        row = {
+            "schema_version": "1",
+            "tool_call_id": f"{tool}:{len(self.capture.steps) + 1}",
+            "tool": tool,
+            "phase": phase,
+            "sub_phase": sub_phase,
+            "success": bool(getattr(result, "success", True)),
+            "input_summary": _summary(payload),
+            "result_summary": _result_summary(result),
+            "ts": time.time(),
+        }
+        if phase == "scout" and sub_phase == "project" and tool in {
+            "repo.search",
+            "repo.eligibility",
+            "repo.metadata",
+            "repo.readme",
+            "repo.setup_probe",
+            "aci_find_files",
+            "aci_view",
+        }:
+            self.capture.record_phase_artifact("phase_scout_project_comparison", row)
+        elif phase == "scout" and sub_phase == "opportunity" and tool in {
+            "repo.issues",
+            "aci_view",
+            "aci_search",
+            "aci_find_files",
+        }:
+            self.capture.record_phase_artifact("phase_scout_opportunity_comparison", row)
+        elif phase == "scout" and sub_phase == "opportunity" and tool in {
+            "repo.open_prs",
+            "repo.recent_merged_prs",
+            "repo.search_prs_by_title",
+            "repo.issue_linkage",
+            "repo.pr_review_history",
+        }:
+            self.capture.record_phase_artifact("phase_scout_duplicate_check", row)
+        elif phase == "review" and tool in {
+            "aci_submit_patch",
+            "aci_submit_patch_finalize",
+            "aci_dispute_review",
+        }:
+            self.capture.record_phase_artifact("phase_review_response", row)
+        elif tool == "aci_goal_update" and bool(getattr(result, "success", False)):
+            goal_row = _goal_projection_row(row, result)
+            if goal_row.get("scope") == "opportunity":
+                self.capture.record_phase_artifact(
+                    "phase_scout_project_comparison",
+                    {**goal_row, "decision": "selected_project"},
+                )
+            elif goal_row.get("scope") == "contribution":
+                self.capture.record_phase_artifact(
+                    "phase_scout_opportunity_comparison",
+                    {**goal_row, "decision": "selected_opportunity"},
+                )
 
     def _write_operator_event(
         self,
@@ -865,6 +1362,172 @@ class ToolRegistry:
                 "input": _operator_payload(payload),
             },
         )
+
+    def _phase_violation(
+        self,
+        tool: str,
+        payload: dict[str, Any],
+        *,
+        phase: str | None = None,
+    ) -> AciResult | None:
+        if tool in ALWAYS_ALLOWED_TOOLS:
+            return None
+        allowed = ALLOWED_PHASES.get(tool)
+        if allowed is None:
+            return None
+        current_phase, current_sub_phase = self.current_phase_key()
+        if (current_phase, current_sub_phase) in allowed or (current_phase, None) in allowed:
+            return None
+        result = AciResult(
+            tool=tool,
+            success=False,
+            output=f"phase_violation: tool {tool} not allowed in {current_phase}/{current_sub_phase}",
+            error=f"phase_violation: tool {tool} not allowed in {current_phase}/{current_sub_phase}",
+            recovery_kind="phase_violation",
+        )
+        self.capture.record_aci_result(result)
+        self.capture.record_tool_violation(
+            {
+                "schema_version": "1",
+                "tool": tool,
+                "phase": current_phase,
+                "sub_phase": current_sub_phase,
+                "recovery_kind": "phase_violation",
+                "input_summary": _summary(payload),
+                "ts": time.time(),
+            }
+        )
+        self.trace.write(
+            RunState.AGENT_RECOVERING,
+            "agent.phase_violation",
+            {
+                "tool": tool,
+                "phase": current_phase,
+                "sub_phase": current_sub_phase,
+                "allowed": sorted(f"{item[0]}/{item[1] or '*'}" for item in allowed),
+            },
+        )
+        if self.operator is not None:
+            self.operator.write(
+                "agent",
+                "needs_attention",
+                f"tool blocked by phase gate: {tool}",
+                evidence=["trace.jsonl", "trajectory.json"],
+                payload={
+                    "tool": tool,
+                    "phase": current_phase,
+                    "sub_phase": current_sub_phase,
+                    "input": _operator_payload(payload),
+                },
+            )
+        self.capture.record_step(
+            AgentStep(
+                step=len(self.capture.steps) + 1,
+                phase=phase or current_phase,
+                tool=tool,
+                input_summary=_summary(payload),
+                result_summary=result.output,
+                state=str(RunState.AGENT_RECOVERING),
+                duration_seconds=0.0,
+                error=result.error,
+                accepted=False,
+                recovery_kind="phase_violation",
+            )
+        )
+        return result
+
+    def _scout_budget_exhausted(
+        self,
+        tool: str,
+        payload: dict[str, Any],
+    ) -> AciResult | None:
+        current_phase, current_sub_phase = self.current_phase_key()
+        if current_phase != "scout":
+            return None
+        budget_name = ""
+        limit = 0
+        used = 0
+        if tool in SCOUT_PROJECT_BUDGET_TOOLS:
+            budget_name = "max_candidate_repos_considered"
+            limit = self.config.run.budget.scout.max_candidate_repos_considered
+            used = self._count_successful_tool_calls(SCOUT_PROJECT_BUDGET_TOOLS)
+        elif tool in SCOUT_OPPORTUNITY_BUDGET_TOOLS:
+            budget_name = "max_opportunities_considered"
+            limit = self.config.run.budget.scout.max_opportunities_considered
+            used = self._count_successful_tool_calls(SCOUT_OPPORTUNITY_BUDGET_TOOLS)
+        elif tool in SCOUT_DUPLICATE_BUDGET_TOOLS:
+            budget_name = "max_duplicate_checks"
+            limit = self.config.run.budget.scout.max_duplicate_checks
+            used = self._count_successful_tool_calls(SCOUT_DUPLICATE_BUDGET_TOOLS)
+        if not budget_name or used < limit:
+            return None
+        result = AciResult(
+            tool=tool,
+            success=False,
+            output=f"scout_budget_exhausted: {budget_name} reached",
+            error=f"scout_budget_exhausted: {budget_name} reached",
+            recovery_kind="scout_budget_exhausted",
+        )
+        self.capture.record_aci_result(result)
+        row = {
+            "schema_version": "1",
+            "tool_call_id": f"{tool}:{len(self.capture.steps) + 1}",
+            "tool": tool,
+            "phase": current_phase,
+            "sub_phase": current_sub_phase,
+            "success": False,
+            "budget": budget_name,
+            "limit": limit,
+            "used": used,
+            "input_summary": _summary(payload),
+            "result_summary": result.output,
+            "ts": time.time(),
+        }
+        artifact = (
+            "phase_scout_project_comparison"
+            if tool in SCOUT_PROJECT_BUDGET_TOOLS
+            else "phase_scout_duplicate_check"
+            if tool in SCOUT_DUPLICATE_BUDGET_TOOLS
+            else "phase_scout_opportunity_comparison"
+        )
+        self.capture.record_phase_artifact(artifact, row)
+        if self.goals is not None:
+            self.goals.record_budget_event(
+                event_type="scout_budget_exhausted",
+                phase="scout",
+                sub_phase=current_sub_phase,
+                evidence=f"{budget_name} reached while calling {tool}",
+            )
+        self.trace.write(
+            RunState.AGENT_RECOVERING,
+            "agent.scout_budget_exhausted",
+            {
+                "tool": tool,
+                "phase": current_phase,
+                "sub_phase": current_sub_phase,
+                "budget": budget_name,
+                "limit": limit,
+                "used": used,
+            },
+        )
+        self.capture.record_step(
+            AgentStep(
+                step=len(self.capture.steps) + 1,
+                phase=current_phase,
+                tool=tool,
+                input_summary=_summary(payload),
+                result_summary=result.output,
+                state=str(RunState.AGENT_RECOVERING),
+                duration_seconds=0.0,
+                error=result.error,
+                accepted=False,
+                recovery_kind="scout_budget_exhausted",
+            )
+        )
+        return result
+
+    def _count_successful_tool_calls(self, tools: set[str]) -> int:
+        return sum(1 for step in self.capture.steps if step.tool in tools and step.error is None)
 
 
 def _safe_result(result: object) -> object:
@@ -996,6 +1659,36 @@ def _parse_evidence_refs(value: str) -> list[str]:
     return [truncate_for_operator(parsed, 180)]
 
 
+def _goal_projection_row(base: dict[str, object], result: object) -> dict[str, object]:
+    row = dict(base)
+    output = str(getattr(result, "output", "") or "")
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError:
+        return row
+    if not isinstance(payload, dict):
+        return row
+    event = payload.get("event")
+    if not isinstance(event, dict):
+        return row
+    for key in (
+        "event_id",
+        "event_type",
+        "goal_id",
+        "status",
+        "scope",
+        "phase",
+        "sub_phase",
+        "objective",
+        "evidence_summary",
+        "evidence_refs",
+        "next_objective",
+    ):
+        if key in event:
+            row[key] = event[key]
+    return row
+
+
 def _configured_repo_full_name(config: RunConfig) -> str:
     if config.discovery.candidates:
         return config.discovery.candidates[0].full_name
@@ -1056,6 +1749,16 @@ def _goal_error(kind: str, message: str, terminal_status: str | None = None) -> 
     )
 
 
+def _terminal_status_for_goal_event(event: object | None) -> str | None:
+    if event is None or getattr(event, "event_type", "") != "goal_abandoned":
+        return None
+    if getattr(event, "scope", "") == "repo":
+        return "repo_abandoned"
+    if getattr(event, "scope", "") == "opportunity":
+        return "opportunity_abandoned"
+    return None
+
+
 def _annotate_aci_result(tool: str, result: AciResult) -> AciResult:
     if result.success or result.recovery_kind or result.terminal_status:
         return result
@@ -1064,6 +1767,35 @@ def _annotate_aci_result(tool: str, result: AciResult) -> AciResult:
     return result.model_copy(
         update={"recovery_kind": recovery_kind, "terminal_status": terminal_status}
     )
+
+
+def _latest_successful_submit(capture: ArtifactCapture) -> AciResult | None:
+    for result in reversed(capture.aci_results):
+        if result.tool == "aci_submit_patch" and result.success:
+            return result
+    return None
+
+
+def _review_round_limit_result(tool: str) -> AciResult:
+    message = (
+        "review_round_limit: max_review_rounds exhausted; finalize, dispute with evidence, "
+        "or abandon/supersede the goal"
+    )
+    return AciResult(
+        tool=tool,
+        success=False,
+        output=message,
+        error=message,
+        recovery_kind="review_round_limit",
+    )
+
+
+def _review_resubmit_rounds_used(capture: ArtifactCapture) -> int:
+    return max(0, sum(1 for item in capture.phase_review_maintainer_rows if item) - 1)
+
+
+def _next_maintainer_review_round(capture: ArtifactCapture) -> int:
+    return sum(1 for item in capture.phase_review_maintainer_rows if item) + 1
 
 
 def _annotate_recovery_retry(capture: ArtifactCapture, result: AciResult) -> AciResult:

@@ -34,6 +34,8 @@ class BackendReadApiTests(unittest.TestCase):
             self.assertEqual("agent-a", bundle["leaderboard"][0]["agent_handle"])
             artifact = model.public_artifact_path("run-a", "patch.diff")
             self.assertIsNotNone(artifact)
+            self.assertEqual("work", model.phase_history("run-a")[0]["phase"])
+            self.assertEqual("aci_submit_patch", model.tool_violations("run-a")[0]["tool"])
 
     def test_api_registers_read_routes_and_model_serves_payloads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -134,6 +136,40 @@ def _write_run(path: Path, *, run_id: str, agent_handle: str) -> None:
     )
     (path / "patch.diff").write_text("diff --git a/app.py b/app.py\n", encoding="utf-8")
     (path / "trace.jsonl").write_text("", encoding="utf-8")
+    (path / "phase_transition.jsonl").write_text(
+        json.dumps(
+            {
+                "schema_version": "1",
+                "event_id": "event-a",
+                "source": "goal_events.jsonl",
+                "run_id": run_id,
+                "goal_id": "goal-a",
+                "event_type": "goal_created",
+                "scope": "contribution",
+                "status": "active",
+                "phase": "work",
+                "sub_phase": None,
+                "created_at": "2026-05-15T00:00:10Z",
+            },
+            ensure_ascii=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (path / "tool_violation_log.jsonl").write_text(
+        json.dumps(
+            {
+                "schema_version": "1",
+                "tool": "aci_submit_patch",
+                "phase": "scout",
+                "sub_phase": "project",
+                "recovery_kind": "phase_violation",
+            },
+            ensure_ascii=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 if __name__ == "__main__":

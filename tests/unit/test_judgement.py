@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from contribarena.config.schema import (
@@ -42,10 +43,28 @@ def _packet(
         selected_task_summary="Fix a small correctness issue.",
         eligibility_summary="Repository is eligible for the season.",
         maintainer_fit_summary="The change follows repository guidance.",
-        behavior_summary={"verification_attempts": 3, "command_count": 2, "aci_step_count": 8},
+        behavior_summary={
+            "verification_attempts": 3,
+            "command_count": 2,
+            "aci_step_count": 8,
+            "tools_used": [
+                "repo_get_open_prs",
+                "repo_get_recent_merged_prs",
+                "aci_view",
+                "aci_verify",
+                "aci_submit_patch",
+            ],
+        },
         patch_excerpt="diff --git a/app.py b/app.py\n-old\n+new\n",
         pr_description_excerpt="Fixes the reported issue with a small patch.",
         verification_excerpt="compileall passed",
+        phase_scout_project_excerpt='{"repo":"example/repo","decision":"selected"}',
+        phase_scout_opportunity_excerpt=(
+            '{"selected_opportunity":true,"duplicate_evidence_ref":"duplicate:1"}'
+        ),
+        phase_scout_duplicate_excerpt='{"opportunity_id":"1","tool":"repo_get_open_prs"}',
+        goal_events_excerpt='{"status":"active","scope":"contribution"}',
+        phase_transition_excerpt='{"phase":"work"}',
     )
 
 
@@ -80,18 +99,113 @@ class JudgementScoringTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = _config(Path(tmp))
             config.judgement.dimension_weights = {
+                "project_fit": 0.0,
+                "opportunity_quality": 0.0,
+                "duplicate_avoidance": 0.0,
+                "repository_understanding": 0.0,
+                "execution_correctness": 1.0,
+                "verification_quality": 0.0,
+                "review_readiness": 0.0,
+                "agentic_judgment": 0.0,
+            }
+            judgement = judge_run(config=config, run_id="run-1", run_dir=Path(tmp), packet=packet)
+
+        self.assertEqual(0.0, judgement.judge_score)
+        execution = next(
+            item for item in judgement.aggregate_rubric if item.dimension == "execution_correctness"
+        )
+        self.assertEqual(1.0, execution.weight)
+        self.assertTrue(
+            all(
+                score.weight == 1.0
+                for score in judgement.judges[0].rubric
+                if score.dimension == "execution_correctness"
+            )
+        )
+
+    def test_judge_emits_m010_dimensions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(Path(tmp))
+            judgement = judge_run(
+                config=config,
+                run_id="run-1",
+                run_dir=Path(tmp),
+                packet=_packet(),
+            )
+
+        self.assertEqual(
+            [
+                "project_fit",
+                "opportunity_quality",
+                "duplicate_avoidance",
+                "repository_understanding",
+                "execution_correctness",
+                "verification_quality",
+                "review_readiness",
+                "agentic_judgment",
+            ],
+            [item.dimension for item in judgement.aggregate_rubric],
+        )
+
+    def test_old_dimension_weight_names_are_accepted_as_aliases(self) -> None:
+        packet = _packet()
+        packet.patch_excerpt = ""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(Path(tmp))
+            config.judgement.dimension_weights = {
                 "project_selection_quality": 0.0,
                 "opportunity_identification_quality": 0.0,
                 "repository_understanding_and_plan": 0.0,
                 "solution_correctness": 1.0,
                 "verification_evidence_quality": 0.0,
                 "maintainer_acceptability": 0.0,
+                "duplicate_avoidance": 0.0,
+                "agentic_judgment": 0.0,
             }
             judgement = judge_run(config=config, run_id="run-1", run_dir=Path(tmp), packet=packet)
 
         self.assertEqual(0.0, judgement.judge_score)
-        self.assertEqual(1.0, judgement.aggregate_rubric[3].weight)
-        self.assertTrue(all(score.weight == 1.0 for score in judgement.judges[0].rubric[3:4]))
+
+    def test_duplicate_claim_without_pr_tool_is_floored_to_zero(self) -> None:
+        packet = _packet()
+        packet.phase_scout_duplicate_excerpt = ""
+        packet.behavior_summary["tools_used"] = ["aci_search", "aci_view"]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(Path(tmp))
+            judgement = judge_run(config=config, run_id="run-1", run_dir=Path(tmp), packet=packet)
+
+        duplicate = next(
+            item
+            for item in judgement.judges[0].rubric
+            if item.dimension == "duplicate_avoidance"
+        )
+        self.assertEqual(0, duplicate.score)
+        self.assertTrue(duplicate.notes)
+
+    def test_open_discovery_single_candidate_project_fit_floor(self) -> None:
+        packet = _packet()
+        packet.repository = {"discovery_mode": "open", "query": "python agent"}
+        packet.phase_scout_project_excerpt = '{"tool":"repo.metadata"}\n'
+
+        rubric = judgement_module._heuristic_rubric(packet)
+
+        project_fit = next(item for item in rubric if item.dimension == "project_fit")
+        self.assertLessEqual(project_fit.score, 2)
+        self.assertIn("only one candidate", project_fit.notes[0])
+
+    def test_dimension_packets_are_scoped_to_primary_evidence(self) -> None:
+        packet = _packet()
+
+        packets = judgement_module.build_judge_dimension_packets(packet)
+
+        self.assertIn("phase_scout_project_comparison", packets["project_fit"])
+        self.assertNotIn("patch_excerpt", packets["project_fit"])
+        self.assertIn("patch_excerpt", packets["execution_correctness"])
+        self.assertNotIn("phase_scout_duplicate_check", packets["execution_correctness"])
+        self.assertIn("phase_review_response", packets["review_readiness"])
+        self.assertNotIn("phase_scout_project_comparison", packets["review_readiness"])
 
     def test_default_judges_use_all_configured_provider_models(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -150,7 +264,7 @@ class JudgementScoringTests(unittest.TestCase):
                     agents_run_config_cls=FakeRunConfig,
                     model_settings_cls=FakeModelSettings,
                     runner=FakeRunner(),
-                    dimension="solution_correctness",
+                    dimension="execution_correctness",
                     judge=JudgementJudgeConfig(id="judge", model="compatible/judge"),
                     model_provider=object(),  # type: ignore[arg-type]
                     packet=_packet(),
