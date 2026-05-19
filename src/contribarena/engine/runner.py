@@ -1761,6 +1761,8 @@ def _record_opened_live_pr(
             number=pr_result.number,
             url=pr_result.url,
             branch=draft.branch,
+            season_id=config.run.season_id or "",
+            participant_id=config.run.participant_id or "",
         )
         if config.run.mode == "external_live":
             upsert_lifecycle_record(
@@ -1779,6 +1781,8 @@ def _record_opened_live_pr(
                     initial_poll_delay_seconds=(
                         config.governance.external_live.initial_poll_delay_seconds
                     ),
+                    season_id=config.run.season_id or "",
+                    participant_id=config.run.participant_id or "",
                 ),
             )
     save_governance_state(config, state)

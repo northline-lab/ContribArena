@@ -27,6 +27,8 @@ class GovernanceDecision(BaseModel):
 
 
 class GovernancePrRef(BaseModel):
+    season_id: str = ""
+    participant_id: str = ""
     repository: str
     number: int
     url: str = ""
@@ -61,6 +63,8 @@ class MaintainerSignal(BaseModel):
 
 
 class PrLifecycleRecord(BaseModel):
+    season_id: str = ""
+    participant_id: str = ""
     repository: str
     number: int
     url: str = ""

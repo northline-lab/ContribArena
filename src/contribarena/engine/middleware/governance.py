@@ -176,9 +176,18 @@ def record_governance_pr(
     number: int,
     url: str = "",
     branch: str = "",
+    season_id: str = "",
+    participant_id: str = "",
 ) -> None:
     state.pull_requests.append(
-        GovernancePrRef(repository=repository, number=number, url=url, branch=branch)
+        GovernancePrRef(
+            season_id=season_id,
+            participant_id=participant_id,
+            repository=repository,
+            number=number,
+            url=url,
+            branch=branch,
+        )
     )
 
 
@@ -199,6 +208,10 @@ def update_governance_pr_state(
 def upsert_lifecycle_record(state: GovernanceState, record: PrLifecycleRecord) -> None:
     for index, existing in enumerate(state.lifecycle_records):
         if existing.repository == record.repository and existing.number == record.number:
+            if not record.season_id and existing.season_id:
+                record = record.model_copy(update={"season_id": existing.season_id})
+            if not record.participant_id and existing.participant_id:
+                record = record.model_copy(update={"participant_id": existing.participant_id})
             state.lifecycle_records[index] = record
             return
     state.lifecycle_records.append(record)

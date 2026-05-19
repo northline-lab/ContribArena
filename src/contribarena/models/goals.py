@@ -46,6 +46,8 @@ class GoalEvent(BaseModel):
     event_id: str
     event_type: str
     run_id: str
+    season_id: str = ""
+    participant_id: str = ""
     goal_id: str = ""
     status: GoalStatus | None = None
     scope: GoalScope | None = None
@@ -61,6 +63,8 @@ class GoalEvent(BaseModel):
 
 class GoalState(BaseModel):
     schema_version: Literal["1"] = "1"
+    season_id: str = ""
+    participant_id: str = ""
     short_term: ShortTermGoal | None = None
     current_phase: RunPhase = "scout"
     current_sub_phase: SubPhase = "project"

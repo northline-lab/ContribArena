@@ -31,6 +31,8 @@ class GoalServiceTest(unittest.TestCase):
     def test_short_term_goal_create_update_complete_and_reload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = _config(Path(tmp) / "runs")
+            config.run.season_id = "season_0"
+            config.run.participant_id = "season_0:local-stub"
             service = GoalService(config, run_id="run-1")
 
             created = service.update(objective="Find one small code PR.", status="active")
@@ -45,6 +47,8 @@ class GoalServiceTest(unittest.TestCase):
 
             self.assertTrue(created.success)
             self.assertEqual("goal_created", created.event.event_type if created.event else "")
+            self.assertEqual("season_0", created.event.season_id if created.event else "")
+            self.assertEqual("season_0:local-stub", created.event.participant_id if created.event else "")
             self.assertEqual("contribution", created.goals.short_term.scope)
             self.assertEqual("work", created.goals.current_phase)
             self.assertTrue(updated.success)
@@ -56,6 +60,8 @@ class GoalServiceTest(unittest.TestCase):
             self.assertEqual("complete", reloaded.context.short_term.status)
             self.assertIn("goal_completed", service.events_text())
             state = json.loads(goal_state_path(config).read_text(encoding="utf-8"))
+            self.assertEqual("season_0", state["season_id"])
+            self.assertEqual("season_0:local-stub", state["participant_id"])
             self.assertEqual("complete", state["short_term"]["status"])
 
     def test_goal_scope_derives_phase_and_projection(self) -> None:

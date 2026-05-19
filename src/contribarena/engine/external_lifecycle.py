@@ -29,6 +29,8 @@ def lifecycle_record_for_opened_pr(
     poll_interval_seconds: int,
     initial_poll_delay_seconds: int | None = None,
     originating_run_dir: str = "",
+    season_id: str = "",
+    participant_id: str = "",
     now: datetime | None = None,
 ) -> PrLifecycleRecord:
     observed_at = _iso(now or datetime.now(UTC))
@@ -39,6 +41,8 @@ def lifecycle_record_for_opened_pr(
     )
     next_poll_at = _iso(_parse(observed_at) + timedelta(seconds=next_poll_delay))
     return PrLifecycleRecord(
+        season_id=season_id,
+        participant_id=participant_id,
         repository=repository,
         number=number,
         url=url,

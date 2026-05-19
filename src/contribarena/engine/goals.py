@@ -59,7 +59,10 @@ class GoalService:
         self.run_id = run_id
         self.evidence_ref_validator = evidence_ref_validator
         self.path = goal_state_path(config)
-        self.state = GoalState()
+        self.state = GoalState(
+            season_id=config.run.season_id or "",
+            participant_id=config.run.participant_id or "",
+        )
         self.events: list[GoalEvent] = []
         self.degraded = False
         self.error = ""
@@ -243,6 +246,8 @@ class GoalService:
                             "event_id": event.event_id,
                             "source": "goal_events.jsonl",
                             "run_id": event.run_id,
+                            "season_id": event.season_id,
+                            "participant_id": event.participant_id,
                             "goal_id": event.goal_id,
                             "event_type": event.event_type,
                             "scope": event.scope,
@@ -266,6 +271,8 @@ class GoalService:
                 event_id=uuid.uuid4().hex[:12],
                 event_type="draft_submitted",
                 run_id=self.run_id,
+                season_id=self.config.run.season_id or "",
+                participant_id=self.config.run.participant_id or "",
                 goal_id=goal.goal_id,
                 status=goal.status,
                 scope=goal.scope,
@@ -293,6 +300,8 @@ class GoalService:
                 event_id=uuid.uuid4().hex[:12],
                 event_type=event_type,
                 run_id=self.run_id,
+                season_id=self.config.run.season_id or "",
+                participant_id=self.config.run.participant_id or "",
                 goal_id=goal.goal_id if goal is not None else "",
                 status=goal.status if goal is not None else None,
                 scope=goal.scope if goal is not None else None,
@@ -314,12 +323,17 @@ class GoalService:
             return
         try:
             self.state = GoalState.model_validate_json(self.path.read_text(encoding="utf-8"))
+            self._attach_identity_to_state()
         except (OSError, ValidationError, json.JSONDecodeError) as exc:
             self.degraded = True
             self.error = redact_text(str(exc), max_chars=256)
-            self.state = GoalState()
+            self.state = GoalState(
+                season_id=self.config.run.season_id or "",
+                participant_id=self.config.run.participant_id or "",
+            )
 
     def _save(self) -> None:
+        self._attach_identity_to_state()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(
             json.dumps(self.state.model_dump(mode="json"), indent=2, ensure_ascii=True) + "\n",
@@ -345,6 +359,8 @@ class GoalService:
             event_id=uuid.uuid4().hex[:12],
             event_type=event_type,
             run_id=self.run_id,
+            season_id=self.config.run.season_id or "",
+            participant_id=self.config.run.participant_id or "",
             goal_id=goal.goal_id,
             status=event_status or goal.status,
             scope=goal.scope,
@@ -358,6 +374,17 @@ class GoalService:
         )
         self.events.append(event)
         return GoalUpdateResult(success=True, goals=self.context, event=event)
+
+    def _attach_identity_to_state(self) -> None:
+        season_id = self.config.run.season_id or self.state.season_id
+        participant_id = self.config.run.participant_id or self.state.participant_id
+        if season_id != self.state.season_id or participant_id != self.state.participant_id:
+            self.state = self.state.model_copy(
+                update={
+                    "season_id": season_id,
+                    "participant_id": participant_id,
+                }
+            )
 
     def _validate_evidence_refs(self, refs: list[str]) -> GoalUpdateResult | None:
         for ref in refs:

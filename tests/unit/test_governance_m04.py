@@ -22,6 +22,7 @@ from contribarena.config.schema import (
     WorkspaceConfig,
 )
 from contribarena.engine.controller import LocalController
+from contribarena.engine.external_lifecycle import lifecycle_record_for_opened_pr
 from contribarena.engine.goals import GoalService
 from contribarena.engine.middleware.governance import (
     GovernanceMiddleware,
@@ -36,6 +37,24 @@ from contribarena.tools.github_pr import PullRequestStatusResult
 
 
 class GovernanceM04Test(unittest.TestCase):
+    def test_lifecycle_record_carries_season_identity(self) -> None:
+        record = lifecycle_record_for_opened_pr(
+            repository="example/repo",
+            number=42,
+            url="https://github.com/example/repo/pull/42",
+            branch="contribarena/test",
+            head="contribarena-bot:contribarena/test",
+            base="main",
+            head_sha="abc123",
+            ci_status=None,
+            poll_interval_seconds=3600,
+            season_id="season_0",
+            participant_id="season_0:local-stub",
+        )
+
+        self.assertEqual("season_0", record.season_id)
+        self.assertEqual("season_0:local-stub", record.participant_id)
+
     def test_governance_blocks_when_live_disabled(self) -> None:
         config = _owned_config(live_enabled=False)
         decision = GovernanceMiddleware().evaluate_pr_open(
@@ -145,7 +164,16 @@ class GovernanceM04Test(unittest.TestCase):
 
     def test_controller_preserves_state_written_by_runner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            config = _owned_config(live_enabled=True, output_root=Path(tmp) / "runs")
+            root = Path(tmp)
+            config = _owned_config(live_enabled=True, output_root=root / "runs")
+            config.run.season_id = "season_0"
+            config.run.participant_id = "season_0:local-stub"
+            config.season = SeasonConfig(
+                id="season_0",
+                status="active",
+                state_root=root / "seasons",
+                participants=[SeasonParticipantConfig(model="local-stub")],
+            )
             launcher = FakeLauncher(write_open_pr=True)
 
             with patch.dict(os.environ, {"GITHUB_TOKEN": "test-token"}):
@@ -155,6 +183,8 @@ class GovernanceM04Test(unittest.TestCase):
             state = load_governance_state(config)
             self.assertEqual(1, len(state.pull_requests))
             self.assertEqual("example/repo", state.pull_requests[0].repository)
+            self.assertEqual("season_0", state.pull_requests[0].season_id)
+            self.assertEqual("season_0:local-stub", state.pull_requests[0].participant_id)
 
     def test_external_live_governance_passes_without_owned_allowlist(self) -> None:
         config = _external_config(live_enabled=True)
@@ -679,6 +709,8 @@ class FakeLauncher:
                 number=42,
                 url="https://github.com/example/repo/pull/42",
                 branch="contribarena/test",
+                season_id=config.run.season_id or "",
+                participant_id=config.run.participant_id or "",
             )
             save_governance_state(config, state)
         return RunResult(
