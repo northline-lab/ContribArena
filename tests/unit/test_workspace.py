@@ -87,6 +87,7 @@ class WorkspaceTest(unittest.TestCase):
                 "#!/usr/bin/env sh\n"
                 f'echo "$@" >> {log_path}\n'
                 'if [ "$1" = "inspect" ]; then exit 0; fi\n'
+                'if [ "$1" = "start" ]; then exit 0; fi\n'
                 'if [ "$1" = "run" ]; then exit 9; fi\n'
                 "exit 0\n",
                 encoding="utf-8",
@@ -109,9 +110,50 @@ class WorkspaceTest(unittest.TestCase):
 
             log = log_path.read_text(encoding="utf-8")
             self.assertIn("inspect contribarena-season_0-agent-owner-repo", log)
+            self.assertIn("start contribarena-season_0-agent-owner-repo", log)
             self.assertNotIn("run -d", log)
             self.assertEqual("contribarena-season_0-agent-owner-repo", metadata_path.read_text().strip())
             self.assertTrue((metadata_path.parent / "last_used_at").exists())
+
+    def test_persistent_workspace_syncs_repository_with_fetch_reset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            log_path = root / "docker.log"
+            metadata_path = root / "workspace" / "container_id"
+            bin_dir.mkdir()
+            docker = bin_dir / "docker"
+            docker.write_text(
+                "#!/usr/bin/env sh\n"
+                f'echo "$@" >> {log_path}\n'
+                'if [ "$1" = "inspect" ]; then exit 0; fi\n'
+                'if [ "$1" = "start" ]; then exit 0; fi\n'
+                'if [ "$1" = "exec" ]; then exit 0; fi\n'
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+            old_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = f"{bin_dir}:{old_path}"
+            try:
+                workspace = DockerWorkspaceManager(
+                    "run-1",
+                    "owner/repo",
+                    WorkspaceConfig(
+                        persistent_key="season_0-agent-owner-repo",
+                        persistent_metadata_path=metadata_path,
+                    ),
+                )
+                workspace.start()
+                result = workspace.sync_repository("https://github.com/owner/repo", "main")
+            finally:
+                os.environ["PATH"] = old_path
+
+            self.assertEqual(0, result.exit_code)
+            self.assertEqual("setup", result.command_type)
+            log = log_path.read_text(encoding="utf-8")
+            self.assertIn("git -C repo fetch --depth 1 origin main", log)
+            self.assertIn("git -C repo reset --hard FETCH_HEAD", log)
 
     def test_persistent_workspace_stop_retains_container(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

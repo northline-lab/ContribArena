@@ -268,6 +268,38 @@ class JudgementScoringTests(unittest.TestCase):
         self.assertIn("phase_review_response", packets["review_readiness"])
         self.assertNotIn("phase_scout_project_comparison", packets["review_readiness"])
 
+    def test_discovery_excerpt_preserves_jsonl_line_boundaries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "run_summary.json").write_text(
+                """
+                {
+                  "schema_version": "1",
+                  "run_id": "run-1",
+                  "repository": {"full_name": "example/repo"},
+                  "run_status": "completed",
+                  "quality_gate": {"status": "pass"},
+                  "judgement": {"status": "pending"}
+                }
+                """,
+                encoding="utf-8",
+            )
+            (run_dir / "discovery_log.jsonl").write_text(
+                '{"seq":1,"query":"a"}\n{"seq":2,"query":"b"}\n',
+                encoding="utf-8",
+            )
+
+            packet = judgement_module.build_judge_packet(
+                config=_config(Path(tmp)),
+                run_id="run-1",
+                run_dir=run_dir,
+            )
+
+        self.assertEqual(
+            '{"seq":1,"query":"a"}\n{"seq":2,"query":"b"}\n',
+            packet.discovery_calls_summary,
+        )
+
     def test_default_judges_use_all_configured_provider_models(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = _config(Path(tmp), explicit_judges=False)

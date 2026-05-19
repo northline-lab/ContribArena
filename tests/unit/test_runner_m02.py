@@ -2384,6 +2384,7 @@ class RunnerM02Test(unittest.TestCase):
             self.assertEqual("completed", participant_state["last_run_status"])
             self.assertEqual(0, participant_state["prs_opened"])
             self.assertEqual(0, participant_state["merged_prs"])
+            self.assertEqual(0.0, participant_state["cumulative_cost"])
             self.assertEqual(
                 "Submit a verified low-risk patch.",
                 participant_state["latest_goal_summary"],
@@ -2467,6 +2468,41 @@ class RunnerM02Test(unittest.TestCase):
             config.run.season_id = "season_0"
             config.run.participant_id = "season_0:local-stub"
             config.run.wake_source = "manual"
+            config.season = SeasonConfig(
+                id="season_0",
+                status="active",
+                state_root=tmp_path / "seasons",
+                defaults={"wake_interval": "1h", "max_concurrent_runs": 1},
+                participants=[SeasonParticipantConfig(model="local-stub")],
+            )
+            participant_dir = (
+                tmp_path / "seasons" / "season_0" / "participants" / "season_0:local-stub"
+            )
+            participant_dir.mkdir(parents=True)
+            (participant_dir / "participant_state.json").write_text(
+                json.dumps({"active_runs": 1}) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(Exception, "participant_at_concurrency_limit"):
+                Runner(agent=FakeM02Agent()).run(config, output_dir=tmp_path / "runs")
+            run_dirs = [path for path in (tmp_path / "runs").iterdir() if path.is_dir()]
+            self.assertEqual(1, len(run_dirs))
+            events = [
+                json.loads(line)
+                for line in (run_dirs[0] / "operator_events.jsonl").read_text().splitlines()
+            ]
+            self.assertEqual("run", events[0]["phase"])
+            self.assertEqual("rejected", events[0]["status"])
+            self.assertIn("participant_at_concurrency_limit", events[0]["payload"]["reason"])
+
+    def test_auto_season_run_rejects_participant_at_concurrency_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _config(tmp_path / "runs")
+            config.run.season_id = "season_0"
+            config.run.participant_id = "season_0:local-stub"
+            config.run.wake_source = "auto"
             config.season = SeasonConfig(
                 id="season_0",
                 status="active",
@@ -2789,9 +2825,13 @@ def _run_with_fake_docker(
         "#!/usr/bin/env sh\n"
         'args="$*"\n'
         'if [ "$1" = "run" ]; then echo container-id; exit 0; fi\n'
+        'if [ "$1" = "inspect" ]; then exit 0; fi\n'
+        'if [ "$1" = "start" ]; then exit 0; fi\n'
         'if [ "$1" = "rm" ]; then exit 0; fi\n'
         'if [ "$1" = "exec" ]; then\n'
         '  case "$args" in\n'
+        '    *"git -C repo fetch --depth 1 origin"*) exit 0 ;;\n'
+        '    *"git -C repo reset --hard FETCH_HEAD"*) exit 0 ;;\n'
         '    *"cat -- repo/app.py"*) printf "def marker():\\n    return \'old\'\\n"; exit 0 ;;\n'
         '    *"nl -ba repo/app.py"*) printf "     1\\tdef marker():\\n     2\\t    return \'old\'\\n"; exit 0 ;;\n'
         f"    *\"cat -- {diff_path}\"*) printf \"def marker():\\n    return 'old'\\n\"; exit 0 ;;\n"

@@ -147,3 +147,4 @@ class RunSummary(BaseModel):
     )
     judgement: SurfaceJudgement = Field(default_factory=SurfaceJudgement)
     artifacts: list[SurfaceArtifact] = Field(default_factory=list)
+    workspace: dict[str, object] = Field(default_factory=dict)

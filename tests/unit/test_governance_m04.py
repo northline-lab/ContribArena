@@ -293,6 +293,59 @@ class GovernanceM04Test(unittest.TestCase):
             self.assertFalse((run_dir / "resume_context.json").exists())
             self.assertFalse((config.artifacts.output_root / "pr_review_log.jsonl").exists())
 
+    def test_completed_season_records_post_completion_outcome_without_rewriting_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "runs" / "fake-run"
+            run_dir.mkdir(parents=True)
+            config = _external_config(live_enabled=True, output_root=root / "runs")
+            config.run.season_id = "season_0"
+            config.run.participant_id = "season_0:local-stub"
+            config.season = SeasonConfig(
+                id="season_0",
+                status="completed",
+                state_root=root / "seasons",
+                participants=[SeasonParticipantConfig(model="local-stub")],
+            )
+            season_dir = root / "seasons" / "season_0"
+            season_dir.mkdir(parents=True)
+            snapshot_path = season_dir / "leaderboard_snapshot.json"
+            snapshot_payload = {
+                "schema_version": "1",
+                "season_id": "season_0",
+                "leaderboard": [{"participant_id": "season_0:local-stub", "mean_arena_score": 80}],
+            }
+            snapshot_path.write_text(
+                json.dumps(snapshot_payload, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            original_snapshot = snapshot_path.read_text(encoding="utf-8")
+            state = GovernanceState(
+                lifecycle_records=[
+                    PrLifecycleRecord(
+                        repository="external/repo",
+                        number=7,
+                        url="https://github.com/external/repo/pull/7",
+                        originating_run_dir=str(run_dir),
+                        branch="contribarena/test",
+                        head_sha="abc123",
+                        next_poll_at="2000-01-01T00:00:00+00:00",
+                    )
+                ]
+            )
+            save_governance_state(config, state)
+
+            result = LocalController(
+                launcher=FakeLauncher(),
+                pr_client=FakeLifecycleClient(merged=True),
+            ).run_once(config)
+
+            self.assertEqual("lifecycle_terminal", result.status)
+            self.assertEqual(original_snapshot, snapshot_path.read_text(encoding="utf-8"))
+            outcomes = (season_dir / "post_completion_outcomes.jsonl").read_text(encoding="utf-8")
+            self.assertIn('"repository": "external/repo"', outcomes)
+            self.assertIn('"lifecycle_status": "merged"', outcomes)
+
     def test_external_lifecycle_tick_allows_active_goal_continuation_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp) / "runs" / "fake-run"

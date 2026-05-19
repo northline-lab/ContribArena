@@ -94,6 +94,9 @@ def build_run_summary(
         maintainer_outcome=maintainer,
         judgement=judgement,
         artifacts=_surface_artifacts(run_dir, artifact_entries),
+        workspace={
+            "persistent_metadata_path": str(config.workspace.persistent_metadata_path or ""),
+        },
     )
 
 

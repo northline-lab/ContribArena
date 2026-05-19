@@ -432,6 +432,52 @@ class CliTest(unittest.TestCase):
             self.assertIn("Season season_0: completed", forced.output)
             self.assertIn("Cleaned workspaces: 1", forced.output)
             run.assert_called_once()
+            snapshot = root / "seasons" / "season_0" / "leaderboard_snapshot.json"
+            self.assertTrue(snapshot.exists())
+            payload = json.loads(snapshot.read_text(encoding="utf-8"))
+            self.assertEqual("season_0", payload["season_id"])
+
+    def test_completed_season_surface_uses_frozen_leaderboard_snapshot(self) -> None:
+        from contribarena.engine.surface_indexer import index_surface_data
+
+        runner = CliRunner()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.yaml"
+            runs = root / "runs"
+            run_dir = runs / "run-a"
+            run_dir.mkdir(parents=True)
+            _write_surface_run(run_dir, "run-a", score=80, pr_state="open")
+            self.assertEqual(
+                0,
+                runner.invoke(app, ["init", "--output", str(config_path)]).exit_code,
+            )
+            text = config_path.read_text(encoding="utf-8")
+            config_path.write_text(
+                text
+                + f"\nartifacts:\n  output_root: {runs}\n"
+                + "\nseason:\n"
+                + "  id: season_0\n"
+                + "  name: Season 0\n"
+                + f"  state_root: {root / 'seasons'}\n"
+                + "  participants:\n"
+                + "    - model: local-stub\n",
+                encoding="utf-8",
+            )
+
+            complete = runner.invoke(app, ["season", "complete", "--config", str(config_path)])
+            self.assertEqual(0, complete.exit_code, complete.output)
+            summary = json.loads((run_dir / "run_summary.json").read_text(encoding="utf-8"))
+            summary["judgement"]["arena_score"] = 10
+            (run_dir / "run_summary.json").write_text(
+                json.dumps(summary, indent=2, ensure_ascii=True) + "\n",
+                encoding="utf-8",
+            )
+
+            index_surface_data(input_dir=runs, output_dir=root / "public")
+
+            surface = json.loads((root / "public" / "surface.json").read_text(encoding="utf-8"))
+            self.assertEqual(80.0, surface["leaderboard"][0]["mean_arena_score"])
 
     def test_controller_reports_disabled_starter_config(self) -> None:
         runner = CliRunner()
@@ -652,6 +698,57 @@ def _write_run_summary(path: Path) -> None:
         + "\n",
         encoding="utf-8",
     )
+
+
+def _write_surface_run(path: Path, run_id: str, *, score: float, pr_state: str) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": "1",
+        "run_id": run_id,
+        "run_mode": "shadow",
+        "model": "local-stub",
+        "agent": {"name": "local-stub", "handle": "season_0:local-stub"},
+        "repository": {"full_name": "example/repo", "url": "https://github.com/example/repo"},
+        "season": {"id": "season_0", "name": "Season 0", "phase": "owned_repo_calibration"},
+        "started_at": "2026-05-15T00:00:00Z",
+        "completed_at": "2026-05-15T00:01:00Z",
+        "duration_seconds": 60,
+        "run_status": "completed",
+        "terminal_reason": "complete",
+        "terminal_layer": "agent",
+        "contribution_class": "low_risk_code",
+        "pipeline": [],
+        "quality_gate": {"status": "pass", "warnings": []},
+        "pull_request": {
+            "url": "https://github.com/example/repo/pull/1",
+            "number": 1,
+            "state": pr_state,
+        },
+        "maintainer_outcome": {"status": "pending", "observed_at": "", "source": "none"},
+        "judgement": {
+            "status": "judged",
+            "judge_score": score,
+            "real_world_adjustment": 0,
+            "arena_score": score,
+            "rubric_summary": [],
+            "source_artifacts": ["judgement.json"],
+        },
+        "artifacts": [
+            {
+                "name": "patch.diff",
+                "kind": "diff",
+                "visibility": "public",
+                "url": "",
+                "size_bytes": 120,
+                "redacted": False,
+            }
+        ],
+    }
+    (path / "run_summary.json").write_text(
+        json.dumps(payload, indent=2, ensure_ascii=True) + "\n",
+        encoding="utf-8",
+    )
+    (path / "patch.diff").write_text("diff --git a/app.py b/app.py\n", encoding="utf-8")
 
 
 def _write_fake_docker(path: Path) -> None:

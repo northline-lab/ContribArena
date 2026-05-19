@@ -21,6 +21,7 @@ class DockerWorkspaceManager:
 
     def start(self) -> None:
         if self.config.persistent_key and self._container_exists():
+            self._start_existing_container()
             self._write_metadata()
             return
         command = [
@@ -50,6 +51,24 @@ class DockerWorkspaceManager:
                 f"docker run failed: {result.stderr.strip() or result.stdout.strip()}"
             )
         self._write_metadata()
+
+    def sync_repository(self, clone_url: str, ref: str | None = None) -> CommandResult:
+        """Ensure the persistent workspace has a fresh shallow checkout in repo/."""
+
+        target_ref = (ref or "HEAD").strip() or "HEAD"
+        quoted_url = shlex.quote(clone_url)
+        quoted_ref = shlex.quote(target_ref)
+        command = (
+            "if [ -d repo/.git ]; then "
+            f"git -C repo fetch --depth 1 origin {quoted_ref} && "
+            "git -C repo reset --hard FETCH_HEAD; "
+            "else "
+            f"git clone --depth 1 --single-branch --branch {quoted_ref} {quoted_url} repo "
+            f"|| git clone --depth 1 {quoted_url} repo; "
+            "fi"
+        )
+        result = self.run(command, timeout_seconds=self.config.command_timeout_seconds)
+        return result.model_copy(update={"command_type": "setup"})
 
     def stop(self) -> CommandResult:
         if self.config.persistent_key:
@@ -202,6 +221,26 @@ class DockerWorkspaceManager:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return False
         return completed.returncode == 0
+
+    def _start_existing_container(self) -> None:
+        try:
+            completed = subprocess.run(
+                ["docker", "start", self.container_name],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+        except FileNotFoundError as exc:
+            raise InfrastructureError("docker CLI not found in PATH") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise InfrastructureError(f"docker start timed out for {self.container_name}") from exc
+        if completed.returncode != 0 and "already" not in (
+            completed.stderr + completed.stdout
+        ).lower():
+            raise InfrastructureError(
+                f"docker start failed: {completed.stderr.strip() or completed.stdout.strip()}"
+            )
 
     def _write_metadata(self) -> None:
         path = self.config.persistent_metadata_path

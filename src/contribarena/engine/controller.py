@@ -27,11 +27,13 @@ from contribarena.engine.runtime_config import apply_output_dir
 from contribarena.engine.runner import RunResult, Runner
 from contribarena.engine.seasons import (
     SeasonStore,
+    append_post_completion_outcome,
     load_participant_state,
     mark_participant_run_started,
     participant_is_due,
     participant_id_for,
     participant_max_concurrent,
+    season_is_completed,
 )
 from contribarena.memory import MemoryService
 from contribarena.models import (
@@ -186,10 +188,12 @@ class LocalController:
         output_dir: Path | None = None,
         verbose: bool = False,
     ) -> ControllerTickResult | None:
-        if config.season is None or config.season.status != "active":
+        if config.season is None:
             return None
-        season = config.season
         store = SeasonStore.from_config(config)
+        season = store.load(config.season.id, config.season)
+        if season.status != "active":
+            return None
         launched_results: list[RunResult] = []
         for participant in season.participants:
             if "agent" not in participant.role:
@@ -352,6 +356,7 @@ class LocalController:
                     "next_poll_at": observation.record.next_poll_at,
                 },
             )
+            _append_post_completion_outcome_if_needed(config, observation.record)
             _record_lifecycle_memory_artifacts(
                 config,
                 observation.record,
@@ -470,6 +475,30 @@ def _record_lifecycle_memory_artifacts(
             close = None
         if close is not None:
             close()
+
+
+def _append_post_completion_outcome_if_needed(
+    config: RunConfig,
+    record: PrLifecycleRecord,
+) -> None:
+    if not season_is_completed(config) or not config.run.season_id:
+        return
+    append_post_completion_outcome(
+        SeasonStore.from_config(config),
+        config.run.season_id,
+        {
+            "ts": datetime.now(UTC).isoformat(),
+            "season_id": config.run.season_id,
+            "participant_id": config.run.participant_id or "",
+            "repository": record.repository,
+            "number": record.number,
+            "url": record.url,
+            "state": record.state,
+            "lifecycle_status": record.lifecycle_status,
+            "source": "controller.lifecycle_observe",
+            "originating_run_dir": record.originating_run_dir,
+        },
+    )
 
 
 def _lifecycle_memory_run_id(record: object) -> str:

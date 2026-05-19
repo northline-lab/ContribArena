@@ -136,7 +136,23 @@ class Runner:
         self, config: RunConfig, output_dir: Path | None = None, verbose: bool = False
     ) -> RunResult:
         config = apply_output_dir(config, output_dir)
-        admission = admit_run(config)
+        repo_slug = (
+            config.discovery.candidates[0].full_name
+            if config.discovery.candidates
+            else config.discovery.query or "github-discovery"
+        )
+        run_id = config.run.id or uuid.uuid4().hex[:12]
+        try:
+            admission = admit_run(config)
+        except Exception as exc:
+            _write_rejected_run_artifacts(
+                config=config,
+                run_id=run_id,
+                repo_slug=repo_slug,
+                reason=str(exc),
+                verbose=verbose,
+            )
+            raise
         if admission.ranked:
             config = config.model_copy(
                 update={
@@ -150,12 +166,6 @@ class Runner:
                 },
                 deep=True,
             )
-        repo_slug = (
-            config.discovery.candidates[0].full_name
-            if config.discovery.candidates
-            else config.discovery.query or "github-discovery"
-        )
-        run_id = config.run.id or uuid.uuid4().hex[:12]
         artifacts = ArtifactWriter(
             config.artifacts.output_root,
             run_id,
@@ -205,6 +215,7 @@ class Runner:
                     "persistent_metadata_path": workspace_dir / "container_id",
                 }
             )
+            config = config.model_copy(update={"workspace": workspace_config}, deep=True)
             _write_clone_state(workspace_dir, repo_slug=repo_slug, run_id=run_id)
         workspace = DockerWorkspaceManager(run_id, repo_slug, workspace_config)
         budget = BudgetTracker(config.run.budget)
@@ -258,6 +269,9 @@ class Runner:
             )
             workspace.start()
             workspace_started = True
+            sync_result = _sync_persistent_workspace_repository(workspace, config)
+            if sync_result is not None:
+                capture.record_command(sync_result)
             trace.write(
                 RunState.WORKSPACE_READY,
                 "workspace.ready",
@@ -764,6 +778,60 @@ def _write_clone_state(workspace_dir: Path, *, repo_slug: str, run_id: str) -> N
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+
+def _sync_persistent_workspace_repository(
+    workspace: DockerWorkspaceManager,
+    config: RunConfig,
+) -> CommandResult | None:
+    if not config.workspace.persistent_key and workspace.config.persistent_key is None:
+        return None
+    if not config.discovery.candidates:
+        return None
+    target = config.discovery.candidates[0]
+    return workspace.sync_repository(str(target.url), target.branch or None)
+
+
+def _write_rejected_run_artifacts(
+    *,
+    config: RunConfig,
+    run_id: str,
+    repo_slug: str,
+    reason: str,
+    verbose: bool,
+) -> None:
+    artifacts = ArtifactWriter(
+        config.artifacts.output_root,
+        run_id,
+        repo_slug,
+        config.run.model,
+    )
+    operator = OperatorProgressWriter(
+        artifacts.register("operator_events.jsonl", kind="jsonl"),
+        run_id,
+        stream=verbose,
+    )
+    operator.write(
+        "run",
+        "rejected",
+        "run rejected before execution",
+        evidence=["config.json", "terminal_state.json"],
+        payload={
+            "reason": reason,
+            "season_id": config.run.season_id or "",
+            "participant_id": config.run.participant_id or "",
+            "wake_source": config.run.wake_source,
+        },
+    )
+    artifacts.write_json("config.json", config.model_dump(mode="json"))
+    terminal = TerminalState(
+        status="blocked",
+        reason=reason,
+        layer="run",
+        message=reason,
+    )
+    artifacts.write_json("terminal_state.json", terminal.model_dump(mode="json"))
+    artifacts.finalize_manifest()
 
 
 def _invocation_usage_payload(

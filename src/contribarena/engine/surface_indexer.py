@@ -56,7 +56,10 @@ def index_surface_data(
         )
         for run in loaded_runs
     ]
-    leaderboard = _leaderboard(public_runs)
+    leaderboard = _apply_frozen_leaderboard(
+        input_dir,
+        _leaderboard(public_runs),
+    )
     stats = _stats(public_runs)
     seasons = _seasons(public_runs)
     participants = _participants(public_runs)
@@ -131,6 +134,34 @@ def index_surface_data(
         artifacts_copied=len(artifact_files),
         skipped=skipped,
     )
+
+
+def build_leaderboard_snapshot(
+    *,
+    input_dir: Path,
+    season_id: str,
+) -> dict[str, Any]:
+    """Build the immutable public leaderboard payload for a completed season."""
+
+    loaded_runs, skipped = _load_run_summaries(input_dir=input_dir, output_dir=input_dir / ".snapshot")
+    public_runs = [
+        _public_run(run.payload, copied_artifacts=set(), public_base_url="")
+        for run in loaded_runs
+    ]
+    scoped_runs = [
+        run
+        for run in public_runs
+        if isinstance(run.get("season"), dict) and run["season"].get("id") == season_id
+    ]
+    generated_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    return {
+        "schema_version": SURFACE_SCHEMA_VERSION,
+        "season_id": season_id,
+        "generated_at": generated_at,
+        "runs_count": len(scoped_runs),
+        "leaderboard": _leaderboard(scoped_runs),
+        "skipped": skipped,
+    }
 
 
 @dataclass(frozen=True)
@@ -396,6 +427,47 @@ def _leaderboard(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     )
 
 
+def _apply_frozen_leaderboard(input_dir: Path, live_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    snapshots = _leaderboard_snapshots(input_dir)
+    if not snapshots:
+        return live_rows
+    rows: list[dict[str, Any]] = []
+    covered_seasons = set(snapshots)
+    for season_id in sorted(snapshots):
+        rows.extend(snapshots[season_id])
+    rows.extend(
+        row
+        for row in live_rows
+        if str(row.get("season_id") or "") not in covered_seasons
+    )
+    return rows
+
+
+def _leaderboard_snapshots(input_dir: Path) -> dict[str, list[dict[str, Any]]]:
+    snapshots: dict[str, list[dict[str, Any]]] = {}
+    roots = [input_dir / "seasons", input_dir.parent / "seasons"]
+    seen: set[Path] = set()
+    paths: list[Path] = []
+    for root in roots:
+        for path in sorted(root.glob("*/leaderboard_snapshot.json")):
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            paths.append(path)
+    for path in paths:
+        payload = _read_json_file(path)
+        season_id = str(payload.get("season_id") or path.parent.name)
+        rows = payload.get("leaderboard", [])
+        if season_id and isinstance(rows, list):
+            snapshots[season_id] = [
+                row
+                for row in rows
+                if isinstance(row, dict)
+            ]
+    return snapshots
+
+
 def _seasons(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seasons: dict[str, dict[str, Any]] = {}
     participant_counts: dict[str, set[str]] = {}
@@ -629,6 +701,13 @@ def _season_workspaces(loaded_runs: list[_LoadedRun]) -> list[dict[str, Any]]:
         config = _read_json_file(loaded.run_dir / "config.json")
         workspace = config.get("workspace", {}) if isinstance(config.get("workspace"), dict) else {}
         metadata_path = workspace.get("persistent_metadata_path")
+        if not metadata_path:
+            summary_workspace = (
+                loaded.payload.get("workspace", {})
+                if isinstance(loaded.payload.get("workspace"), dict)
+                else {}
+            )
+            metadata_path = summary_workspace.get("persistent_metadata_path")
         if not metadata_path:
             continue
         season = loaded.payload.get("season", {}) if isinstance(loaded.payload.get("season"), dict) else {}

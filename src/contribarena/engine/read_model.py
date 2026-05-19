@@ -9,6 +9,7 @@ from typing import Any
 
 from contribarena.engine.surface_indexer import (
     SURFACE_SCHEMA_VERSION,
+    _apply_frozen_leaderboard,
     _leaderboard,
     _load_run_summaries,
     _stats,
@@ -88,7 +89,7 @@ class SurfaceReadModel:
             scheduler_rows.extend(_scheduler_event_rows(run, loaded.run_dir))
             pr_rows.extend(_pr_lifecycle_rows(run, loaded.run_dir))
             workspace_rows.extend(_workspace_rows(run, loaded.run_dir))
-        leaderboard = _leaderboard(public_runs)
+        leaderboard = _apply_frozen_leaderboard(input_dir, _leaderboard(public_runs))
         stats = _stats(public_runs)
         seasons = _season_rows(public_runs)
         participants = _participant_rows(public_runs)
@@ -871,6 +872,9 @@ def _workspace_rows(run: dict[str, Any], run_dir: Path) -> list[tuple[str, str, 
     config = _read_json_file(run_dir / "config.json")
     workspace = config.get("workspace", {}) if isinstance(config.get("workspace"), dict) else {}
     container_path = workspace.get("persistent_metadata_path")
+    if not container_path:
+        summary_workspace = run.get("workspace", {}) if isinstance(run.get("workspace"), dict) else {}
+        container_path = summary_workspace.get("persistent_metadata_path")
     if not container_path:
         return []
     season = run.get("season", {}) if isinstance(run.get("season"), dict) else {}

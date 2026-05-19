@@ -47,6 +47,12 @@ class SeasonStore:
     def state_path(self, season_id: str) -> Path:
         return self.season_dir(season_id) / "season_state.json"
 
+    def leaderboard_snapshot_path(self, season_id: str) -> Path:
+        return self.season_dir(season_id) / "leaderboard_snapshot.json"
+
+    def post_completion_outcomes_path(self, season_id: str) -> Path:
+        return self.season_dir(season_id) / "post_completion_outcomes.jsonl"
+
     def participant_dir(self, season_id: str, participant_id: str) -> Path:
         return self.season_dir(season_id) / "participants" / participant_id
 
@@ -370,6 +376,7 @@ def mark_participant_run_finished(
             "failures": int(state.get("failures") or 0) + (0 if status == "completed" else 1),
             "prs_opened": pr_counts["prs_opened"],
             "merged_prs": pr_counts["merged_prs"],
+            "cumulative_cost": float(state.get("cumulative_cost") or 0.0),
         }
     )
     if latest_goal_summary:
@@ -423,10 +430,9 @@ def admit_run(config: RunConfig) -> SeasonAdmission:
             continue
         if "agent" not in participant.role:
             raise ConfigError(f"participant_not_agent: {participant_id}")
-        if config.run.wake_source == "manual":
-            state = load_participant_state(store, season_id, participant_id)
-            if int(state.get("active_runs") or 0) >= participant_max_concurrent(season, participant):
-                raise ConfigError(f"participant_at_concurrency_limit: {participant_id}")
+        state = load_participant_state(store, season_id, participant_id)
+        if int(state.get("active_runs") or 0) >= participant_max_concurrent(season, participant):
+            raise ConfigError(f"participant_at_concurrency_limit: {participant_id}")
         store.participant_dir(season_id, participant_id).mkdir(parents=True, exist_ok=True)
         return SeasonAdmission(
             season_id=season_id,
@@ -467,3 +473,39 @@ def cleanup_season_workspaces(store: SeasonStore, season_id: str, fallback: Seas
         memory = store.participant_dir(season_id, participant_id) / "memory"
         shutil.rmtree(memory, ignore_errors=True)
     return results
+
+
+def write_leaderboard_snapshot(
+    store: SeasonStore,
+    season_id: str,
+    payload: dict[str, Any],
+) -> Path:
+    path = store.leaderboard_snapshot_path(season_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def append_post_completion_outcome(
+    store: SeasonStore,
+    season_id: str,
+    payload: dict[str, Any],
+) -> Path:
+    path = store.post_completion_outcomes_path(season_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, sort_keys=True, ensure_ascii=True) + "\n")
+    return path
+
+
+def season_is_completed(config: RunConfig) -> bool:
+    if not config.run.season_id:
+        return False
+    try:
+        season = SeasonStore.from_config(config).load(config.run.season_id, config.season)
+    except ConfigError:
+        return False
+    return season.status == "completed"

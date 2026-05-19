@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
 
 from contribarena.config import load_run_config
+from contribarena.config.schema import SeasonParticipantConfig
 from contribarena.engine.controller import LocalController
 from contribarena.engine.read_model import SurfaceReadModel
-from contribarena.engine.runner import RunResult
+from contribarena.engine.runner import RunResult, Runner
 from contribarena.engine.seasons import load_participant_state
+from contribarena.models import AgentFinalResult, OpportunitySummary, RepoSummary, SelectedTask
+from contribarena.models.agent_result import WorkspaceSummary
+from contribarena.tools.github_pr import ForkEnsureResult, PullRequestCreateResult
 
 
 class SeasonEndToEndTests(unittest.TestCase):
@@ -24,6 +29,8 @@ class SeasonEndToEndTests(unittest.TestCase):
                     "artifacts": config.artifacts.model_copy(update={"output_root": root / "runs"}),
                     "backend": config.backend.model_copy(update={"read_model_path": root / "read.sqlite"}),
                     "memory": config.memory.model_copy(update={"root": root / "memory"}),
+                    "judgement": config.judgement.model_copy(update={"enabled": False}),
+                    "governance": config.governance.model_copy(update={"live_enabled": True}),
                     "season": config.season.model_copy(
                         update={
                             "status": "active",
@@ -107,6 +114,71 @@ class SeasonEndToEndTests(unittest.TestCase):
                 [11],
                 [row["number"] for row in qwen["pr_lifecycle"]],
             )
+
+    def test_season_zero_acceptance_runs_real_runner_path_for_one_participant(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = load_run_config(Path("examples/season-0-owned.yaml"))
+            assert config.season is not None
+            config = config.model_copy(
+                update={
+                    "artifacts": config.artifacts.model_copy(update={"output_root": root / "runs"}),
+                    "backend": config.backend.model_copy(update={"read_model_path": root / "read.sqlite"}),
+                    "memory": config.memory.model_copy(update={"root": root / "memory"}),
+                    "judgement": config.judgement.model_copy(update={"enabled": False}),
+                    "governance": config.governance.model_copy(update={"live_enabled": True}),
+                    "season": config.season.model_copy(
+                        update={
+                            "status": "active",
+                            "state_root": root / "seasons",
+                            "defaults": config.season.defaults.model_copy(
+                                update={"wake_interval": "1s"}
+                            ),
+                            "participants": [SeasonParticipantConfig(model="local-stub")],
+                        }
+                    ),
+                },
+                deep=True,
+            )
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            _write_fake_docker(bin_dir / "docker")
+            old_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = f"{bin_dir}:{old_path}"
+            try:
+                result = LocalController(
+                    launcher=Runner(agent=_TinySeasonAgent(), pr_client=_FakePrClient())
+                ).run_once(config)
+            finally:
+                os.environ["PATH"] = old_path
+
+            self.assertEqual("run_completed", result.status)
+            self.assertIsNotNone(result.run_result)
+            assert result.run_result is not None
+            run_dir = result.run_result.run_dir
+            self.assertTrue((run_dir / "run_summary.json").exists())
+            workspace_commands = json.loads((run_dir / "workspace_command.json").read_text())
+            self.assertTrue(
+                any(
+                    command.get("command_type") == "setup"
+                    and "git -C repo fetch --depth 1 origin" in command.get("command", "")
+                    for command in workspace_commands["commands"]
+                )
+            )
+            state = load_participant_state(
+                store=__import__(
+                    "contribarena.engine.seasons",
+                    fromlist=["SeasonStore"],
+                ).SeasonStore(root / "seasons"),
+                season_id="season_0",
+                participant_id="season_0:local-stub",
+            )
+            self.assertEqual(1, state["runs_count"])
+            self.assertEqual(0.0, state["cumulative_cost"])
+            model = SurfaceReadModel(root / "read.sqlite")
+            refresh = model.refresh_from_artifacts(root / "runs")
+            self.assertEqual(1, refresh.runs_indexed)
+            self.assertEqual(1, len(model.season_workspaces("season_0")))
 
 
 class _ArtifactLauncher:
@@ -383,6 +455,109 @@ def _write_run_artifacts(
 
 def _ts(offset: int) -> str:
     return datetime(2026, 5, 19, 8, 0, offset, tzinfo=UTC).isoformat().replace("+00:00", "Z")
+
+
+class _TinySeasonAgent:
+    def run(self, config, tools, prompt: str, model_provider: object = None, **kwargs: object):  # noqa: ANN001
+        tools.aci_goal_update(
+            "Submit a verified season acceptance patch.",
+            "active",
+            scope="contribution",
+        )
+        tools.aci_view("repo/README.md")
+        tools.aci_replace("repo/app.py", "old", "new")
+        tools.aci_verify("python3 -m compileall .", "repo")
+        tools.aci_submit_patch()
+        tools.aci_submit_patch_finalize()
+        return AgentFinalResult(
+            status="completed",
+            repo=RepoSummary(
+                owner="wanjiedata",
+                name="ContribArena",
+                url="https://github.com/wanjiedata/ContribArena",
+            ),
+            repo_profile="# Repo Profile\n\nSeason fixture.",
+            opportunities=[
+                OpportunitySummary(
+                    title="Replace marker",
+                    rationale="Small deterministic test change.",
+                    risk="low",
+                    source="test",
+                )
+            ],
+            selected_task=SelectedTask(
+                title="Replace marker",
+                rationale="Exercise season acceptance path.",
+                expected_change="old -> new",
+                risk="low",
+            ),
+            workspace_summary=WorkspaceSummary(
+                commands_run=[],
+                patch_applied=True,
+                notes="season acceptance patch submitted",
+            ),
+        )
+
+
+def _write_fake_docker(path: Path) -> None:
+    path.write_text(
+        "#!/usr/bin/env sh\n"
+        'args="$*"\n'
+        'if [ "$1" = "run" ]; then echo container-id; exit 0; fi\n'
+        'if [ "$1" = "inspect" ]; then exit 0; fi\n'
+        'if [ "$1" = "start" ]; then exit 0; fi\n'
+        'if [ "$1" = "rm" ]; then exit 0; fi\n'
+        'if [ "$1" = "exec" ]; then\n'
+        '  case "$args" in\n'
+        '    *"git -C repo fetch --depth 1 origin"*) exit 0 ;;\n'
+        '    *"git -C repo reset --hard FETCH_HEAD"*) exit 0 ;;\n'
+        '    *"cat -- repo/README.md"*) printf "# Fixture\\n"; exit 0 ;;\n'
+        '    *"cat -- repo/app.py"*) printf "def marker():\\n    return \'old\'\\n"; exit 0 ;;\n'
+        '    *"nl -ba repo/app.py"*) printf "     1\\tdef marker():\\n     2\\t    return \'old\'\\n"; exit 0 ;;\n'
+        '    *"python3 -m compileall ."*) printf "compile ok\\n"; exit 0 ;;\n'
+        '    *"git diff --binary -- ."*) printf "diff --git a/repo/app.py b/repo/app.py\\n"; exit 0 ;;\n'
+        '    *"git apply -"*) exit 0 ;;\n'
+        '    *) printf "/workspace\\n"; exit 0 ;;\n'
+        "  esac\n"
+        "fi\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+class _FakePrClient:
+    def authenticated_actor(self) -> str:
+        return "contribarena-bot"
+
+    def ensure_fork(self, *, owner: str, repo: str, fork_owner: str) -> ForkEnsureResult:
+        return ForkEnsureResult(
+            ok=True,
+            owner=fork_owner,
+            repo=repo,
+            full_name=f"{fork_owner}/{repo}",
+            url=f"https://github.com/{fork_owner}/{repo}",
+            created=False,
+            source="fake",
+        )
+
+    def open_pr(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        title: str,
+        body: str,
+        head: str,
+        base: str,
+    ) -> PullRequestCreateResult:
+        return PullRequestCreateResult(
+            ok=True,
+            number=42,
+            url=f"https://github.com/{owner}/{repo}/pull/42",
+            head_sha="abc123",
+            source="fake",
+        )
 
 
 if __name__ == "__main__":

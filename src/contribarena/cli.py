@@ -17,8 +17,13 @@ from contribarena.engine import LocalController, Runner
 from contribarena.engine.api import create_app
 from contribarena.engine.judge_refresh import refresh_judgement
 from contribarena.engine.read_model import SurfaceReadModel
-from contribarena.engine.seasons import SeasonStore, cleanup_season_workspaces
+from contribarena.engine.seasons import (
+    SeasonStore,
+    cleanup_season_workspaces,
+    write_leaderboard_snapshot,
+)
 from contribarena.engine.surface_indexer import index_surface_data
+from contribarena.engine.surface_indexer import build_leaderboard_snapshot
 from contribarena.errors import ContribArenaError
 
 app = typer.Typer(help="ContribArena control plane commands.")
@@ -592,7 +597,12 @@ def _season_transition(
     try:
         run_config = load_run_config(config)
         target = season_id or (run_config.season.id if run_config.season else "season_0")
-        state = SeasonStore.from_config(run_config).transition(
+        store = SeasonStore.from_config(run_config)
+        if status == "completed":
+            artifact_root = _config_relative(config, run_config.artifacts.output_root)
+            snapshot = build_leaderboard_snapshot(input_dir=artifact_root, season_id=target)
+            write_leaderboard_snapshot(store, target, snapshot)
+        state = store.transition(
             target,
             status,  # type: ignore[arg-type]
             run_config.season,

@@ -96,14 +96,14 @@ def build_judge_packet(
         patch_excerpt=_read_excerpt(run_dir / "patch.diff", max_chars=8000),
         pr_description_excerpt=_read_excerpt(run_dir / "pr_description.md", max_chars=6000),
         verification_excerpt=_verification_excerpt(run_dir),
-        discovery_calls_summary=_read_excerpt(run_dir / "discovery_log.jsonl", max_chars=6000),
-        phase_scout_project_excerpt=_read_excerpt(
+        discovery_calls_summary=_read_jsonl_excerpt(run_dir / "discovery_log.jsonl", max_chars=6000),
+        phase_scout_project_excerpt=_read_jsonl_excerpt(
             run_dir / "phase_scout_project_comparison.jsonl", max_chars=6000
         ),
-        phase_scout_opportunity_excerpt=_read_excerpt(
+        phase_scout_opportunity_excerpt=_read_jsonl_excerpt(
             run_dir / "phase_scout_opportunity_comparison.jsonl", max_chars=6000
         ),
-        phase_scout_duplicate_excerpt=_read_excerpt(
+        phase_scout_duplicate_excerpt=_read_jsonl_excerpt(
             run_dir / "phase_scout_duplicate_check.jsonl", max_chars=6000
         ),
         phase_review_maintainer_excerpt=_read_excerpt(
@@ -1092,6 +1092,27 @@ def _read_excerpt(path: Path, *, max_chars: int = 4000) -> str:
         return ""
     try:
         return path.read_text(encoding="utf-8", errors="replace")[:max_chars]
+    except OSError:
+        return ""
+
+
+def _read_jsonl_excerpt(path: Path, *, max_chars: int = 4000) -> str:
+    if not path.exists():
+        return ""
+    try:
+        lines: list[str] = []
+        total = 0
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                next_total = total + len(line)
+                if lines and next_total > max_chars:
+                    lines.append("[truncated]\n")
+                    break
+                if not lines and next_total > max_chars:
+                    return line[:max_chars] + "\n[truncated]"
+                lines.append(line)
+                total = next_total
+        return "".join(lines)
     except OSError:
         return ""
 
