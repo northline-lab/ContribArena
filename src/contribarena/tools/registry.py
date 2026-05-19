@@ -17,6 +17,7 @@ from contribarena.engine.operator_events import (
     truncate_for_operator,
 )
 from contribarena.engine.workspace import DockerWorkspaceManager
+from contribarena.engine.seasons import shared_signals_for_config
 from contribarena.memory import MemoryService
 from contribarena.memory.schema import GuidanceContext, MemoryCapabilities
 from contribarena.models import AciResult, AgentStep, CommandResult, PatchResult, RunState
@@ -592,6 +593,7 @@ class ToolRegistry:
                     if memory_working is not None
                     else []
                 ),
+                "shared_signals": shared_signals_for_config(self.config),
             }
             return AciResult(
                 tool="aci_runtime_get_context",

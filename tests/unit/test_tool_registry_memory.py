@@ -12,6 +12,8 @@ from contribarena.config.schema import (
     RepoCandidate,
     RunConfig,
     RunSection,
+    SeasonConfig,
+    SeasonParticipantConfig,
     WorkspaceConfig,
 )
 from contribarena.engine.middleware.artifact import ArtifactCapture
@@ -124,6 +126,75 @@ class ToolRegistryMemoryTest(unittest.TestCase):
             self.assertEqual("complete", refreshed["goals"]["short_term"]["status"])
             refreshed_runtime = json.loads(registry.aci_runtime_get_context("run").output)
             self.assertEqual("complete", refreshed_runtime["goals"]["short_term"]["status"])
+
+    def test_runtime_context_exposes_only_whitelisted_shared_signals(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            season_root = root / "seasons"
+            config = RunConfig(
+                run=RunSection(
+                    id="run-1",
+                    mode="shadow",
+                    season_id="season_0",
+                    participant_id="season_0:qwen36plus",
+                ),
+                discovery=DiscoveryConfig(
+                    candidates=[
+                        RepoCandidate(
+                            owner="example",
+                            repo="repo",
+                            url="https://github.com/example/repo",
+                        )
+                    ]
+                ),
+                workspace=WorkspaceConfig(),
+                season=SeasonConfig(
+                    id="season_0",
+                    state_root=season_root,
+                    participants=[
+                        SeasonParticipantConfig(
+                            id="season_0:qwen36plus",
+                            model="compatible/qwen36plus",
+                        )
+                    ],
+                ),
+            )
+            shared_dir = season_root / "season_0" / "shared"
+            shared_dir.mkdir(parents=True)
+            (shared_dir / "repository_guidance.json").write_text(
+                json.dumps({"example/repo": {"verification": "run pytest"}}, ensure_ascii=True) + "\n",
+                encoding="utf-8",
+            )
+            (shared_dir / "maintainer_signals.json").write_text(
+                json.dumps([{"repository": "example/repo", "kind": "process_feedback"}], ensure_ascii=True) + "\n",
+                encoding="utf-8",
+            )
+            other_participant = season_root / "season_0" / "participants" / "season_0:gpt55"
+            other_participant.mkdir(parents=True)
+            (other_participant / "participant_state.json").write_text(
+                json.dumps({"secret_raw_history": "must not leak"}, ensure_ascii=True) + "\n",
+                encoding="utf-8",
+            )
+            registry = ToolRegistry(
+                config=config,
+                workspace=object(),  # type: ignore[arg-type]
+                trace=TraceWriter(root / "trace.jsonl", "run-1"),
+                budget=BudgetTracker(config.run.budget),
+                capture=ArtifactCapture(),
+                goals=GoalService(config, run_id="run-1"),
+            )
+
+            payload = json.loads(registry.aci_runtime_get_context("run").output)
+
+            self.assertEqual(
+                {"example/repo": {"verification": "run pytest"}},
+                payload["shared_signals"]["repository_guidance"],
+            )
+            self.assertEqual(
+                [{"repository": "example/repo", "kind": "process_feedback"}],
+                payload["shared_signals"]["maintainer_signals"],
+            )
+            self.assertNotIn("secret_raw_history", json.dumps(payload, ensure_ascii=True))
 
     def test_aci_goal_update_third_abandon_marks_run_terminal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

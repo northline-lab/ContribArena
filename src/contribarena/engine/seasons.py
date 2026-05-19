@@ -50,6 +50,9 @@ class SeasonStore:
     def participant_dir(self, season_id: str, participant_id: str) -> Path:
         return self.season_dir(season_id) / "participants" / participant_id
 
+    def shared_dir(self, season_id: str) -> Path:
+        return self.season_dir(season_id) / "shared"
+
     def load(self, season_id: str, fallback: SeasonConfig | None = None) -> SeasonConfig:
         path = self.config_path(season_id)
         if path.exists():
@@ -203,6 +206,29 @@ def load_participant_state(store: SeasonStore, season_id: str, participant_id: s
     except json.JSONDecodeError as exc:
         raise ConfigError(f"invalid participant state {path}: {exc}") from exc
     return raw if isinstance(raw, dict) else {}
+
+
+def shared_signals_for_config(config: RunConfig) -> dict[str, Any]:
+    if not config.run.season_id:
+        return {}
+    store = SeasonStore.from_config(config)
+    shared_dir = store.shared_dir(config.run.season_id)
+    return {
+        "repository_guidance": _read_shared_signal(shared_dir / "repository_guidance.json"),
+        "maintainer_signals": _read_shared_signal(shared_dir / "maintainer_signals.json"),
+    }
+
+
+def _read_shared_signal(path: Path) -> Any:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ConfigError(f"invalid shared signal {path}: {exc}") from exc
+    if isinstance(payload, (dict, list, str, int, float, bool)) or payload is None:
+        return payload
+    return None
 
 
 def save_participant_state(
