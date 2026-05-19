@@ -500,6 +500,36 @@ class GovernanceM04Test(unittest.TestCase):
             self.assertEqual("example/repo", participant_state["last_repo_slug"])
             self.assertEqual("auto", participant_state["last_wake_source"])
 
+    def test_active_season_fans_out_to_all_due_agent_participants(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _owned_config(live_enabled=True, output_root=tmp_path / "runs")
+            config.season = SeasonConfig(
+                id="season_0",
+                status="active",
+                state_root=tmp_path / "seasons",
+                participants=[
+                    SeasonParticipantConfig(model="compatible/qwen36plus"),
+                    SeasonParticipantConfig(model="responses/gpt55"),
+                    SeasonParticipantConfig(model="anthropic/claudeopus47", role=["judge"]),
+                ],
+            )
+            launcher = FakeLauncher()
+
+            result = LocalController(launcher=launcher).run_once(config)
+
+            self.assertEqual("run_completed", result.status)
+            self.assertEqual(2, launcher.calls)
+            self.assertEqual(
+                ["season_0:qwen36plus", "season_0:gpt55"],
+                [item.run.participant_id for item in launcher.configs],
+            )
+            self.assertEqual(["compatible/qwen36plus", "responses/gpt55"], [item.run.model for item in launcher.configs])
+            for launched in launcher.configs:
+                state = load_governance_state(launched)
+                self.assertEqual(1, len(state.attempts))
+                self.assertEqual("prepared", state.attempts[0].status)
+
     def test_active_season_without_agent_participant_does_not_launch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

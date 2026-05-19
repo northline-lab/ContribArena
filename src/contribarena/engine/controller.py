@@ -190,6 +190,7 @@ class LocalController:
             return None
         season = config.season
         store = SeasonStore.from_config(config)
+        launched_results: list[RunResult] = []
         for participant in season.participants:
             if "agent" not in participant.role:
                 continue
@@ -247,8 +248,14 @@ class LocalController:
                 increment_active=False,
             )
             run_result = self.launcher.run(run_config, output_dir=output_dir, verbose=verbose)
-            status = "run_completed" if run_result.status == "completed" else "run_failed"
-            return ControllerTickResult(status=status, run_result=run_result)
+            launched_results.append(run_result)
+        if launched_results:
+            status = (
+                "run_failed"
+                if any(result.status != "completed" for result in launched_results)
+                else "run_completed"
+            )
+            return ControllerTickResult(status=status, run_result=launched_results[-1])
         return ControllerTickResult(status="season_no_eligible_participant")
 
     def _run_external_lifecycle_tick(
