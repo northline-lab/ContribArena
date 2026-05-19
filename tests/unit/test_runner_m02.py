@@ -2547,7 +2547,7 @@ class RunnerM02Test(unittest.TestCase):
             )
             agent = FakeMemoryAgent()
 
-            result = _run_with_fake_docker(agent, base, tmp_path)
+            _run_with_fake_docker(agent, base, tmp_path)
 
             self.assertEqual([17], [item["number"] for item in agent.memory_context["tracked_prs"]])
             self.assertTrue(
