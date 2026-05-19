@@ -134,6 +134,30 @@ def participant_id_for(config: SeasonConfig, participant: SeasonParticipantConfi
     return participant.id or derive_participant_id(config.id, participant.model)
 
 
+def participant_dir_for_config(config: RunConfig) -> Path | None:
+    if not config.run.season_id or not config.run.participant_id:
+        return None
+    return SeasonStore.from_config(config).participant_dir(
+        config.run.season_id,
+        config.run.participant_id,
+    )
+
+
+def participant_memory_root(config: RunConfig) -> Path | None:
+    participant_dir = participant_dir_for_config(config)
+    return participant_dir / "memory" if participant_dir is not None else None
+
+
+def participant_goal_state_path(config: RunConfig) -> Path | None:
+    participant_dir = participant_dir_for_config(config)
+    return participant_dir / "goal_state.json" if participant_dir is not None else None
+
+
+def participant_governance_state_path(config: RunConfig) -> Path | None:
+    participant_dir = participant_dir_for_config(config)
+    return participant_dir / "pr_history.json" if participant_dir is not None else None
+
+
 def admit_run(config: RunConfig) -> SeasonAdmission:
     season_id = config.run.season_id
     if not season_id:

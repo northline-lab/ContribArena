@@ -55,6 +55,7 @@ from contribarena.engine.middleware.governance import (
 from contribarena.engine.operator_events import OperatorProgressWriter, truncate_for_operator
 from contribarena.engine.runtime_config import apply_output_dir
 from contribarena.engine.seasons import admit_run
+from contribarena.engine.seasons import participant_memory_root
 from contribarena.engine.surface_summary import build_run_summary
 from contribarena.engine.workspace import DockerWorkspaceManager
 from contribarena.errors import AgentError, BudgetExhausted, InfrastructureError
@@ -177,7 +178,11 @@ class Runner:
         workspace = DockerWorkspaceManager(run_id, repo_slug, config.workspace)
         budget = BudgetTracker(config.run.budget)
         capture = ArtifactCapture()
-        memory = MemoryService(config.memory, run_id=run_id, repo_full_name=repo_slug)
+        memory_config = config.memory
+        participant_memory = participant_memory_root(config)
+        if participant_memory is not None and config.memory.root != participant_memory:
+            memory_config = config.memory.model_copy(update={"root": participant_memory})
+        memory = MemoryService(memory_config, run_id=run_id, repo_full_name=repo_slug)
         goals = GoalService(
             config,
             run_id=run_id,

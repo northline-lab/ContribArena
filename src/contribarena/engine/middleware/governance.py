@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from contribarena.config.schema import GovernanceConfig, OwnedRepositoryPolicy, RunConfig
+from contribarena.engine.seasons import participant_governance_state_path
 from contribarena.models import (
     GovernanceAttempt,
     GovernanceDecision,
@@ -126,6 +127,9 @@ class GovernanceMiddleware:
 
 
 def governance_state_path(config: RunConfig) -> Path:
+    participant_path = participant_governance_state_path(config)
+    if participant_path is not None:
+        return participant_path
     return config.governance.state_path or config.artifacts.output_root / "governance_state.json"
 
 

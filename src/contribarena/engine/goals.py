@@ -10,6 +10,7 @@ from typing import Callable
 from pydantic import ValidationError
 
 from contribarena.config.schema import DEFAULT_MEMORY_RELATIVE, RunConfig
+from contribarena.engine.seasons import participant_goal_state_path
 from contribarena.memory.redact import redact_text
 from contribarena.models import (
     GoalContext,
@@ -35,6 +36,9 @@ EVIDENCE_REF_PATTERN = re.compile(
 def goal_state_path(config: RunConfig) -> Path:
     if config.goal.state_path is not None:
         return config.goal.state_path
+    participant_path = participant_goal_state_path(config)
+    if participant_path is not None:
+        return participant_path
     if (
         config.artifacts.output_root == Path("runs")
         and config.memory.root != DEFAULT_MEMORY_RELATIVE

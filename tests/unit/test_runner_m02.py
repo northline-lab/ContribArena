@@ -2349,6 +2349,22 @@ class RunnerM02Test(unittest.TestCase):
             self.assertTrue(
                 (tmp_path / "seasons" / "season_0" / "participants" / "season_0:local-stub").is_dir()
             )
+            self.assertEqual(
+                tmp_path / "seasons" / "season_0" / "participants" / "season_0:local-stub" / "goal_state.json",
+                goal_state_path(config),
+            )
+            self.assertTrue(
+                (
+                    tmp_path
+                    / "seasons"
+                    / "season_0"
+                    / "participants"
+                    / "season_0:local-stub"
+                    / "memory"
+                    / "events"
+                    / f"{result.run_id}.jsonl"
+                ).exists()
+            )
 
     def test_season_admission_rejects_inactive_season(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2372,6 +2388,84 @@ class RunnerM02Test(unittest.TestCase):
             "season_0:gpt-5.5",
             derive_participant_id("season_0", "responses/openai/GPT-5.5"),
         )
+
+    def test_participant_scoped_pr_history_filters_tracked_prs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            base = _issue_config(tmp_path / "runs")
+            base.memory = MemoryConfig(root=tmp_path / "memory")
+            base.run.season_id = "season_0"
+            base.run.participant_id = "season_0:local-stub"
+            base.run.wake_source = "manual"
+            base.season = SeasonConfig(
+                id="season_0",
+                status="active",
+                state_root=tmp_path / "seasons",
+                participants=[
+                    SeasonParticipantConfig(model="local-stub"),
+                    SeasonParticipantConfig(model="other-model"),
+                ],
+            )
+            other = base.model_copy(
+                update={
+                    "run": base.run.model_copy(
+                        update={
+                            "model": "other-model",
+                            "participant_id": "season_0:other-model",
+                        }
+                    )
+                },
+                deep=True,
+            )
+            save_governance_state(
+                base,
+                GovernanceState(
+                    lifecycle_records=[
+                        PrLifecycleRecord(
+                            repository="example/repo",
+                            number=17,
+                            lifecycle_status="needs_response",
+                        )
+                    ]
+                ),
+            )
+            save_governance_state(
+                other,
+                GovernanceState(
+                    lifecycle_records=[
+                        PrLifecycleRecord(
+                            repository="example/repo",
+                            number=99,
+                            lifecycle_status="needs_response",
+                        )
+                    ]
+                ),
+            )
+            agent = FakeMemoryAgent()
+
+            result = _run_with_fake_docker(agent, base, tmp_path)
+
+            self.assertEqual([17], [item["number"] for item in agent.memory_context["tracked_prs"]])
+            self.assertTrue(
+                (
+                    tmp_path
+                    / "seasons"
+                    / "season_0"
+                    / "participants"
+                    / "season_0:local-stub"
+                    / "pr_history.json"
+                ).exists()
+            )
+            self.assertTrue(
+                (
+                    tmp_path
+                    / "seasons"
+                    / "season_0"
+                    / "participants"
+                    / "season_0:other-model"
+                    / "pr_history.json"
+                ).exists()
+            )
 
 
 def _config(output_root: Path) -> RunConfig:
