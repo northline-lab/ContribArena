@@ -218,6 +218,42 @@ class JudgementScoringTests(unittest.TestCase):
             self.assertIn("TOML valid", excerpt)
             self.assertNotIn("git clone", excerpt)
 
+    def test_verification_excerpt_prefers_typed_verification_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "workspace_command.json").write_text(
+                """
+                {
+                  "commands": [
+                    {
+                      "command": "python3 -m pytest tests",
+                      "stdout": "setup-like text from an old row\\n",
+                      "stderr": "",
+                      "exit_code": 0,
+                      "timed_out": false,
+                      "command_type": "setup"
+                    },
+                    {
+                      "command": "python3 -m compileall .",
+                      "stdout": "compile ok\\n",
+                      "stderr": "",
+                      "exit_code": 0,
+                      "timed_out": false,
+                      "command_type": "verification"
+                    }
+                  ]
+                }
+                """,
+                encoding="utf-8",
+            )
+
+            excerpt = judgement_module._verification_excerpt(run_dir)
+
+            self.assertIn("compileall", excerpt)
+            self.assertIn("compile ok", excerpt)
+            self.assertNotIn("pytest tests", excerpt)
+            self.assertNotIn("setup-like text", excerpt)
+
     def test_dimension_packets_are_scoped_to_primary_evidence(self) -> None:
         packet = _packet()
 

@@ -20,6 +20,7 @@ from contribarena.engine.workspace import DockerWorkspaceManager
 from contribarena.memory import MemoryService
 from contribarena.memory.schema import GuidanceContext, MemoryCapabilities
 from contribarena.models import AciResult, AgentStep, CommandResult, PatchResult, RunState
+from contribarena.models.tool_results import CommandType
 from contribarena.trace import TraceWriter
 from contribarena.tools.aci import (
     AciExecution,
@@ -233,7 +234,7 @@ class ToolRegistry:
                 max_probe_seconds=seconds,
                 install_dependencies=install_dependencies,
             )
-            self.capture.record_command(command)
+            self.capture.record_command(_typed_command(command, "setup"))
             return probe
 
         return self._record(
@@ -257,6 +258,7 @@ class ToolRegistry:
                 payload={"cmd": cmd, "timeout_seconds": timeout_seconds},
             ),
         )
+        result = _typed_command(result, _infer_command_type(cmd))
         self.capture.record_command(result)
         return result
 
@@ -1127,8 +1129,12 @@ class ToolRegistry:
             )
             raise
         duration = time.monotonic() - start
+        command_type = _aci_tool_command_type(tool)
         for command in execution.commands:
-            self.capture.record_command(command)
+            typed = _typed_command(command, command_type)
+            if command_type == "other":
+                typed = _typed_command(typed, _infer_command_type(typed.command))
+            self.capture.record_command(typed)
         for patch in execution.patches:
             self.capture.record_patch(patch)
         result = _annotate_recovery_retry(
@@ -1695,6 +1701,87 @@ def _configured_repo_full_name(config: RunConfig) -> str:
     if config.discovery.candidates:
         return config.discovery.candidates[0].full_name
     return config.discovery.query or ""
+
+
+_VERIFICATION_COMMAND_MARKERS = (
+    "pytest",
+    "compileall",
+    "py_compile",
+    "tomllib",
+    "ruff",
+    "mypy",
+    "verify",
+    "lint",
+    "unit",
+    "cargo test",
+    "go test",
+    "npm test",
+    "yarn test",
+    "pnpm test",
+    "tox",
+    "nox",
+    "black --check",
+    "prettier --check",
+    "eslint",
+    "flake8",
+    "pylint",
+    "isort --check",
+)
+
+_SETUP_COMMAND_MARKERS = (
+    "git clone",
+    "pip install",
+    "uv pip",
+    "uv sync",
+    "npm install",
+    "npm ci",
+    "yarn install",
+    "pnpm install",
+    "cargo build",
+    "cargo fetch",
+    "go build",
+    "go mod download",
+    "apt-get install",
+    "apt install",
+    "brew install",
+    "make install",
+    "poetry install",
+)
+
+_ACI_VERIFICATION_TOOLS = {"aci_verify"}
+
+_ACI_SETUP_TOOLS = {
+    "aci_apply_patch",
+    "aci_undo",
+    "aci_clean_generated",
+    "aci_create",
+    "aci_submit_patch",
+    "aci_submit_patch_finalize",
+    "repo.setup_probe",
+}
+
+
+def _aci_tool_command_type(tool: str) -> CommandType:
+    if tool in _ACI_VERIFICATION_TOOLS:
+        return "verification"
+    if tool in _ACI_SETUP_TOOLS:
+        return "setup"
+    return "other"
+
+
+def _infer_command_type(cmd: str) -> CommandType:
+    lowered = cmd.lower()
+    if any(marker in lowered for marker in _VERIFICATION_COMMAND_MARKERS):
+        return "verification"
+    if any(marker in lowered for marker in _SETUP_COMMAND_MARKERS):
+        return "setup"
+    return "other"
+
+
+def _typed_command(command: CommandResult, command_type: CommandType) -> CommandResult:
+    if command.command_type == command_type:
+        return command
+    return command.model_copy(update={"command_type": command_type})
 
 
 def _summary(payload: dict[str, Any], max_chars: int = 300) -> str:

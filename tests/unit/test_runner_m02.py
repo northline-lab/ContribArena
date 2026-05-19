@@ -749,6 +749,28 @@ class RunnerM02Test(unittest.TestCase):
             self.assertIn("aci_submit_patch", {step["tool"] for step in trajectory})
             workspace_command = json.loads((result.run_dir / "workspace_command.json").read_text())
             self.assertIn("aci_results", workspace_command)
+            typed_commands = {
+                item["command"]: item.get("command_type")
+                for item in workspace_command["commands"]
+            }
+            self.assertEqual(
+                "setup",
+                typed_commands[
+                    "git clone https://github.com/example/repo.git repo && cd repo && git status --short"
+                ],
+            )
+            self.assertEqual(
+                "verification",
+                typed_commands["cd repo && python3 -m compileall ."],
+            )
+            self.assertEqual(
+                "setup",
+                next(
+                    command_type
+                    for command, command_type in typed_commands.items()
+                    if "git diff --binary" in command
+                ),
+            )
             submit_results = [
                 item
                 for item in workspace_command["aci_results"]

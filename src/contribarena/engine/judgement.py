@@ -1006,11 +1006,19 @@ def _verification_command_excerpt(run_dir: Path) -> str:
     commands = payload.get("commands", []) if isinstance(payload, dict) else []
     if not isinstance(commands, list):
         return ""
-    candidates = [
+    typed_candidates = [
         command
         for command in commands
-        if isinstance(command, dict) and _looks_like_verification_command(str(command.get("command", "")))
+        if isinstance(command, dict) and command.get("command_type") == "verification"
     ]
+    if typed_candidates:
+        candidates = typed_candidates
+    else:
+        candidates = [
+            command
+            for command in commands
+            if isinstance(command, dict) and _looks_like_verification_command(str(command.get("command", "")))
+        ]
     if not candidates:
         candidates = [command for command in commands if isinstance(command, dict) and command.get("exit_code") == 0]
     if not candidates:

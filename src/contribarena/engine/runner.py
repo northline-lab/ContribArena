@@ -1348,6 +1348,8 @@ def _execute_live_pr(
         workspace.run_with_env(command, {token_env: token}),
         token,
     )
+    if push_result.command_type != "other":
+        push_result = push_result.model_copy(update={"command_type": "other"})
     capture.record_command(push_result)
     if push_result.exit_code != 0:
         return OwnedLivePrExecutionResult(

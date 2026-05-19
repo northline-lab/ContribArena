@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
+
+
+CommandType = Literal["verification", "setup", "discovery", "other"]
 
 
 class CommandResult(BaseModel):
@@ -10,6 +15,7 @@ class CommandResult(BaseModel):
     exit_code: int
     duration_seconds: float
     timed_out: bool = False
+    command_type: CommandType = "other"
 
 
 class PatchResult(BaseModel):
