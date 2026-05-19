@@ -58,6 +58,7 @@ def _packet(
         patch_excerpt="diff --git a/app.py b/app.py\n-old\n+new\n",
         pr_description_excerpt="Fixes the reported issue with a small patch.",
         verification_excerpt="compileall passed",
+        discovery_calls_summary='{"query":"agent framework","returned_count":3}',
         phase_scout_project_excerpt='{"repo":"example/repo","decision":"selected"}',
         phase_scout_opportunity_excerpt=(
             '{"selected_opportunity":true,"duplicate_evidence_ref":"duplicate:1"}'
@@ -260,6 +261,7 @@ class JudgementScoringTests(unittest.TestCase):
         packets = judgement_module.build_judge_dimension_packets(packet)
 
         self.assertIn("phase_scout_project_comparison", packets["project_fit"])
+        self.assertIn("discovery_calls_summary", packets["project_fit"])
         self.assertNotIn("patch_excerpt", packets["project_fit"])
         self.assertIn("patch_excerpt", packets["execution_correctness"])
         self.assertNotIn("phase_scout_duplicate_check", packets["execution_correctness"])

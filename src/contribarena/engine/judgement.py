@@ -96,6 +96,7 @@ def build_judge_packet(
         patch_excerpt=_read_excerpt(run_dir / "patch.diff", max_chars=8000),
         pr_description_excerpt=_read_excerpt(run_dir / "pr_description.md", max_chars=6000),
         verification_excerpt=_verification_excerpt(run_dir),
+        discovery_calls_summary=_read_excerpt(run_dir / "discovery_log.jsonl", max_chars=6000),
         phase_scout_project_excerpt=_read_excerpt(
             run_dir / "phase_scout_project_comparison.jsonl", max_chars=6000
         ),
@@ -428,6 +429,7 @@ def _dimension_packet(dimension: str, packet: JudgePacket) -> dict[str, object]:
         base.update(
             {
                 "repository": packet.repository,
+                "discovery_calls_summary": packet.discovery_calls_summary,
                 "phase_scout_project_comparison": packet.phase_scout_project_excerpt,
             }
         )

@@ -835,6 +835,11 @@ def _write_capture_artifacts(artifacts: ArtifactWriter, capture: ArtifactCapture
         "phase_review_response.jsonl",
         capture.phase_review_response_rows,
     )
+    _write_jsonl_artifact(
+        artifacts,
+        "discovery_log.jsonl",
+        capture.discovery_rows,
+    )
 
 
 def _write_jsonl_artifact(

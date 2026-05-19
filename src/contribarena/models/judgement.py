@@ -115,6 +115,7 @@ class JudgePacket(BaseModel):
     patch_excerpt: str = ""
     pr_description_excerpt: str = ""
     verification_excerpt: str = ""
+    discovery_calls_summary: str = ""
     phase_scout_project_excerpt: str = ""
     phase_scout_opportunity_excerpt: str = ""
     phase_scout_duplicate_excerpt: str = ""

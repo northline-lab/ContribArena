@@ -48,7 +48,7 @@ from contribarena.tools.repo_prs import (
     repo_search_prs_by_title,
 )
 from contribarena.tools.repo_readme import repo_get_readme
-from contribarena.tools.repo_search import repo_search
+from contribarena.tools.repo_search import repo_search_with_log
 from contribarena.tools.repo_setup_probe import repo_setup_probe
 from contribarena.tools.workspace_patch import workspace_apply_patch
 from contribarena.tools.workspace_run import workspace_run
@@ -138,10 +138,15 @@ class ToolRegistry:
         return (context.current_phase, context.current_sub_phase)
 
     def repo_search(self, query: str = "", filters: object | None = None) -> object:
+        def run_search() -> object:
+            result = repo_search_with_log(self.config, query=query, filters=filters)
+            self.capture.record_discovery(result.log_row)
+            return result.candidates
+
         return self._record(
             state=RunState.REPO_DISCOVERED,
             event="repo.search",
-            fn=lambda: repo_search(self.config, query=query, filters=filters),
+            fn=run_search,
             payload={"query": query, "filters": str(filters)},
         )
 

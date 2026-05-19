@@ -10,6 +10,9 @@ from contribarena.config.schema import (
     RepoSearchFilters,
     RunConfig,
     RunSection,
+    SeasonConfig,
+    SeasonDiscoveryProfileConfig,
+    SeasonParticipantConfig,
     WorkspaceConfig,
 )
 from contribarena.models import RepoMetadata
@@ -25,7 +28,7 @@ from contribarena.tools.repo_prs import (
     repo_get_recent_merged_prs,
     repo_search_prs_by_title,
 )
-from contribarena.tools.repo_search import repo_search
+from contribarena.tools.repo_search import repo_search, repo_search_with_log
 
 
 class GithubToolsTest(unittest.TestCase):
@@ -89,6 +92,63 @@ class GithubToolsTest(unittest.TestCase):
             results = repo_search(_config(query="agent"))
 
         self.assertEqual("owner/rest-project", results[0].full_name)
+
+    def test_repo_search_applies_owned_profile_and_records_log_row(self) -> None:
+        class FakeClient:
+            def gh_json(self, args: list[str]) -> GitHubResponse:
+                return GitHubResponse(
+                    ok=True,
+                    source="gh",
+                    data=[
+                        {
+                            "fullName": "owner/allowed",
+                            "description": "Allowed",
+                            "stargazersCount": 12,
+                            "language": "Python",
+                            "pushedAt": "2026-05-01T00:00:00Z",
+                        },
+                        {
+                            "fullName": "owner/denied",
+                            "description": "Denied",
+                            "stargazersCount": 12,
+                            "language": "Python",
+                            "pushedAt": "2026-05-01T00:00:00Z",
+                        },
+                    ],
+                )
+
+            def rest_json(self, *args: object, **kwargs: object) -> GitHubResponse:
+                raise AssertionError("REST fallback should not be used")
+
+        config = _config(language="Python")
+        config.run.season_id = "season_0"
+        config.run.participant_id = "season_0:qwen36plus"
+        config.season = SeasonConfig(
+            id="season_0",
+            status="active",
+            participants=[SeasonParticipantConfig(model="compatible/qwen36plus")],
+            discovery_profile=SeasonDiscoveryProfileConfig(
+                scope="owned",
+                seed_queries=["agent framework"],
+                language_filter=["Python"],
+                min_stars=50,
+                allowlist=["owner/allowed"],
+                denylist=["owner/denied"],
+            ),
+        )
+
+        with patch("contribarena.tools.repo_search.GitHubClient", FakeClient):
+            result = repo_search_with_log(config)
+
+        self.assertEqual(["owner/allowed"], [candidate.full_name for candidate in result.candidates])
+        self.assertEqual("season_0", result.log_row["season_id"])
+        self.assertEqual("season_0:qwen36plus", result.log_row["participant_id"])
+        self.assertEqual("agent framework", result.log_row["query"])
+        self.assertEqual({"language": "Python", "stars_min": 50}, result.log_row["filters_resolved"])
+        self.assertIn("language:Python", str(result.log_row["github_query_string"]))
+        self.assertIn("stars:>=50", str(result.log_row["github_query_string"]))
+        self.assertEqual(2, result.log_row["total_hits"])
+        self.assertEqual(1, result.log_row["returned_count"])
 
     def test_repo_metadata_normalizes_gh_payload(self) -> None:
         class FakeClient:

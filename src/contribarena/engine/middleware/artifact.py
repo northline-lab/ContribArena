@@ -16,6 +16,7 @@ class ArtifactCapture:
         self.phase_scout_duplicate_rows: list[dict[str, object]] = []
         self.phase_review_maintainer_rows: list[dict[str, object]] = []
         self.phase_review_response_rows: list[dict[str, object]] = []
+        self.discovery_rows: list[dict[str, object]] = []
 
     def record_command(self, result: CommandResult) -> None:
         self.commands.append(result)
@@ -46,3 +47,6 @@ class ArtifactCapture:
             self.phase_review_maintainer_rows.append(payload)
         elif name == "phase_review_response":
             self.phase_review_response_rows.append(payload)
+
+    def record_discovery(self, payload: dict[str, object]) -> None:
+        self.discovery_rows.append(payload)
