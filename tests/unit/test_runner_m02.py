@@ -24,12 +24,16 @@ from contribarena.config.schema import (
     RepoCandidate,
     RunConfig,
     RunSection,
+    SeasonConfig,
+    SeasonDiscoveryProfileConfig,
+    SeasonParticipantConfig,
     WorkspaceConfig,
 )
 from contribarena.agent import AgentInvocationResult
 from contribarena.agent.contributor import build_agent_instructions
 from contribarena.engine.goals import GoalService, goal_state_path
 from contribarena.engine.runner import Runner, _owned_live_push_command
+from contribarena.engine.seasons import derive_participant_id, normalize_model_identity
 from contribarena.engine.middleware.governance import load_governance_state, save_governance_state
 from contribarena.errors import AgentError
 from contribarena.models import (
@@ -2316,6 +2320,58 @@ class RunnerM02Test(unittest.TestCase):
             memory_steps = [step for step in trajectory if step["tool"] == "aci_memory_note"]
             self.assertEqual(1, len(memory_steps))
             self.assertEqual("memory_disabled", memory_steps[0]["recovery_kind"])
+
+    def test_season_admission_records_participant_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _config(tmp_path / "runs")
+            config.run.season_id = "season_0"
+            config.run.participant_id = "season_0:local-stub"
+            config.run.wake_source = "manual"
+            config.season = SeasonConfig(
+                id="season_0",
+                name="Season 0",
+                status="active",
+                state_root=tmp_path / "seasons",
+                participants=[SeasonParticipantConfig(model="local-stub")],
+                discovery_profile=SeasonDiscoveryProfileConfig(
+                    scope="owned",
+                    allowlist=["example/repo"],
+                ),
+            )
+
+            result = _run_with_fake_docker(FakeM02Agent(), config, tmp_path)
+
+            summary = json.loads((result.run_dir / "run_summary.json").read_text())
+            self.assertEqual("season_0", summary["season"]["id"])
+            self.assertEqual("season_0:local-stub", summary["agent"]["participant_id"])
+            self.assertEqual("manual", summary["wake_source"])
+            self.assertTrue(
+                (tmp_path / "seasons" / "season_0" / "participants" / "season_0:local-stub").is_dir()
+            )
+
+    def test_season_admission_rejects_inactive_season(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _config(tmp_path / "runs")
+            config.run.season_id = "season_0"
+            config.run.participant_id = "season_0:local-stub"
+            config.season = SeasonConfig(
+                id="season_0",
+                status="observing",
+                state_root=tmp_path / "seasons",
+                participants=[SeasonParticipantConfig(model="local-stub")],
+            )
+
+            with self.assertRaisesRegex(Exception, "season_not_active"):
+                Runner(agent=FakeM02Agent()).run(config, output_dir=tmp_path / "runs")
+
+    def test_season_identity_normalization(self) -> None:
+        self.assertEqual("gpt-5.5", normalize_model_identity("responses/openai/GPT-5.5"))
+        self.assertEqual(
+            "season_0:gpt-5.5",
+            derive_participant_id("season_0", "responses/openai/GPT-5.5"),
+        )
 
 
 def _config(output_root: Path) -> RunConfig:

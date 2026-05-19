@@ -46,6 +46,9 @@ class RunSection(BaseModel):
     id: str | None = None
     mode: Literal["shadow", "dry_run", "owned_live", "external_live"] = "shadow"
     model: str = "local-stub"
+    season_id: str | None = None
+    participant_id: str | None = None
+    wake_source: Literal["manual", "auto", "unranked"] = "unranked"
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
 
 
@@ -290,6 +293,46 @@ class GovernanceConfig(BaseModel):
     state_path: Path | None = None
 
 
+class SeasonDefaultsConfig(BaseModel):
+    wake_interval: str = "6h"
+    max_concurrent_runs: int = Field(default=1, ge=1)
+
+
+class SeasonParticipantConfig(BaseModel):
+    id: str | None = None
+    model: str
+    role: list[Literal["agent", "judge"]] = Field(default_factory=lambda: ["agent", "judge"])
+    wake_interval: str | None = None
+    max_concurrent_runs: int | None = Field(default=None, ge=1)
+    repo_policy: dict[str, object] = Field(default_factory=dict)
+
+
+class SeasonDiscoveryProfileConfig(BaseModel):
+    scope: Literal["owned", "external"] = "owned"
+    seed_queries: list[str] = Field(default_factory=list)
+    language_filter: list[str] = Field(default_factory=list)
+    topic_filter: list[str] = Field(default_factory=list)
+    min_stars: int | None = Field(default=None, ge=0)
+    activity_window_days: int | None = Field(default=None, ge=1)
+    allowlist: list[str] = Field(default_factory=list)
+    denylist: list[str] = Field(default_factory=list)
+
+
+class SeasonConfig(BaseModel):
+    id: str = "season_0"
+    name: str = "Season 0"
+    status: Literal["draft", "active", "observing", "completed"] = "draft"
+    defaults: SeasonDefaultsConfig = Field(default_factory=SeasonDefaultsConfig)
+    participants: list[SeasonParticipantConfig] = Field(default_factory=list)
+    discovery_profile: SeasonDiscoveryProfileConfig = Field(
+        default_factory=SeasonDiscoveryProfileConfig
+    )
+    repo_policy: dict[str, object] = Field(default_factory=dict)
+    scoring_weights: dict[str, float] = Field(default_factory=dict)
+    judge_panel: dict[str, object] = Field(default_factory=dict)
+    state_root: Path | None = None
+
+
 class ControllerConfig(BaseModel):
     enabled: bool = False
     interval_seconds: int = Field(default=300, ge=1)
@@ -389,6 +432,7 @@ class RunConfig(BaseModel):
     judgement: JudgementConfig = Field(default_factory=JudgementConfig)
     models: ModelsConfig = Field(default_factory=ModelsConfig)
     governance: GovernanceConfig = Field(default_factory=GovernanceConfig)
+    season: SeasonConfig | None = None
     controller: ControllerConfig = Field(default_factory=ControllerConfig)
     backend: BackendConfig = Field(default_factory=BackendConfig)
 

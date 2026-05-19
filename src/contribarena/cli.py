@@ -17,11 +17,13 @@ from contribarena.engine import LocalController, Runner
 from contribarena.engine.api import create_app
 from contribarena.engine.judge_refresh import refresh_judgement
 from contribarena.engine.read_model import SurfaceReadModel
+from contribarena.engine.seasons import SeasonStore
 from contribarena.engine.surface_indexer import index_surface_data
 from contribarena.errors import ContribArenaError
 
 app = typer.Typer(help="ContribArena control plane commands.")
 surface_app = typer.Typer(help="Build public read-only surface data.")
+season_app = typer.Typer(help="Manage season state and participant admission.")
 
 
 @app.command()
@@ -61,6 +63,9 @@ def run(
     max_repo_switches: int | None = typer.Option(None, "--max-repo-switches", min=0),
     max_opportunity_switches: int | None = typer.Option(None, "--max-opportunity-switches", min=0),
     max_review_rounds: int | None = typer.Option(None, "--max-review-rounds", min=0),
+    season_id: str | None = typer.Option(None, "--season-id"),
+    participant_id: str | None = typer.Option(None, "--participant-id"),
+    wake_source: str = typer.Option("manual", "--wake-source"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Execute a ContribArena agent run."""
@@ -68,6 +73,13 @@ def run(
         run_config = load_run_config(config)
         if model:
             run_config = _with_model_override(run_config, model)
+        if season_id or participant_id:
+            run_config = _with_season_run_override(
+                run_config,
+                season_id=season_id,
+                participant_id=participant_id,
+                wake_source=wake_source,
+            )
         run_config = _with_budget_overrides(
             run_config,
             max_candidate_repos=max_candidate_repos,
@@ -84,6 +96,58 @@ def run(
     typer.echo(f"Run completed: {result.run_dir}")
     typer.echo(f"  Status:      {result.status}")
     typer.echo(f"  Tool calls:  {result.tool_calls}")
+
+
+@season_app.command("activate")
+def season_activate(config: Path = typer.Option(..., "--config", "-c"), season_id: str | None = None) -> None:
+    """Activate a configured season."""
+    _season_transition(config, season_id, "active")
+
+
+@season_app.command("observe")
+def season_observe(config: Path = typer.Option(..., "--config", "-c"), season_id: str | None = None) -> None:
+    """Stop admitting new work while continuing observation."""
+    _season_transition(config, season_id, "observing")
+
+
+@season_app.command("complete")
+def season_complete(
+    config: Path = typer.Option(..., "--config", "-c"),
+    season_id: str | None = None,
+    force_with_open_prs: bool = typer.Option(False, "--force-with-open-prs"),
+) -> None:
+    """Freeze the season snapshot and mark it completed."""
+    _ = force_with_open_prs
+    _season_transition(config, season_id, "completed")
+
+
+@season_app.command("status")
+def season_status(config: Path = typer.Option(..., "--config", "-c"), season_id: str | None = None) -> None:
+    """Show one season's state."""
+    run_config = load_run_config(config)
+    target = season_id or (run_config.season.id if run_config.season else "season_0")
+    season = SeasonStore.from_config(run_config).load(target, run_config.season)
+    typer.echo(f"Season:      {season.id}")
+    typer.echo(f"Name:        {season.name}")
+    typer.echo(f"Status:      {season.status}")
+    typer.echo(f"Participants:{len(season.participants):>3}")
+    typer.echo(f"Discovery:   {season.discovery_profile.scope}")
+
+
+@season_app.command("list")
+def season_list(config: Path = typer.Option(..., "--config", "-c")) -> None:
+    """List configured seasons."""
+    run_config = load_run_config(config)
+    seasons = SeasonStore.from_config(run_config).list(run_config.season)
+    if not seasons:
+        typer.echo("No seasons configured.")
+        return
+    typer.echo(f"{'Season':<20} {'Status':<10} {'Participants':>12} {'Scope':<10}")
+    for season in seasons:
+        typer.echo(
+            f"{season.id:<20} {season.status:<10} {len(season.participants):>12} "
+            f"{season.discovery_profile.scope:<10}"
+        )
 
 
 @app.command("run-matrix")
@@ -492,6 +556,38 @@ def _with_budget_overrides(
     )
 
 
+def _with_season_run_override(
+    run_config: Any,
+    *,
+    season_id: str | None,
+    participant_id: str | None,
+    wake_source: str,
+) -> Any:
+    if wake_source not in {"manual", "auto", "unranked"}:
+        raise ContribArenaError("wake_source must be manual, auto, or unranked")
+    updates = {
+        "season_id": season_id or run_config.run.season_id,
+        "participant_id": participant_id or run_config.run.participant_id,
+        "wake_source": wake_source,
+    }
+    return run_config.model_copy(update={"run": run_config.run.model_copy(update=updates)})
+
+
+def _season_transition(config: Path, season_id: str | None, status: str) -> None:
+    try:
+        run_config = load_run_config(config)
+        target = season_id or (run_config.season.id if run_config.season else "season_0")
+        state = SeasonStore.from_config(run_config).transition(
+            target,
+            status,  # type: ignore[arg-type]
+            run_config.season,
+        )
+    except ContribArenaError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(exc.exit_code) from exc
+    typer.echo(f"Season {target}: {state.get('status')}")
+
+
 def _configured_models(run_config: Any) -> list[str]:
     providers = run_config.models.providers
     models = [
@@ -551,3 +647,4 @@ def _score_text(value: Any) -> str:
 
 
 app.add_typer(surface_app, name="surface")
+app.add_typer(season_app, name="season")

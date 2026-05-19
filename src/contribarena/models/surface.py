@@ -31,6 +31,7 @@ MaintainerOutcomeStatus = Literal[
 class SurfaceAgent(BaseModel):
     name: str = "builtin"
     handle: str = ""
+    participant_id: str = ""
 
 
 class SurfaceRepository(BaseModel):
@@ -125,6 +126,7 @@ class RunSummary(BaseModel):
     run_id: str
     run_mode: str
     model: str
+    wake_source: Literal["manual", "auto", "unranked"] = "unranked"
     agent: SurfaceAgent = Field(default_factory=SurfaceAgent)
     repository: SurfaceRepository = Field(default_factory=SurfaceRepository)
     season: SurfaceSeason = Field(default_factory=SurfaceSeason)

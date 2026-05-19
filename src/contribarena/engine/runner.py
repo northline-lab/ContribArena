@@ -54,6 +54,7 @@ from contribarena.engine.middleware.governance import (
 )
 from contribarena.engine.operator_events import OperatorProgressWriter, truncate_for_operator
 from contribarena.engine.runtime_config import apply_output_dir
+from contribarena.engine.seasons import admit_run
 from contribarena.engine.surface_summary import build_run_summary
 from contribarena.engine.workspace import DockerWorkspaceManager
 from contribarena.errors import AgentError, BudgetExhausted, InfrastructureError
@@ -127,6 +128,7 @@ class Runner:
         self, config: RunConfig, output_dir: Path | None = None, verbose: bool = False
     ) -> RunResult:
         config = apply_output_dir(config, output_dir)
+        admission = admit_run(config)
         repo_slug = (
             config.discovery.candidates[0].full_name
             if config.discovery.candidates
@@ -150,9 +152,25 @@ class Runner:
             "started",
             "started ContribArena run",
             evidence=["config.json", "trace.jsonl"],
-            payload={"mode": config.run.mode, "model": config.run.model, "repo": repo_slug},
+            payload={
+                "mode": config.run.mode,
+                "model": config.run.model,
+                "repo": repo_slug,
+                "season_id": admission.season_id,
+                "participant_id": admission.participant_id,
+                "wake_source": admission.wake_source,
+            },
         )
-        trace.write(RunState.RUN_STARTED, "run.started", {"verbose": verbose})
+        trace.write(
+            RunState.RUN_STARTED,
+            "run.started",
+            {
+                "verbose": verbose,
+                "season_id": admission.season_id,
+                "participant_id": admission.participant_id,
+                "wake_source": admission.wake_source,
+            },
+        )
         trace.write(RunState.CONFIG_LOADED, "config.loaded", {"model": config.run.model})
 
         artifacts.write_json("config.json", config.model_dump(mode="json"))

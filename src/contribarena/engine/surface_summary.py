@@ -7,11 +7,13 @@ from pathlib import Path
 from typing import Any
 
 from contribarena.config.schema import RunConfig
+from contribarena.engine.seasons import derive_participant_id
 from contribarena.models.artifacts import ArtifactEntry
 from contribarena.models.lifecycle import TerminalState
 from contribarena.models.surface import (
     RunSummary,
     SurfaceArtifact,
+    SurfaceAgent,
     SurfaceJudgement,
     SurfaceMaintainerOutcome,
     SurfacePipelineStage,
@@ -69,11 +71,13 @@ def build_run_summary(
         run_id=run_id,
         run_mode=config.run.mode,
         model=config.run.model,
+        wake_source=config.run.wake_source,
+        agent=_agent(config),
         repository=repository,
         season=SurfaceSeason(
-            id=config.judgement.season_id,
-            name=config.judgement.season_name,
-            phase=config.judgement.season_phase,
+            id=config.run.season_id or config.judgement.season_id,
+            name=(config.season.name if config.season else config.judgement.season_name),
+            phase=_season_phase(config),
         ),
         opportunity_source=_opportunity_source(config),
         opportunity_source_ref=_opportunity_source_ref(config),
@@ -91,6 +95,26 @@ def build_run_summary(
         judgement=judgement,
         artifacts=_surface_artifacts(run_dir, artifact_entries),
     )
+
+
+def _agent(config: RunConfig) -> SurfaceAgent:
+    season_id = config.run.season_id or ""
+    participant_id = config.run.participant_id or (
+        derive_participant_id(season_id, config.run.model) if season_id else ""
+    )
+    return SurfaceAgent(
+        name="builtin",
+        handle=participant_id or config.run.model,
+        participant_id=participant_id,
+    )
+
+
+def _season_phase(config: RunConfig) -> str:
+    if config.season:
+        if config.season.discovery_profile.scope == "external":
+            return "external_live"
+        return "owned_repo_calibration"
+    return config.judgement.season_phase
 
 
 def _trace_times(path: Path) -> dict[str, Any]:

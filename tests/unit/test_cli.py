@@ -253,6 +253,78 @@ class CliTest(unittest.TestCase):
             self.assertEqual(2, budget.work.max_opportunity_switches)
             self.assertEqual(0, budget.review.max_review_rounds)
 
+    def test_run_applies_season_participant_override(self) -> None:
+        runner = CliRunner()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.yaml"
+            self.assertEqual(
+                0,
+                runner.invoke(app, ["init", "--output", str(config_path)]).exit_code,
+            )
+            captured = {}
+
+            def fake_run(self, config, output_dir=None, verbose=False):
+                captured["run"] = config.run
+                return RunResult(
+                    run_id="run-a",
+                    run_dir=root / "runs" / "run-a",
+                    status="completed",
+                    tool_calls=0,
+                )
+
+            with patch("contribarena.cli.Runner.run", fake_run):
+                result = runner.invoke(
+                    app,
+                    [
+                        "run",
+                        "--config",
+                        str(config_path),
+                        "--season-id",
+                        "season_0",
+                        "--participant-id",
+                        "season_0:local-stub",
+                    ],
+                )
+
+            self.assertEqual(0, result.exit_code, result.output)
+            run = captured["run"]
+            self.assertEqual("season_0", run.season_id)
+            self.assertEqual("season_0:local-stub", run.participant_id)
+            self.assertEqual("manual", run.wake_source)
+
+    def test_season_cli_transitions_configured_season(self) -> None:
+        runner = CliRunner()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.yaml"
+            self.assertEqual(
+                0,
+                runner.invoke(app, ["init", "--output", str(config_path)]).exit_code,
+            )
+            text = config_path.read_text(encoding="utf-8")
+            config_path.write_text(
+                text
+                + "\nseason:\n"
+                + "  id: season_0\n"
+                + "  name: Season 0\n"
+                + f"  state_root: {root / 'seasons'}\n"
+                + "  participants:\n"
+                + "    - model: local-stub\n",
+                encoding="utf-8",
+            )
+
+            activate = runner.invoke(app, ["season", "activate", "--config", str(config_path)])
+            status = runner.invoke(app, ["season", "status", "--config", str(config_path)])
+            listing = runner.invoke(app, ["season", "list", "--config", str(config_path)])
+
+            self.assertEqual(0, activate.exit_code, activate.output)
+            self.assertEqual(0, status.exit_code, status.output)
+            self.assertEqual(0, listing.exit_code, listing.output)
+            self.assertIn("Season season_0: active", activate.output)
+            self.assertIn("Status:      active", status.output)
+            self.assertIn("season_0", listing.output)
+
     def test_controller_reports_disabled_starter_config(self) -> None:
         runner = CliRunner()
         with tempfile.TemporaryDirectory() as tmp:
