@@ -558,10 +558,12 @@ def _rubric_scale_instructions(dimension: str) -> str:
             "ignored or misreported."
         ),
         "review_readiness": (
-            "Anchors for review_readiness: 5=clear PR description, addressed maintainer "
-            "pre-review concerns if present, low-risk scope, and merge-ready evidence; "
+            "Anchors for review_readiness: 5=clear PR description, addressed or "
+            "evidence-backed disputed self pre-submission review concerns if present, "
+            "low-risk scope, and merge-ready evidence; "
             "4=clear scope and verification with minor review gaps; 3=valuable but needs "
-            "questions or small fixes; 2=unclear boundary or unaddressed accepted concern; "
+            "questions or small fixes; 2=unclear boundary or unaddressed substantive "
+            "pre-review concern; "
             "1=near automation noise; 0=empty/misleading PR description, hidden failure, "
             "spam, opt-out, or policy violation."
         ),
@@ -835,10 +837,13 @@ def _ground_truth_check(packet: JudgePacket) -> dict[str, list[str]]:
             "scout budget exhausted without selected_opportunity <=2"
         )
     if (
-        "accepted" in packet.phase_review_maintainer_excerpt.lower()
+        (
+            "request_changes" in packet.phase_review_maintainer_excerpt.lower()
+            or "comment" in packet.phase_review_maintainer_excerpt.lower()
+        )
         and not packet.phase_review_response_excerpt
     ):
-        floors["review_readiness"].append("accepted pre-review concerns not addressed <=2")
+        floors["review_readiness"].append("substantive pre-review concerns not addressed <=2")
     return {dimension: notes for dimension, notes in floors.items() if notes}
 
 
@@ -986,11 +991,66 @@ def _command_count(run_dir: Path) -> int:
 
 
 def _verification_excerpt(run_dir: Path) -> str:
+    text = _verification_command_excerpt(run_dir)
+    if text:
+        return text
     for name in ("verification_summary.md", "test_log.txt", "quality_report.md"):
         text = _read_excerpt(run_dir / name, max_chars=4000)
         if text:
             return text
     return ""
+
+
+def _verification_command_excerpt(run_dir: Path) -> str:
+    payload = _read_json(run_dir / "workspace_command.json")
+    commands = payload.get("commands", []) if isinstance(payload, dict) else []
+    if not isinstance(commands, list):
+        return ""
+    candidates = [
+        command
+        for command in commands
+        if isinstance(command, dict) and _looks_like_verification_command(str(command.get("command", "")))
+    ]
+    if not candidates:
+        candidates = [command for command in commands if isinstance(command, dict) and command.get("exit_code") == 0]
+    if not candidates:
+        return ""
+    lines: list[str] = ["# Verification Command Evidence", ""]
+    for command in candidates[-6:]:
+        cmd = str(command.get("command", ""))
+        stdout = str(command.get("stdout", ""))
+        stderr = str(command.get("stderr", ""))
+        lines.extend(
+            [
+                "```bash",
+                _cap(cmd, 1200),
+                "```",
+                f"exit_code={command.get('exit_code')}",
+                f"timed_out={command.get('timed_out')}",
+            ]
+        )
+        if stdout:
+            lines.extend(["stdout:", "```text", _cap(stdout, 1200), "```"])
+        if stderr:
+            lines.extend(["stderr:", "```text", _cap(stderr, 1200), "```"])
+        lines.append("")
+    return "\n".join(lines)[:5000]
+
+
+def _looks_like_verification_command(command: str) -> bool:
+    lowered = command.lower()
+    markers = (
+        "pytest",
+        "compileall",
+        "py_compile",
+        "tomllib",
+        "ruff",
+        "mypy",
+        "verify",
+        "lint",
+        "unit",
+    )
+    return any(marker in lowered for marker in markers)
 
 
 def _evidence(run_dir: Path) -> list[str]:
@@ -1024,6 +1084,12 @@ def _read_excerpt(path: Path, *, max_chars: int = 4000) -> str:
         return path.read_text(encoding="utf-8", errors="replace")[:max_chars]
     except OSError:
         return ""
+
+
+def _cap(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "\n[truncated]"
 
 
 def _dict(value: object) -> dict[str, object]:

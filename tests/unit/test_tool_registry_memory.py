@@ -408,6 +408,97 @@ class ToolRegistryMemoryTest(unittest.TestCase):
                 any(row.get("action") == "dispute" for row in capture.phase_review_response_rows)
             )
 
+    def test_submit_patch_surfaces_maintainer_prereview_notes_to_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = RunConfig(
+                run=RunSection(id="run-1", mode="shadow"),
+                discovery=DiscoveryConfig(
+                    candidates=[
+                        RepoCandidate(
+                            owner="example",
+                            repo="repo",
+                            url="https://github.com/example/repo",
+                        )
+                    ]
+                ),
+                workspace=WorkspaceConfig(),
+                memory=MemoryConfig(root=root / "memory"),
+            )
+            goals = GoalService(config, run_id="run-1")
+            goals.update(
+                objective="Implement a contribution.",
+                status="active",
+                scope="contribution",
+            )
+            capture = ArtifactCapture()
+            registry = ToolRegistry(
+                config=config,
+                workspace=object(),  # type: ignore[arg-type]
+                trace=TraceWriter(root / "trace.jsonl", "run-1"),
+                budget=BudgetTracker(config.run.budget),
+                capture=capture,
+                goals=goals,
+            )
+            capture.record_aci_result(
+                AciResult(tool="aci_apply_patch", success=True, files_modified=["repo/app.py"])
+            )
+            capture.record_aci_result(AciResult(tool="aci_verify", success=True))
+
+            patch_text = "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n"
+            review_row = {
+                "schema_version": "1",
+                "tool_call_id": "maintainer_prereview:1",
+                "phase": "review",
+                "status": "completed",
+                "round": 1,
+                "severity": "request_changes",
+                "concerns": ["verification is too weak"],
+                "suggested_changes": ["run a targeted test"],
+                "summary": "Needs stronger verification before finalizing.",
+            }
+            with patch_registry_submit(patch_text), patch(
+                "contribarena.tools.registry.run_maintainer_prereview",
+                return_value=type("Review", (), {"row": review_row, "unavailable": False})(),
+            ):
+                draft = registry.aci_submit_patch()
+
+            self.assertTrue(draft.success)
+            self.assertEqual(patch_text, draft.output)
+            self.assertIn("Maintainer pre-review", draft.review_notes)
+            self.assertIn("verification is too weak", draft.review_notes)
+            self.assertEqual(draft.review_notes, capture.aci_results[-1].review_notes)
+
+    def test_maintainer_prereview_marks_self_review_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = RunConfig(
+                run=RunSection(id="run-1", mode="shadow", model="compatible/qwen36plus"),
+                discovery=DiscoveryConfig(
+                    candidates=[
+                        RepoCandidate(
+                            owner="example",
+                            repo="repo",
+                            url="https://github.com/example/repo",
+                        )
+                    ]
+                ),
+                workspace=WorkspaceConfig(),
+                memory=MemoryConfig(root=root / "memory"),
+            )
+
+            review = run_maintainer_prereview(
+                config=config,
+                model_provider=None,
+                capture=ArtifactCapture(),
+                patch="diff --git a/app.py b/app.py\n",
+                round_number=1,
+            )
+
+            self.assertEqual("self", review.row["review_mode"])
+            self.assertEqual("unavailable", review.row["reviewer_model"])
+            self.assertEqual("self_pre_submission_review", review.row["reviewer_role"])
+
     def test_maintainer_prereview_parses_provider_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -61,7 +61,7 @@ def run_maintainer_prereview(
             round_number,
             error=redact_text(str(exc), max_chars=500),
         )
-    return _parse_review(str(result.final_output or ""), round_number)
+    return _parse_review(str(result.final_output or ""), round_number, reviewer_model=config.run.model)
 
 
 def _review_prompt(
@@ -86,7 +86,7 @@ def _review_prompt(
     )
 
 
-def _parse_review(text: str, round_number: int) -> MaintainerReviewResult:
+def _parse_review(text: str, round_number: int, *, reviewer_model: str) -> MaintainerReviewResult:
     try:
         payload = json.loads(_json_object_text(text))
     except json.JSONDecodeError:
@@ -114,6 +114,9 @@ def _parse_review(text: str, round_number: int) -> MaintainerReviewResult:
             "phase": "review",
             "status": "completed",
             "round": round_number,
+            "review_mode": "self",
+            "reviewer_model": reviewer_model,
+            "reviewer_role": "self_pre_submission_review",
             "severity": severity,
             "concerns": concerns,
             "suggested_changes": suggested,
@@ -137,6 +140,9 @@ def _fallback_review(
             "phase": "review",
             "status": status,
             "round": round_number,
+            "review_mode": "self",
+            "reviewer_model": "unavailable",
+            "reviewer_role": "self_pre_submission_review",
             "severity": "unavailable",
             "concerns": [],
             "suggested_changes": [],

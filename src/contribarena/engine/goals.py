@@ -68,9 +68,13 @@ class GoalService:
 
     @property
     def context(self) -> GoalContext:
+        short_term = self._current_run_short_term()
+        fallback_phase = self.state.current_phase
+        if short_term is None and self.state.short_term is not None:
+            fallback_phase = "scout"
         phase, sub_phase = phase_for_goal(
-            self.state.short_term,
-            self.state.current_phase,
+            short_term,
+            fallback_phase,
             draft_submitted=_has_active_draft(self.events),
         )
         return GoalContext(
@@ -279,7 +283,7 @@ class GoalService:
         sub_phase: SubPhase,
         evidence: str,
     ) -> None:
-        goal = self.state.short_term
+        goal = self._current_run_short_term()
         self.events.append(
             GoalEvent(
                 event_id=uuid.uuid4().hex[:12],
@@ -368,6 +372,14 @@ class GoalService:
                 )
         return None
 
+    def _current_run_short_term(self) -> ShortTermGoal | None:
+        goal = self.state.short_term
+        if goal is None:
+            return None
+        if goal.status in {"complete", "abandoned"} and not _has_current_run_goal_event(self.events):
+            return None
+        return goal
+
     def _error(self, kind: str, message: str) -> GoalUpdateResult:
         return GoalUpdateResult(
             success=False,
@@ -427,6 +439,21 @@ def _has_active_draft(events: list[GoalEvent]) -> bool:
         }:
             last_goal_event = event.event_type
     return last_goal_event == "draft_submitted"
+
+
+def _has_current_run_goal_event(events: list[GoalEvent]) -> bool:
+    return any(
+        event.event_type
+        in {
+            "goal_created",
+            "goal_updated",
+            "goal_superseded",
+            "goal_abandoned",
+            "goal_completed",
+            "draft_submitted",
+        }
+        for event in events
+    )
 
 
 def _event_type_for_status(status: GoalStatus | str) -> str:

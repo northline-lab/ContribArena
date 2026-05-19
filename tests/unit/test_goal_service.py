@@ -208,6 +208,50 @@ class GoalServiceTest(unittest.TestCase):
             )
             self.assertEqual("active", second.goals.short_term.status)
 
+    def test_reloaded_terminal_goal_does_not_start_new_run_completed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(Path(tmp) / "runs")
+            service = GoalService(config, run_id="run-1")
+
+            service.update(objective="Finish first PR.", status="active")
+            service.update(
+                status="complete",
+                evidence="Patch submitted and verified.",
+                evidence_refs=["tool_call:aci_submit_patch:1"],
+            )
+            reloaded = GoalService(config, run_id="run-2")
+
+            self.assertEqual("complete", reloaded.context.short_term.status)
+            self.assertEqual("scout", reloaded.context.current_phase)
+            self.assertEqual("project", reloaded.context.current_sub_phase)
+
+    def test_budget_event_does_not_reactivate_reloaded_terminal_goal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(Path(tmp) / "runs")
+            service = GoalService(config, run_id="run-1")
+
+            service.update(objective="Finish first PR.", status="active")
+            service.update(
+                status="complete",
+                evidence="Patch submitted and verified.",
+                evidence_refs=["tool_call:aci_submit_patch:1"],
+            )
+            reloaded = GoalService(config, run_id="run-2")
+
+            reloaded.record_budget_event(
+                event_type="scout_budget_exhausted",
+                phase="scout",
+                sub_phase="project",
+                evidence="max_candidate_repos_considered reached",
+            )
+
+            self.assertEqual("scout", reloaded.context.current_phase)
+            self.assertEqual("project", reloaded.context.current_sub_phase)
+            event = json.loads(reloaded.events_text().splitlines()[0])
+            self.assertEqual("", event["goal_id"])
+            self.assertIsNone(event["status"])
+            self.assertIsNone(event["scope"])
+
 
 def _config(output_root: Path) -> RunConfig:
     return RunConfig(

@@ -1190,6 +1190,8 @@ class ToolRegistry:
                 "phase_review_maintainer_review",
                 review.row,
             )
+            result = _attach_maintainer_review(result, review.row)
+            self.capture.aci_results[-1] = result
             self.trace.write(
                 RunState.WORKSPACE_PATCH_CAPTURED,
                 "workspace.patch_captured",
@@ -1716,6 +1718,53 @@ def _result_summary(result: object, max_chars: int = 300) -> str:
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + "...[truncated]"
+
+
+def _attach_maintainer_review(result: AciResult, row: dict[str, object]) -> AciResult:
+    summary = _maintainer_review_model_summary(row)
+    if not summary:
+        return result
+    review_notes = result.review_notes
+    if review_notes:
+        review_notes += "\n\n"
+    review_notes += summary
+    return result.model_copy(update={"review_notes": review_notes})
+
+
+def _maintainer_review_model_summary(row: dict[str, object]) -> str:
+    status = str(row.get("status") or "")
+    severity = str(row.get("severity") or "")
+    if status != "completed" or severity == "unavailable":
+        return ""
+    concerns = _bounded_string_list(row.get("concerns"), 3)
+    suggested = _bounded_string_list(row.get("suggested_changes"), 3)
+    summary = truncate_for_operator(row.get("summary", ""), 500)
+    if not any([status, severity, concerns, suggested, summary]):
+        return ""
+    lines = [
+        "Maintainer pre-review:",
+        f"- status: {status or 'unknown'}",
+        f"- severity: {severity or 'unknown'}",
+    ]
+    if summary:
+        lines.append(f"- summary: {summary}")
+    if concerns:
+        lines.append("- concerns:")
+        lines.extend(f"  - {item}" for item in concerns)
+    if suggested:
+        lines.append("- suggested_changes:")
+        lines.extend(f"  - {item}" for item in suggested)
+    lines.append(
+        "Before aci_submit_patch_finalize, either address these points with Review-phase "
+        "tools or call aci_dispute_review with evidence_refs."
+    )
+    return "\n".join(lines)
+
+
+def _bounded_string_list(value: object, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [truncate_for_operator(str(item), 240) for item in value[:limit] if str(item).strip()]
 
 
 def _memory_disabled(tool: str) -> AciResult:

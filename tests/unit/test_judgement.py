@@ -195,6 +195,29 @@ class JudgementScoringTests(unittest.TestCase):
         self.assertLessEqual(project_fit.score, 2)
         self.assertIn("only one candidate", project_fit.notes[0])
 
+    def test_verification_excerpt_prioritizes_verification_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "test_log.txt").write_text("early exploration only\n", encoding="utf-8")
+            (run_dir / "workspace_command.json").write_text(
+                """
+                {
+                  "commands": [
+                    {"command": "git clone https://example.test/repo", "stdout": "", "stderr": "", "exit_code": 0, "timed_out": false},
+                    {"command": "python3 -c \\"import tomllib; print('TOML valid')\\"", "stdout": "TOML valid\\n", "stderr": "", "exit_code": 0, "timed_out": false}
+                  ]
+                }
+                """,
+                encoding="utf-8",
+            )
+
+            excerpt = judgement_module._verification_excerpt(run_dir)
+
+            self.assertIn("Verification Command Evidence", excerpt)
+            self.assertIn("tomllib", excerpt)
+            self.assertIn("TOML valid", excerpt)
+            self.assertNotIn("git clone", excerpt)
+
     def test_dimension_packets_are_scoped_to_primary_evidence(self) -> None:
         packet = _packet()
 
