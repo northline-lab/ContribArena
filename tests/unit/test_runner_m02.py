@@ -2382,6 +2382,12 @@ class RunnerM02Test(unittest.TestCase):
             self.assertEqual(0, participant_state["active_runs"])
             self.assertEqual(result.run_id, participant_state["last_run_id"])
             self.assertEqual("completed", participant_state["last_run_status"])
+            self.assertEqual(0, participant_state["prs_opened"])
+            self.assertEqual(0, participant_state["merged_prs"])
+            self.assertEqual(
+                "Submit a verified low-risk patch.",
+                participant_state["latest_goal_summary"],
+            )
             self.assertTrue(
                 (
                     tmp_path

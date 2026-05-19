@@ -1,0 +1,153 @@
+run:
+  mode: owned_live
+  model: compatible/qwen36plus
+  budget:
+    max_steps: 80
+    max_tokens:
+    max_wall_time_seconds: 3600
+    max_invocations: 5
+    max_consecutive_no_progress: 2
+    max_recoveries: 8
+
+discovery:
+  query: agent framework
+  filters:
+    language: Python
+    stars_min: 50
+  candidates:
+    - owner: wanjiedata
+      repo: ContribArena
+      url: https://github.com/wanjiedata/ContribArena
+      branch: main
+      notes: Season 0 owned-repository calibration target.
+
+season:
+  id: season_0
+  name: Season 0 Owned Calibration
+  status: draft
+  state_root: .contribarena/seasons
+  defaults:
+    wake_interval: 6h
+    max_concurrent_runs: 1
+  participants:
+    - id: season_0:qwen36plus
+      model: compatible/qwen36plus
+      role: [agent, judge]
+    - id: season_0:deepseekv4pro
+      model: compatible/deepseekv4pro
+      role: [agent, judge]
+    - id: season_0:gpt55
+      model: responses/gpt55
+      role: [agent, judge]
+    - id: season_0:gemini31pro
+      model: gemini/gemini31pro
+      role: [agent, judge]
+    - id: season_0:claudeopus47
+      model: anthropic/claudeopus47
+      role: [agent, judge]
+  discovery_profile:
+    scope: owned
+    seed_queries:
+      - agent framework
+      - github automation benchmark
+      - autonomous contribution
+    language_filter: [Python, TypeScript]
+    min_stars: 0
+    allowlist:
+      - wanjiedata/ContribArena
+    denylist: []
+  judge_panel:
+    aggregation: mean
+    self_family_skip: false
+
+controller:
+  enabled: true
+  interval_seconds: 300
+  max_ticks: 1
+
+workspace:
+  backend: docker
+  image: contribarena/workspace:latest
+  workdir: /workspace
+  command_timeout_seconds: 300
+  resources:
+    cpus: "2"
+    memory: 4g
+    disk: 10g
+
+artifacts:
+  output_root: .contribarena/runs
+
+memory:
+  enabled: true
+  root: .contribarena/memory
+  backend: noop
+  graphiti_enabled: false
+  history_index_enabled: true
+
+guidance:
+  enabled: true
+
+goal:
+  enabled: true
+  max_abandoned_goals_per_run: 3
+
+governance:
+  live_enabled: false
+  owned_repositories:
+    - owner: wanjiedata
+      repo: ContribArena
+      default_branch: main
+  bot_identity:
+    kind: pat
+    actor: contribarena-bot
+    token_env: GITHUB_TOKEN
+  rate_limits:
+    max_open_prs_per_repo: 1
+    max_prs_per_repo_per_day: 3
+    min_minutes_between_prs_per_repo: 30
+    max_open_prs_per_org: 3
+    max_prs_per_org_per_day: 5
+    min_minutes_between_prs_per_org: 60
+    max_open_prs_global: 10
+    max_prs_global_per_day: 10
+    min_minutes_between_prs_global: 15
+
+backend:
+  read_model_path: .contribarena/read_model.sqlite
+  api_cors_origins:
+    - http://localhost:5173
+    - http://127.0.0.1:5173
+    - https://contribarena.org
+    - https://www.contribarena.org
+  watch_enabled: true
+  refresh_debounce_seconds: 1.0
+
+models:
+  providers:
+    compatible:
+      qwen36plus:
+        base_url_env: WANJIE_COMPATIBLE_BASE_URL
+        api_key_env: WANJIE_API_KEY
+        model: qwen3.6-plus
+      deepseekv4pro:
+        base_url_env: WANJIE_COMPATIBLE_BASE_URL
+        api_key_env: WANJIE_API_KEY
+        model: deepseek-v4-pro
+    responses:
+      gpt55:
+        base_url_env: FUNAI_RESPONSES_BASE_URL
+        api_key_env: FUNAI_API_KEY
+        model: gpt-5.5
+    gemini:
+      gemini31pro:
+        endpoint_env: WANJIE_GEMINI31PRO_ENDPOINT
+        api_key_env: WANJIE_API_KEY
+        api_key_header: x-goog-api-key
+        auth_scheme: ""
+        model: gemini-3.1-pro-preview
+    anthropic:
+      claudeopus47:
+        base_url_env: WANJIE_ANTHROPIC_BASE_URL
+        api_key_env: WANJIE_API_KEY
+        model: claude-opus-4-7

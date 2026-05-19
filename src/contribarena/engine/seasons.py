@@ -343,6 +343,7 @@ def mark_participant_run_finished(
     run_id: str,
     status: str,
     repo_slug: str,
+    latest_goal_summary: str = "",
 ) -> None:
     path = participant_state_path(config)
     if path is None or not config.run.season_id or not config.run.participant_id:
@@ -355,6 +356,7 @@ def mark_participant_run_finished(
     state = raw if isinstance(raw, dict) else {}
     now = datetime.now(UTC).isoformat()
     active_runs = max(0, int(state.get("active_runs") or 0) - 1)
+    pr_counts = _participant_pr_counts(path.parent / "pr_history.json")
     state.update(
         {
             "season_id": config.run.season_id,
@@ -366,9 +368,45 @@ def mark_participant_run_finished(
             "active_runs": active_runs,
             "runs_count": int(state.get("runs_count") or 0) + 1,
             "failures": int(state.get("failures") or 0) + (0 if status == "completed" else 1),
+            "prs_opened": pr_counts["prs_opened"],
+            "merged_prs": pr_counts["merged_prs"],
         }
     )
+    if latest_goal_summary:
+        state["latest_goal_summary"] = latest_goal_summary[:1000]
     path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _participant_pr_counts(path: Path) -> dict[str, int]:
+    if not path.exists():
+        return {"prs_opened": 0, "merged_prs": 0}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {"prs_opened": 0, "merged_prs": 0}
+    if not isinstance(raw, dict):
+        return {"prs_opened": 0, "merged_prs": 0}
+    refs: set[tuple[str, int]] = set()
+    merged: set[tuple[str, int]] = set()
+    for key in ("pull_requests", "lifecycle_records"):
+        records = raw.get(key, [])
+        if not isinstance(records, list):
+            continue
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            repository = str(record.get("repository") or "")
+            try:
+                number = int(record.get("number"))  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                continue
+            if not repository:
+                continue
+            ref = (repository, number)
+            refs.add(ref)
+            if record.get("state") == "merged" or record.get("lifecycle_status") == "merged":
+                merged.add(ref)
+    return {"prs_opened": len(refs), "merged_prs": len(merged)}
 
 
 def admit_run(config: RunConfig) -> SeasonAdmission:

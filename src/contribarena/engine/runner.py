@@ -477,6 +477,7 @@ class Runner:
                 run_id=run_id,
                 status=terminal.status,
                 repo_slug=repo_slug,
+                latest_goal_summary=_latest_goal_summary(goals),
             )
             return RunResult(
                 run_id=run_id,
@@ -543,6 +544,7 @@ class Runner:
                 run_id=run_id,
                 status=terminal.status,
                 repo_slug=repo_slug,
+                latest_goal_summary=_latest_goal_summary(goals),
             )
             raise
         finally:
@@ -790,6 +792,15 @@ def _submitted_patch(capture: ArtifactCapture) -> str:
         if result.tool in {"aci_submit_patch_finalize", "aci_submit_patch"} and result.success:
             return result.output or ""
     return ""
+
+
+def _latest_goal_summary(goals: GoalService) -> str:
+    goal = goals.context.short_term
+    if goal is None:
+        return ""
+    if goal.evidence_summary:
+        return goal.evidence_summary
+    return goal.objective
 
 
 def _write_capture_artifacts(artifacts: ArtifactWriter, capture: ArtifactCapture) -> None:

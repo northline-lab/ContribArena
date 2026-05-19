@@ -71,6 +71,30 @@ class ConfigSchemaTest(unittest.TestCase):
                 "openai/openai-agents-python", config.discovery.candidates[0].full_name
             )
 
+    def test_season_zero_owned_example_loads_five_participants(self) -> None:
+        config = load_run_config(Path("examples/season-0-owned.yaml"))
+
+        self.assertEqual("owned_live", config.run.mode)
+        self.assertIsNotNone(config.season)
+        assert config.season is not None
+        self.assertEqual("season_0", config.season.id)
+        self.assertEqual("owned", config.season.discovery_profile.scope)
+        self.assertEqual(["wanjiedata/ContribArena"], config.season.discovery_profile.allowlist)
+        self.assertEqual(5, len(config.season.participants))
+        self.assertEqual(
+            [
+                "season_0:qwen36plus",
+                "season_0:deepseekv4pro",
+                "season_0:gpt55",
+                "season_0:gemini31pro",
+                "season_0:claudeopus47",
+            ],
+            [participant.id for participant in config.season.participants],
+        )
+        self.assertTrue(config.controller.enabled)
+        self.assertEqual("WANJIE_COMPATIBLE_BASE_URL", config.models.providers.compatible["qwen36plus"].base_url_env)
+        self.assertEqual("WANJIE_GEMINI31PRO_ENDPOINT", config.models.providers.gemini["gemini31pro"].endpoint_env)
+
     def test_load_run_config_loads_dotenv_without_overriding_environment(self) -> None:
         old_token = os.environ.pop("GITHUB_TOKEN", None)
         old_existing = os.environ.get("EXISTING_ENV")
