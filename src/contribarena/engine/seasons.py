@@ -89,8 +89,22 @@ class SeasonStore:
         )
         return path
 
-    def transition(self, season_id: str, status: SeasonStatus, fallback: SeasonConfig | None = None) -> dict[str, Any]:
+    def transition(
+        self,
+        season_id: str,
+        status: SeasonStatus,
+        fallback: SeasonConfig | None = None,
+        *,
+        force_with_open_prs: bool = False,
+    ) -> dict[str, Any]:
         config = self.load(season_id, fallback)
+        if status == "completed" and not force_with_open_prs:
+            open_prs = tracked_open_prs(self, season_id, config)
+            if open_prs:
+                refs = ", ".join(
+                    f"{item.get('repository')}#{item.get('number')}" for item in open_prs[:5]
+                )
+                raise ConfigError(f"season_has_open_prs: {refs}")
         state = self._load_state(season_id)
         now = datetime.now(UTC).isoformat()
         transitions = state.get("transitions", []) if isinstance(state.get("transitions"), list) else []
@@ -200,6 +214,37 @@ def save_participant_state(
     path = store.participant_dir(season_id, participant_id) / "participant_state.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def tracked_open_prs(
+    store: SeasonStore,
+    season_id: str,
+    fallback: SeasonConfig | None = None,
+) -> list[dict[str, Any]]:
+    season = store.load(season_id, fallback)
+    rows: list[dict[str, Any]] = []
+    active_statuses = {"tracking", "needs_response", "stale", "blocked"}
+    for participant in season.participants:
+        participant_id = participant_id_for(season, participant)
+        path = store.participant_dir(season_id, participant_id) / "pr_history.json"
+        if not path.exists():
+            continue
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ConfigError(f"invalid participant PR history {path}: {exc}") from exc
+        if not isinstance(raw, dict):
+            continue
+        for record in raw.get("lifecycle_records", []):
+            if not isinstance(record, dict):
+                continue
+            lifecycle_status = str(record.get("lifecycle_status") or "")
+            state = str(record.get("state") or "")
+            if lifecycle_status in active_statuses or state == "open":
+                item = dict(record)
+                item.setdefault("participant_id", participant_id)
+                rows.append(item)
+    return rows
 
 
 def participant_max_concurrent(

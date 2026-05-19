@@ -372,6 +372,67 @@ class CliTest(unittest.TestCase):
             self.assertTrue((participant_dir / "goal_state.json").exists())
             self.assertTrue((participant_dir / "pr_history.json").exists())
 
+    def test_season_complete_blocks_open_prs_unless_forced(self) -> None:
+        runner = CliRunner()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.yaml"
+            self.assertEqual(
+                0,
+                runner.invoke(app, ["init", "--output", str(config_path)]).exit_code,
+            )
+            text = config_path.read_text(encoding="utf-8")
+            config_path.write_text(
+                text
+                + "\nseason:\n"
+                + "  id: season_0\n"
+                + "  name: Season 0\n"
+                + f"  state_root: {root / 'seasons'}\n"
+                + "  participants:\n"
+                + "    - model: local-stub\n",
+                encoding="utf-8",
+            )
+            participant_dir = root / "seasons" / "season_0" / "participants" / "season_0:local-stub"
+            participant_dir.mkdir(parents=True)
+            (participant_dir / "pr_history.json").write_text(
+                json.dumps(
+                    {
+                        "lifecycle_records": [
+                            {
+                                "repository": "example/repo",
+                                "number": 7,
+                                "state": "open",
+                                "lifecycle_status": "tracking",
+                            }
+                        ]
+                    },
+                    ensure_ascii=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            workspace_dir = participant_dir / "workspaces" / "example-repo"
+            workspace_dir.mkdir(parents=True)
+            (workspace_dir / "container_id").write_text("container-1\n", encoding="utf-8")
+
+            blocked = runner.invoke(app, ["season", "complete", "--config", str(config_path)])
+
+            self.assertNotEqual(0, blocked.exit_code)
+            self.assertIn("season_has_open_prs: example/repo#7", blocked.output)
+            self.assertTrue(workspace_dir.exists())
+
+            with patch("subprocess.run") as run:
+                run.return_value.returncode = 0
+                forced = runner.invoke(
+                    app,
+                    ["season", "complete", "--config", str(config_path), "--force-with-open-prs"],
+                )
+
+            self.assertEqual(0, forced.exit_code, forced.output)
+            self.assertIn("Season season_0: completed", forced.output)
+            self.assertIn("Cleaned workspaces: 1", forced.output)
+            run.assert_called_once()
+
     def test_controller_reports_disabled_starter_config(self) -> None:
         runner = CliRunner()
         with tempfile.TemporaryDirectory() as tmp:

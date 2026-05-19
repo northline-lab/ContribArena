@@ -118,9 +118,8 @@ def season_complete(
     force_with_open_prs: bool = typer.Option(False, "--force-with-open-prs"),
 ) -> None:
     """Freeze the season snapshot and mark it completed."""
-    _ = force_with_open_prs
+    _season_transition(config, season_id, "completed", force_with_open_prs=force_with_open_prs)
     cleanup = _season_workspace_clean(config, season_id, quiet=True)
-    _season_transition(config, season_id, "completed")
     typer.echo(f"Cleaned workspaces: {cleanup}")
 
 
@@ -583,7 +582,13 @@ def _with_season_run_override(
     return run_config.model_copy(update={"run": run_config.run.model_copy(update=updates)})
 
 
-def _season_transition(config: Path, season_id: str | None, status: str) -> None:
+def _season_transition(
+    config: Path,
+    season_id: str | None,
+    status: str,
+    *,
+    force_with_open_prs: bool = False,
+) -> None:
     try:
         run_config = load_run_config(config)
         target = season_id or (run_config.season.id if run_config.season else "season_0")
@@ -591,6 +596,7 @@ def _season_transition(config: Path, season_id: str | None, status: str) -> None
             target,
             status,  # type: ignore[arg-type]
             run_config.season,
+            force_with_open_prs=force_with_open_prs,
         )
     except ContribArenaError as exc:
         typer.echo(str(exc), err=True)
