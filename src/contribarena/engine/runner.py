@@ -954,6 +954,7 @@ def _build_assistant_update(
     if not text:
         return None
     tool_name = str(getattr(tool_call, "name", "") or "")
+    tool_call_id = str(getattr(tool_call, "call_id", "") or getattr(tool_call, "id", "") or "")
     phase = goals.context.current_phase
     sub_phase = goals.context.current_sub_phase or ""
     return AssistantUpdate(
@@ -968,7 +969,7 @@ def _build_assistant_update(
         text=text,
         position="before_tool" if tool_name else "commentary_only",
         tool_name=tool_name,
-        evidence_refs=[f"tool_call:{tool_name}"] if tool_name else [],
+        evidence_refs=[f"tool_call:{tool_call_id}"] if tool_call_id else [],
         truncated=truncated,
         redacted=redacted,
         hidden_dropped_count=turn.hidden_dropped_count,

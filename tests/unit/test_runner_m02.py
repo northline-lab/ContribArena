@@ -2063,7 +2063,7 @@ class RunnerM02Test(unittest.TestCase):
         config = _issue_config(Path("runs"))
         goals = GoalService(config, run_id="runtime-run")
         invocation_context = type("InvocationContext", (), {"invocation_seq": 2})()
-        tool_call = type("ToolCall", (), {"name": "repo_search"})()
+        tool_call = type("ToolCall", (), {"name": "repo_search", "call_id": "call-123"})()
 
         update = _build_assistant_update(
             config=config,
@@ -2077,7 +2077,7 @@ class RunnerM02Test(unittest.TestCase):
         self.assertIsNotNone(update)
         assert update is not None
         self.assertEqual("runtime-run", update.run_id)
-        self.assertEqual(["tool_call:repo_search"], update.evidence_refs)
+        self.assertEqual(["tool_call:call-123"], update.evidence_refs)
 
     def test_runner_writes_guidance_and_memory_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -161,7 +161,7 @@ class ProviderActionGuardTest(unittest.TestCase):
                 run_id="run-a",
                 text="\n".join(segment.text for segment in turn.visible_segments),
                 tool_name=call.name if call else "",
-                evidence_refs=[f"tool_call:{call.name}"] if call else [],
+                evidence_refs=[f"tool_call:{call.call_id}"] if call else [],
                 hidden_dropped_count=turn.hidden_dropped_count,
             ),
             update_sink=captured.append,
@@ -171,7 +171,7 @@ class ProviderActionGuardTest(unittest.TestCase):
         self.assertEqual(1, len(captured))
         self.assertEqual("I will inspect the file.", captured[0].text)
         self.assertEqual("sample_tool", captured[0].tool_name)
-        self.assertEqual(["tool_call:sample_tool"], captured[0].evidence_refs)
+        self.assertEqual(["tool_call:call-sample_tool"], captured[0].evidence_refs)
 
     def test_rejects_missing_required_tool_argument(self) -> None:
         response = _model_response([_tool_call("sample_tool", {})])
