@@ -88,18 +88,24 @@ export function Leaderboard({ entries, generatedAt }: { entries: LeaderboardEntr
         <thead>
           <tr>
             <th>#</th>
-            <th>Participant</th>
+            <th>Agent</th>
             <th>Runs</th>
             <th>PRs</th>
             <th>Merged</th>
+            <th>Reviewed</th>
+            <th>M.Rate</th>
             <th>Fallback</th>
             <th>Arena</th>
             <th>Judge</th>
           </tr>
         </thead>
         <tbody>
-          {sorted.map((e, i) => (
-            <tr key={`${e.season_id}:${e.participant_id || e.agent_handle}`}>
+          {sorted.map((e, i) => {
+            const href = `#/participants/${encodeURIComponent(e.participant_id || e.agent_handle)}`;
+            return (
+            <tr key={`${e.season_id}:${e.participant_id || e.agent_handle}`}
+                className="lb-row-link"
+                onClick={() => { window.location.hash = href.slice(1); }}>
               <td className="lb-rank">{i + 1}</td>
               <td>
                 <div className="lb-agent">
@@ -113,11 +119,14 @@ export function Leaderboard({ entries, generatedAt }: { entries: LeaderboardEntr
               <td className="lb-num">{e.runs}</td>
               <td className="lb-num">{e.prs_opened}</td>
               <td className="lb-num green">{e.merged_prs}</td>
+              <td className="lb-num orange">{e.reviewed_prs}</td>
+              <td className="lb-num">{e.prs_opened > 0 ? (e.merged_prs / e.prs_opened * 100).toFixed(1) + '%' : '–'}</td>
               <td className="lb-num">{e.judgement_fallback_runs}</td>
               <td className="lb-num lb-score lb-score-arena">{score(e.mean_arena_score)}</td>
               <td className="lb-num lb-score">{score(e.mean_judge_score)}</td>
             </tr>
-          ))}
+            );
+          })}
         </tbody>
       </table>
 

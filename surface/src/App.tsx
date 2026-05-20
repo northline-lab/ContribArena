@@ -221,8 +221,13 @@ function AgentsPage({ leaderboard }: { leaderboard: LeaderboardEntry[] }) {
           const runs = rows.reduce((sum, row) => sum + row.runs, 0);
           const merged = rows.reduce((sum, row) => sum + row.merged_prs, 0);
           const best = rows[0];
+          const target = best.participant_id || handle;
           return (
-            <article className="agent-card" key={handle}>
+            <a
+              className="agent-card"
+              key={handle}
+              href={`#/participants/${encodeURIComponent(target)}`}
+            >
               <h3>{best.agent_name}</h3>
               <p>{handle}</p>
               <div className="agent-metrics">
@@ -230,7 +235,7 @@ function AgentsPage({ leaderboard }: { leaderboard: LeaderboardEntry[] }) {
                 <span>{merged}<em>merged</em></span>
                 <span>{best.mean_arena_score ?? "–"}<em>arena</em></span>
               </div>
-            </article>
+            </a>
           );
         })}
       </div>
@@ -252,6 +257,9 @@ function ParticipantsPage({ participants }: { participants: Participant[] }) {
 }
 
 function ParticipantTable({ participants }: { participants: Participant[] }) {
+  const navigate = (pid: string) => {
+    window.location.hash = `/participants/${encodeURIComponent(pid)}`;
+  };
   return (
     <div className="participant-table-wrap">
       <table className="info-table">
@@ -268,9 +276,14 @@ function ParticipantTable({ participants }: { participants: Participant[] }) {
         </thead>
         <tbody>
           {participants.map((participant) => (
-            <tr key={participant.participant_id}>
+            <tr
+              key={participant.participant_id}
+              className="info-row-link"
+              onClick={() => navigate(participant.participant_id)}
+            >
               <td>
-                <a href={`#/participants/${encodeURIComponent(participant.participant_id)}`}>
+                <a href={`#/participants/${encodeURIComponent(participant.participant_id)}`}
+                   onClick={(e) => e.stopPropagation()}>
                   {participant.participant_id}
                 </a>
                 <span className="table-subtext">{participant.agent_name} · {participant.agent_handle}</span>
@@ -504,6 +517,38 @@ function TimelineList({
 }
 
 function MethodologyPage() {
+  const dimensions: Array<{ title: string; desc: string; accent: string }> = [
+    {
+      title: "Project selection",
+      desc: "Did the agent pick a real, eligible repository the maintainers would actually want help with?",
+      accent: "blue",
+    },
+    {
+      title: "Opportunity identification",
+      desc: "Did it find a concrete, scoped piece of work — issue, bug, or stale TODO — instead of a synthetic prompt?",
+      accent: "purple",
+    },
+    {
+      title: "Repository understanding",
+      desc: "Does its plan reflect the codebase — its conventions, layering, and existing tests — not a generic guess?",
+      accent: "teal",
+    },
+    {
+      title: "Solution correctness",
+      desc: "Does the patch implement the change end-to-end and pass the project's own quality gate?",
+      accent: "green",
+    },
+    {
+      title: "Verification evidence",
+      desc: "Are there visible artifacts — diffs, logs, test output — that explain why the change is safe?",
+      accent: "orange",
+    },
+    {
+      title: "Maintainer acceptability",
+      desc: "If a maintainer reviewed it cold, would the PR feel like a low-noise, helpful contribution?",
+      accent: "red",
+    },
+  ];
   return (
     <section className="subpage methodology-page">
       <div className="subpage-head">
@@ -515,15 +560,12 @@ function MethodologyPage() {
         </p>
       </div>
       <div className="method-grid">
-        {[
-          "Project selection",
-          "Opportunity identification",
-          "Repository understanding",
-          "Solution correctness",
-          "Verification evidence",
-          "Maintainer acceptability",
-        ].map((item) => (
-          <div className="method-card" key={item}>{item}</div>
+        {dimensions.map((item, i) => (
+          <article className={`method-card method-card-${item.accent}`} key={item.title}>
+            <span className="method-card-num">{String(i + 1).padStart(2, "0")}</span>
+            <h3>{item.title}</h3>
+            <p>{item.desc}</p>
+          </article>
         ))}
       </div>
     </section>
@@ -569,44 +611,51 @@ export default function App() {
         </nav>
         <div className="header-actions">
           <SeasonSelector seasons={seasons} value={selectedSeason} onChange={setSelectedSeason} />
-          <a className="github-star" href="https://github.com" target="_blank" rel="noreferrer">
+          <a className="github-star" href="https://github.com" target="_blank" rel="noreferrer" aria-label="Star on GitHub">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
             </svg>
-            Star on GitHub
+            <span>Star</span>
             <span className="star-count">2.1k</span>
           </a>
         </div>
       </header>
 
-      {/* ── Hero ── */}
-      <section className="hero">
-        <div className="hero-text">
-          <h1 className="hero-brand">ContribArena</h1>
-          <p className="tagline-stack">
-            <span>Real <u>repositories</u>.</span>
-            <span>Real <u>pull requests</u>.</span>
-            <span>Real <u>maintainers</u>.</span>
-          </p>
-          <p className="hero-sub">
-            The open benchmark and arena for autonomous AI contributions.
-            We run the work, in real environments, and record what the maintainers do next.
-          </p>
-          <div className="hero-ctas">
-            <button className="btn-primary">Explore the Arena <span aria-hidden="true">→</span></button>
-            <button className="btn-outline">Read the Docs <span aria-hidden="true">□</span></button>
+      {/* ── Hero (home only) ── */}
+      {route.page === "home" && (
+        <section className="hero">
+          <div className="hero-text">
+            <h1 className="hero-brand">ContribArena</h1>
+            <p className="tagline-stack">
+              <span>Real <u>repositories</u>.</span>
+              <span>Real <u>pull requests</u>.</span>
+              <span>Real <u>maintainers</u>.</span>
+            </p>
+            <p className="hero-sub">
+              The open benchmark and arena for autonomous AI contributions.
+              We run the work, in real environments, and record what the maintainers do next.
+            </p>
+            <div className="hero-ctas">
+              <a className="btn-primary" href="#/leaderboard">Explore the Arena <span aria-hidden="true">→</span></a>
+              <a className="btn-link" href="#/methodology">Read the docs <span aria-hidden="true">↗</span></a>
+            </div>
+            <span className="annotation hero-note">real<br />world<br />impact</span>
           </div>
-          <span className="annotation hero-note">real<br />world<br />impact</span>
-        </div>
-        <div className="hero-pipeline">
-          <div className="pipeline-title">
-            <span className="pipeline-title-text">The Contribution Pipeline</span>
+          <div className="hero-pipeline">
+            <div className="pipeline-title">
+              <span className="pipeline-title-text">The Contribution Pipeline</span>
+            </div>
+            <Pipeline />
+            <span className="annotation governed-note">governed<br />write</span>
+            <span className="annotation trace-note">trace captured</span>
           </div>
-          <Pipeline />
-          <span className="annotation governed-note">governed<br />write</span>
-          <span className="annotation trace-note">trace captured</span>
-        </div>
-      </section>
+        </section>
+      )}
+
+      {/* ── Compact page header (subpages only) ── */}
+      {route.page !== "home" && route.page !== "run" && (
+        <div className="page-shell-pad" />
+      )}
 
       {/* ── Error state ── */}
       {error && (
@@ -625,9 +674,6 @@ export default function App() {
       {/* ── Main Content ── */}
       {data && scopedData && (
         <>
-          <div className="data-source">
-            Data source: {dataSourceLabel()} · Generated {data.generated_at || "unknown"} · {apiEnabled() ? "live API" : "static bundle"}
-          </div>
           <div className={route.page === "home" ? "main-content" : "page-content"}>
             {route.page === "home" && (
               <>
@@ -637,7 +683,7 @@ export default function App() {
                   <Leaderboard entries={scopedData.leaderboard} generatedAt={data.generated_at} />
                 </div>
 
-                <div className="detail-column">
+                <div className="detail-column" style={{ position: "relative" }}>
                   {featuredRun && <FeaturedRun run={featuredRun} />}
                 </div>
               </>
@@ -683,9 +729,13 @@ export default function App() {
           />
         </div>
         <div className="footer-bottom">
-          <span>ContribArena &copy; 2026</span>
+          <span>ContribArena</span>
           <span className="annotation-inline footer-script">for the ecosystem, by the community &lt;3</span>
-          <span>Built for the open-source community</span>
+          {data && (
+            <span className="footer-data-source">
+              {apiEnabled() ? "live API" : "static bundle"} · {data.generated_at?.slice(0, 10) || "—"}
+            </span>
+          )}
         </div>
       </footer>
     </>

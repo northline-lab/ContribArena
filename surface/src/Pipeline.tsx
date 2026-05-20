@@ -48,13 +48,13 @@ const STAGE_ICONS: Record<string, React.ReactNode> = {
 };
 
 const STATIC_STAGES = [
-  { id: "agent", title: "AI Agent", desc: "Picks up issue", tag: "LLM", tagColor: "blue" },
-  { id: "repo_discovery", title: "Discovery", desc: "Finds repos", tag: "API", tagColor: "purple" },
-  { id: "workspace", title: "Workspace", desc: "Isolated env", tag: "Docker", tagColor: "teal" },
-  { id: "patch_diff", title: "Patch", desc: "Code changes", tag: "diff", tagColor: "default" },
-  { id: "quality_gate", title: "Quality", desc: "Lint & test", tag: "Gate", tagColor: "orange" },
-  { id: "pull_request", title: "PR", desc: "Opens PR", tag: "GitHub", tagColor: "blue" },
-  { id: "maintainer_outcome", title: "Maintainer", desc: "Reviews", tag: "", tagColor: "default" },
+  { id: "agent", title: "AI Agent", desc: "Plans and acts with tools", tag: "LLM + Tools", tagColor: "blue" },
+  { id: "repo_discovery", title: "Repo Discovery", desc: "Finds real issues & opportunities", tag: "GitHub API", tagColor: "purple" },
+  { id: "workspace", title: "Docker Workspace", desc: "Reproducible env per repository", tag: "Isolated", tagColor: "teal" },
+  { id: "patch_diff", title: "Patch Diff", desc: "Implements change", tag: "git diff", tagColor: "default" },
+  { id: "quality_gate", title: "Quality Gate", desc: "Tests, lint, build, policy checks", tag: "Gated", tagColor: "orange" },
+  { id: "pull_request", title: "Pull Request", desc: "Creates PR with context & trace", tag: "GitHub PR", tagColor: "blue" },
+  { id: "maintainer_outcome", title: "Maintainer", desc: "Human reviewed", tag: "", tagColor: "default" },
 ];
 
 const STATUS_LABELS = [

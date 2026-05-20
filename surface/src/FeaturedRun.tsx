@@ -207,6 +207,12 @@ export function FeaturedRun({ run }: { run: RunSummary }) {
         </div>
       )}
 
+      <div className="run-bottom-row">
+        <a className="featured-run-cta" href={`#/runs/${encodeURIComponent(run.run_id)}`}>
+          View run detail <span aria-hidden="true">→</span>
+        </a>
+      </div>
+
       {(run.terminal_reason || qg.warnings.length > 0) && (
         <div className="fr-evidence-note">
           <span className="fr-evidence-label">run note</span>
