@@ -1,4 +1,5 @@
 import type {
+  AssistantUpdate,
   DiscoveryCall,
   Participant,
   PhaseHistoryItem,
@@ -176,12 +177,14 @@ export async function loadParticipantDetail(
 
 export async function loadRunEvidence(runId: string): Promise<{
   discovery: DiscoveryCall[];
+  assistantUpdates: AssistantUpdate[];
   selfReview: SelfReview[];
   phaseHistory: PhaseHistoryItem[];
   toolViolations: ToolViolation[];
 }> {
-  const [discovery, selfReview, runDetail] = await Promise.all([
+  const [discovery, assistantUpdates, selfReview, runDetail] = await Promise.all([
     fetchJson<{ discovery: DiscoveryCall[] }>(`/api/runs/${encodeURIComponent(runId)}/discovery`),
+    fetchJson<{ updates: AssistantUpdate[] }>(`/api/runs/${encodeURIComponent(runId)}/assistant-updates`),
     fetchJson<{ self_review: SelfReview[] }>(`/api/runs/${encodeURIComponent(runId)}/self-review`),
     fetchJson<RunSummary & { phase_history?: PhaseHistoryItem[]; tool_violations?: ToolViolation[] }>(
       `/api/runs/${encodeURIComponent(runId)}`,
@@ -189,6 +192,7 @@ export async function loadRunEvidence(runId: string): Promise<{
   ]);
   return {
     discovery: discovery?.discovery ?? [],
+    assistantUpdates: assistantUpdates?.updates ?? [],
     selfReview: selfReview?.self_review ?? [],
     phaseHistory: runDetail?.phase_history ?? [],
     toolViolations: runDetail?.tool_violations ?? [],
@@ -197,6 +201,7 @@ export async function loadRunEvidence(runId: string): Promise<{
 
 export function runEvidenceFromSurface(surface: SurfaceData, runId: string): {
   discovery: DiscoveryCall[];
+  assistantUpdates: AssistantUpdate[];
   selfReview: SelfReview[];
   phaseHistory: PhaseHistoryItem[];
   toolViolations: ToolViolation[];
@@ -205,6 +210,10 @@ export function runEvidenceFromSurface(surface: SurfaceData, runId: string): {
   const discoveryRows = Array.isArray(discovery)
     ? discovery.filter((item) => !item.run_id || item.run_id === runId)
     : discovery?.[runId] ?? [];
+  const updates = surface.assistant_updates;
+  const assistantUpdateRows = Array.isArray(updates)
+    ? updates.filter((item) => !item.run_id || item.run_id === runId)
+    : updates?.[runId] ?? [];
   const run = surface.runs.find((item) => item.run_id === runId) as
     | (RunSummary & {
         self_review?: SelfReview[];
@@ -214,6 +223,7 @@ export function runEvidenceFromSurface(surface: SurfaceData, runId: string): {
     | undefined;
   return {
     discovery: discoveryRows,
+    assistantUpdates: assistantUpdateRows,
     selfReview: run?.self_review ?? [],
     phaseHistory: run?.phase_history ?? [],
     toolViolations: run?.tool_violations ?? [],

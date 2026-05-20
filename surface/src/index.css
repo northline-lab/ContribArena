@@ -1416,6 +1416,199 @@ button {
   grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
 }
 
+.commentary-panel {
+  grid-column: 1 / -1;
+  padding: 16px 18px 14px;
+  background: var(--paper-warm);
+}
+
+.commentary-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.commentary-head h3 {
+  margin: 0;
+  font-size: var(--fs-md);
+  font-weight: 800;
+}
+
+.commentary-count {
+  color: var(--ink-faint);
+  font-family: var(--font-type);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+.commentary-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.commentary-card {
+  position: relative;
+  display: flex;
+  gap: 12px;
+  padding: 10px 12px 11px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--card);
+  box-shadow: var(--sketch-shadow);
+  overflow: hidden;
+}
+
+.commentary-card:hover {
+  border-color: var(--ink);
+  box-shadow: var(--sketch-shadow-hover, 3px 4px 0 rgba(30, 26, 19, 0.18));
+}
+
+.commentary-stripe {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 4px;
+  background: var(--blue);
+}
+
+.commentary-card-blue   .commentary-stripe { background: var(--blue); }
+.commentary-card-purple .commentary-stripe { background: var(--purple); }
+.commentary-card-green  .commentary-stripe { background: var(--green); }
+.commentary-card-orange .commentary-stripe { background: var(--orange); }
+.commentary-card-red    .commentary-stripe { background: var(--red); }
+.commentary-card-teal   .commentary-stripe { background: var(--teal); }
+
+.commentary-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.commentary-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-xs);
+  color: var(--ink-soft);
+}
+
+.commentary-kind {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-family: var(--font-type);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  background: var(--blue-bg);
+  color: var(--blue);
+  border: 1px solid currentColor;
+}
+
+.commentary-kind-blue   { background: var(--blue-bg);   color: var(--blue); }
+.commentary-kind-purple { background: var(--purple-bg); color: var(--purple); }
+.commentary-kind-green  { background: var(--green-bg);  color: var(--green); }
+.commentary-kind-orange { background: var(--orange-bg); color: var(--orange); }
+.commentary-kind-red    { background: var(--red-bg);    color: var(--red); }
+.commentary-kind-teal   { background: var(--teal-bg);   color: var(--teal); }
+
+.commentary-phase {
+  font-weight: 700;
+  color: var(--ink);
+  font-size: var(--fs-xs);
+}
+
+.commentary-sub {
+  color: var(--ink-faint);
+  font-weight: 500;
+}
+
+.commentary-tool {
+  font-family: var(--font-type);
+  font-size: 11px;
+  color: var(--ink-soft);
+}
+
+.commentary-time {
+  margin-left: auto;
+  font-family: var(--font-type);
+  font-size: 10.5px;
+  color: var(--ink-faint);
+}
+
+.commentary-text {
+  margin: 0;
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+  color: var(--ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.commentary-text-empty {
+  color: var(--ink-faint);
+  font-style: italic;
+}
+
+.commentary-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.commentary-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-family: var(--font-type);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  background: var(--gray-bg);
+  color: var(--ink-soft);
+  border: 1px solid var(--line);
+}
+
+.commentary-chip-warn {
+  background: var(--orange-bg);
+  color: var(--orange);
+  border-color: var(--orange);
+}
+
+.commentary-more {
+  margin-top: 10px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.commentary-more-btn {
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--r-sm);
+  background: transparent;
+  padding: 6px 12px;
+  font-family: var(--font-hand);
+  font-size: 15px;
+  color: var(--ink);
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.commentary-more-btn:hover {
+  background: var(--paper-shadow);
+  border-color: var(--ink);
+}
+
 .evidence-row strong,
 .timeline-list-row strong {
   overflow: hidden;

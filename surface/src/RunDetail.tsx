@@ -1,6 +1,20 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { loadRunEvidence, runEvidenceFromSurface } from "./data";
-import type { DiscoveryCall, PhaseHistoryItem, RunSummary, SelfReview, SurfaceData, ToolViolation } from "./types";
+import type { AssistantUpdate, DiscoveryCall, PhaseHistoryItem, RunSummary, SelfReview, SurfaceData, ToolViolation } from "./types";
+
+const KIND_VARIANT: Record<string, string> = {
+  intent: "blue",
+  decision: "purple",
+  verification: "green",
+  review_response: "orange",
+  blocker: "red",
+  observation: "teal",
+};
+
+function kindVariant(kind?: string): string {
+  if (!kind) return "blue";
+  return KIND_VARIANT[kind] ?? "blue";
+}
 
 const STAGE_LABELS: Record<string, string> = {
   agent: "Planning",
@@ -84,7 +98,7 @@ const DOT_STATUS_COLOR: Record<string, string> = {
   blocked: "var(--ink-faint)",
 };
 
-const EMPTY_EVIDENCE = { discovery: [], selfReview: [], phaseHistory: [], toolViolations: [] };
+const EMPTY_EVIDENCE = { discovery: [], assistantUpdates: [], selfReview: [], phaseHistory: [], toolViolations: [] };
 
 function shortJson(value: unknown): string {
   if (value == null || value === "") return "";
@@ -111,6 +125,7 @@ export function RunDetail({ run, surface }: { run: RunSummary; surface?: Surface
     runId: string;
     loading: boolean;
     discovery: DiscoveryCall[];
+    assistantUpdates: AssistantUpdate[];
     selfReview: SelfReview[];
     phaseHistory: PhaseHistoryItem[];
     toolViolations: ToolViolation[];
@@ -240,6 +255,8 @@ export function RunDetail({ run, surface }: { run: RunSummary; surface?: Surface
       )}
 
       <div className="evidence-grid">
+        <CommentarySection updates={evidence.assistantUpdates} />
+
         <section className="evidence-panel">
           <h3>Phase History</h3>
           {evidence.phaseHistory.length ? (
@@ -362,5 +379,85 @@ export function RunDetail({ run, surface }: { run: RunSummary; surface?: Surface
         </div>
       )}
     </div>
+  );
+}
+
+const COMMENTARY_PREVIEW = 6;
+
+function CommentarySection({ updates }: { updates: AssistantUpdate[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const total = updates.length;
+  const items = useMemo(() => (expanded ? updates : updates.slice(0, COMMENTARY_PREVIEW)), [updates, expanded]);
+  const collapsedRemaining = Math.max(0, total - COMMENTARY_PREVIEW);
+
+  return (
+    <section className="evidence-panel commentary-panel">
+      <div className="commentary-head">
+        <h3>Agent Commentary</h3>
+        <span className="commentary-count">{total ? `${total} update${total === 1 ? "" : "s"}` : ""}</span>
+      </div>
+      {total ? (
+        <>
+          <ol className="commentary-list">
+            {items.map((item, idx) => (
+              <CommentaryCard key={`${item.ts ?? ""}-${idx}`} update={item} />
+            ))}
+          </ol>
+          {collapsedRemaining > 0 && (
+            <div className="commentary-more">
+              <button
+                type="button"
+                className="commentary-more-btn"
+                onClick={() => setExpanded((v) => !v)}
+              >
+                {expanded ? "Show fewer" : `Show ${collapsedRemaining} more`}
+              </button>
+            </div>
+          )}
+        </>
+      ) : (
+        <div className="empty-state">
+          <span>No visible agent updates were captured for this run.</span>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function CommentaryCard({ update }: { update: AssistantUpdate }) {
+  const variant = kindVariant(update.kind);
+  const phase = update.phase || "run";
+  const subPhase = update.sub_phase ? String(update.sub_phase) : "";
+  const time = update.ts ? fmtTime(String(update.ts)) : "";
+  const hidden = Number(update.hidden_dropped_count ?? 0);
+  const text = (update.text || "").trim();
+  return (
+    <li className={`commentary-card commentary-card-${variant}`}>
+      <span className="commentary-stripe" aria-hidden="true" />
+      <div className="commentary-body">
+        <div className="commentary-meta">
+          <span className={`commentary-kind commentary-kind-${variant}`}>{update.kind || "intent"}</span>
+          <span className="commentary-phase">
+            {phase}{subPhase ? <span className="commentary-sub">/{subPhase}</span> : null}
+          </span>
+          {update.tool_name && (
+            <span className="commentary-tool">→ {update.tool_name}</span>
+          )}
+          {time && <span className="commentary-time">{time}</span>}
+        </div>
+        {text ? (
+          <p className="commentary-text">{text}</p>
+        ) : (
+          <p className="commentary-text commentary-text-empty">(no visible text — only hidden reasoning)</p>
+        )}
+        {(update.redacted || update.truncated || hidden > 0) && (
+          <div className="commentary-chips">
+            {update.redacted && <span className="commentary-chip commentary-chip-warn">redacted</span>}
+            {update.truncated && <span className="commentary-chip">truncated</span>}
+            {hidden > 0 && <span className="commentary-chip">+{hidden} hidden reasoning</span>}
+          </div>
+        )}
+      </div>
+    </li>
   );
 }

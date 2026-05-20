@@ -140,6 +140,7 @@ export interface SurfaceData {
   participants?: Participant[];
   pr_lifecycle?: PrLifecycle[];
   discovery?: Record<string, DiscoveryCall[]> | DiscoveryCall[];
+  assistant_updates?: Record<string, AssistantUpdate[]> | AssistantUpdate[];
   scheduler?: SchedulerEvent[];
   workspaces?: SeasonWorkspace[];
   skipped: string[];
@@ -241,6 +242,20 @@ export interface ToolViolation {
   phase?: string;
   sub_phase?: string | null;
   recovery_kind?: string;
+  [key: string]: unknown;
+}
+
+export interface AssistantUpdate {
+  run_id?: string;
+  ts?: string;
+  phase?: string;
+  sub_phase?: string | null;
+  kind?: string;
+  text?: string;
+  tool_name?: string;
+  hidden_dropped_count?: number;
+  redacted?: boolean;
+  truncated?: boolean;
   [key: string]: unknown;
 }
 
