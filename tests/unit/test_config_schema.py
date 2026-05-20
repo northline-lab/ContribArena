@@ -95,6 +95,19 @@ class ConfigSchemaTest(unittest.TestCase):
         self.assertEqual("WANJIE_COMPATIBLE_BASE_URL", config.models.providers.compatible["qwen36plus"].base_url_env)
         self.assertEqual("WANJIE_GEMINI31PRO_ENDPOINT", config.models.providers.gemini["gemini31pro"].endpoint_env)
 
+    def test_external_live_example_is_season_one_config_only_launch(self) -> None:
+        config = load_run_config(Path("examples/external-live.yaml"))
+
+        self.assertEqual("external_live", config.run.mode)
+        self.assertIsNotNone(config.season)
+        assert config.season is not None
+        self.assertEqual("season_1", config.season.id)
+        self.assertEqual("external", config.season.discovery_profile.scope)
+        self.assertEqual([], config.season.discovery_profile.allowlist)
+        self.assertEqual(1, len(config.season.participants))
+        self.assertEqual("season_1:example-gpt", config.season.participants[0].id)
+        self.assertTrue(config.controller.enabled)
+
     def test_load_run_config_loads_dotenv_without_overriding_environment(self) -> None:
         old_token = os.environ.pop("GITHUB_TOKEN", None)
         old_existing = os.environ.get("EXISTING_ENV")

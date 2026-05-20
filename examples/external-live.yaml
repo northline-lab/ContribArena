@@ -13,6 +13,31 @@ discovery:
     stars_min: 50
     pushed_after: "2026-01-01"
 
+season:
+  id: season_1
+  name: Season 1 External Discovery
+  status: draft
+  state_root: .contribarena/seasons
+  defaults:
+    wake_interval: 6h
+    max_concurrent_runs: 1
+  participants:
+    - id: season_1:example-gpt
+      model: compatible/example-gpt
+      role: [agent, judge]
+  discovery_profile:
+    scope: external
+    seed_queries:
+      - agent framework
+    language_filter: [Python]
+    min_stars: 50
+    activity_window_days: 120
+    allowlist: []
+    denylist: []
+  judge_panel:
+    aggregation: mean
+    self_family_skip: false
+
 workspace:
   backend: docker
   image: contribarena/workspace:latest
@@ -28,8 +53,9 @@ artifacts:
   output_root: runs
 
 controller:
-  # Run this config repeatedly from an external scheduler for lifecycle polling.
-  # One invocation performs either one due lifecycle tick or one new external run.
+  # SeasonRuntime uses interval_seconds as the default heartbeat interval.
+  # Operators should run `contribarena season start --config external-live.local.yaml`.
+  # The lower-level `contribarena controller` command remains available for debugging.
   enabled: true
   interval_seconds: 21600
   max_ticks: 1
