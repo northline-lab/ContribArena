@@ -122,9 +122,140 @@ class SeasonStore:
             "season_id": config.id,
             "name": config.name,
             "status": status,
+            "paused": bool(state.get("paused", False)) if status == "active" else False,
+            "heartbeat": state.get("heartbeat", {}) if isinstance(state.get("heartbeat"), dict) else {},
+            "runtime_events": state.get("runtime_events", []) if isinstance(state.get("runtime_events"), list) else [],
             "updated_at": now,
             "transitions": transitions,
         }
+        path = self.state_path(season_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return state
+
+    def state(self, season_id: str) -> dict[str, Any]:
+        return self._load_state(season_id)
+
+    def set_paused(
+        self,
+        season_id: str,
+        paused: bool,
+        fallback: SeasonConfig | None = None,
+        *,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        config = self.load(season_id, fallback)
+        state = self._load_state(season_id)
+        now = datetime.now(UTC).isoformat()
+        state.update(
+            {
+                "season_id": config.id,
+                "name": config.name,
+                "status": config.status,
+                "paused": paused,
+                "updated_at": now,
+            }
+        )
+        _append_runtime_event(
+            state,
+            {
+                "ts": now,
+                "event": "season_paused" if paused else "season_resumed",
+                "status": config.status,
+                "reason": reason,
+            },
+        )
+        path = self.state_path(season_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return state
+
+    def record_heartbeat_started(
+        self,
+        season_id: str,
+        fallback: SeasonConfig | None = None,
+    ) -> dict[str, Any]:
+        config = self.load(season_id, fallback)
+        state = self._load_state(season_id)
+        now = datetime.now(UTC).isoformat()
+        heartbeat = state.get("heartbeat", {}) if isinstance(state.get("heartbeat"), dict) else {}
+        count = int(heartbeat.get("count") or 0) + 1
+        heartbeat.update(
+            {
+                "count": count,
+                "last_started_at": now,
+                "last_status": "running",
+                "last_error": "",
+            }
+        )
+        state.update(
+            {
+                "season_id": config.id,
+                "name": config.name,
+                "status": config.status,
+                "paused": bool(state.get("paused", False)),
+                "heartbeat": heartbeat,
+                "updated_at": now,
+            }
+        )
+        _append_runtime_event(
+            state,
+            {
+                "ts": now,
+                "event": "heartbeat_started",
+                "status": config.status,
+                "paused": bool(state.get("paused", False)),
+                "heartbeat_count": count,
+            },
+        )
+        path = self.state_path(season_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return state
+
+    def record_heartbeat_completed(
+        self,
+        season_id: str,
+        *,
+        status: str,
+        detail: str = "",
+        error: str = "",
+        fallback: SeasonConfig | None = None,
+    ) -> dict[str, Any]:
+        config = self.load(season_id, fallback)
+        state = self._load_state(season_id)
+        now = datetime.now(UTC).isoformat()
+        heartbeat = state.get("heartbeat", {}) if isinstance(state.get("heartbeat"), dict) else {}
+        heartbeat.update(
+            {
+                "last_completed_at": now,
+                "last_status": status,
+                "last_error": error,
+                "last_detail": detail,
+            }
+        )
+        state.update(
+            {
+                "season_id": config.id,
+                "name": config.name,
+                "status": config.status,
+                "paused": bool(state.get("paused", False)),
+                "heartbeat": heartbeat,
+                "updated_at": now,
+            }
+        )
+        _append_runtime_event(
+            state,
+            {
+                "ts": now,
+                "event": "heartbeat_completed",
+                "status": config.status,
+                "paused": bool(state.get("paused", False)),
+                "heartbeat_status": status,
+                "detail": detail,
+                "error": error,
+            },
+        )
         path = self.state_path(season_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -139,6 +270,14 @@ class SeasonStore:
         except json.JSONDecodeError as exc:
             raise ConfigError(f"invalid season state {path}: {exc}") from exc
         return raw if isinstance(raw, dict) else {}
+
+
+def _append_runtime_event(state: dict[str, Any], event: dict[str, Any]) -> None:
+    events = state.get("runtime_events", [])
+    if not isinstance(events, list):
+        events = []
+    events.append(event)
+    state["runtime_events"] = events[-200:]
 
 
 def normalize_model_identity(raw: str) -> str:

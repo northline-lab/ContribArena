@@ -61,15 +61,15 @@ def index_surface_data(
         _leaderboard(public_runs),
     )
     stats = _stats(public_runs)
-    seasons = _seasons(public_runs)
+    seasons = _merge_season_state(input_dir, _seasons(public_runs))
     participants = _participants(public_runs)
     discovery_calls = _discovery_calls(loaded_runs)
     self_reviews = _self_reviews(loaded_runs)
     phase_history = _phase_history(loaded_runs)
     tool_violations = _tool_violations(loaded_runs)
     pr_lifecycle = _pr_lifecycle(loaded_runs)
-    scheduler_events = _scheduler_events(loaded_runs)
-    season_workspaces = _season_workspaces(loaded_runs)
+    scheduler_events = _merge_runtime_events(input_dir, _scheduler_events(loaded_runs))
+    season_workspaces = _merge_state_workspaces(input_dir, _season_workspaces(loaded_runs))
     generated_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
     files_written: list[Path] = [*artifact_files]
@@ -501,6 +501,53 @@ def _seasons(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(seasons.values(), key=lambda row: str(row.get("id") or ""))
 
 
+def _merge_season_state(input_dir: Path, seasons: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_id = {str(item.get("id") or ""): dict(item) for item in seasons}
+    for state_path in _season_state_paths(input_dir):
+        state = _read_json_file(state_path)
+        season_id = str(state.get("season_id") or state_path.parent.name)
+        if not season_id:
+            continue
+        payload = by_id.setdefault(
+            season_id,
+            {
+                "id": season_id,
+                "name": str(state.get("name") or season_id),
+                "phase": "unknown",
+                "runs_count": 0,
+                "participants_count": 0,
+                "wake_sources": [],
+            },
+        )
+        payload.update(
+            {
+                "id": season_id,
+                "name": str(state.get("name") or payload.get("name") or season_id),
+                "status": str(state.get("status") or payload.get("status") or "unknown"),
+                "paused": bool(state.get("paused", False)),
+                "heartbeat": state.get("heartbeat", {}) if isinstance(state.get("heartbeat"), dict) else {},
+                "transitions": state.get("transitions", []) if isinstance(state.get("transitions"), list) else [],
+                "runtime_events": state.get("runtime_events", []) if isinstance(state.get("runtime_events"), list) else [],
+                "updated_at": str(state.get("updated_at") or ""),
+                "leaderboard_frozen": (state_path.parent / "leaderboard_snapshot.json").exists(),
+            }
+        )
+    return sorted(by_id.values(), key=lambda row: str(row.get("id") or ""))
+
+
+def _season_state_paths(input_dir: Path) -> list[Path]:
+    paths: list[Path] = []
+    seen: set[Path] = set()
+    for root in (input_dir / "seasons", input_dir.parent / "seasons"):
+        for path in sorted(root.glob("*/season_state.json")):
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            paths.append(path)
+    return paths
+
+
 def _participants(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     participants: dict[tuple[str, str], dict[str, Any]] = {}
     scores: dict[tuple[str, str], list[float]] = {}
@@ -695,6 +742,29 @@ def _scheduler_events(loaded_runs: list[_LoadedRun]) -> list[dict[str, Any]]:
     return rows
 
 
+def _merge_runtime_events(input_dir: Path, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged = list(rows)
+    for state_path in _season_state_paths(input_dir):
+        state = _read_json_file(state_path)
+        season_id = str(state.get("season_id") or state_path.parent.name)
+        for event in state.get("runtime_events", []) if isinstance(state.get("runtime_events"), list) else []:
+            if not isinstance(event, dict):
+                continue
+            merged.append(
+                {
+                    **event,
+                    "season_id": season_id,
+                    "participant_id": str(event.get("participant_id") or ""),
+                    "wake_source": str(event.get("wake_source") or ""),
+                    "run_id": str(event.get("run_id") or ""),
+                    "status": str(event.get("heartbeat_status") or event.get("event") or ""),
+                    "created_at": str(event.get("ts") or ""),
+                    "reason": str(event.get("detail") or event.get("reason") or event.get("error") or ""),
+                }
+            )
+    return sorted(merged, key=lambda row: (str(row.get("created_at") or ""), str(row.get("participant_id") or "")))
+
+
 def _season_workspaces(loaded_runs: list[_LoadedRun]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for loaded in loaded_runs:
@@ -729,6 +799,35 @@ def _season_workspaces(loaded_runs: list[_LoadedRun]) -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+def _merge_state_workspaces(input_dir: Path, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_key = {
+        (
+            str(row.get("season_id") or ""),
+            str(row.get("participant_id") or ""),
+            str(row.get("repo_slug") or ""),
+        ): dict(row)
+        for row in rows
+    }
+    for state_path in _season_state_paths(input_dir):
+        season_dir = state_path.parent
+        season_id = season_dir.name
+        for metadata in sorted(season_dir.glob("participants/*/workspaces/*/container_id")):
+            participant_id = metadata.parents[2].name
+            repo_slug = metadata.parent.name
+            key = (season_id, participant_id, repo_slug)
+            by_key[key] = {
+                "season_id": season_id,
+                "participant_id": participant_id,
+                "repo_slug": repo_slug,
+                "container_id": _read_text_file(metadata).strip(),
+                "metadata_path": str(metadata),
+                "last_used_at": _read_text_file(metadata.parent / "last_used_at"),
+                "clone_state": _read_json_file(metadata.parent / "clone_state.json"),
+                "workspace_status": "recorded",
+            }
+    return sorted(by_key.values(), key=lambda row: (str(row.get("season_id") or ""), str(row.get("participant_id") or ""), str(row.get("repo_slug") or "")))
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:

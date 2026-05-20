@@ -24,6 +24,25 @@ class BackendReadApiTests(unittest.TestCase):
             runs_dir = root / "runs"
             db_path = root / "read.sqlite"
             _write_run(runs_dir / "run-a", run_id="run-a", agent_handle="agent-a")
+            state_dir = root / "seasons" / "season_0"
+            state_dir.mkdir(parents=True)
+            (state_dir / "season_state.json").write_text(
+                json.dumps(
+                    {
+                        "season_id": "season_0",
+                        "name": "Season 0",
+                        "status": "active",
+                        "paused": True,
+                        "heartbeat": {"count": 1, "last_status": "ok"},
+                        "runtime_events": [
+                            {"ts": "2026-05-20T00:00:00Z", "event": "heartbeat_completed", "heartbeat_status": "ok"}
+                        ],
+                    },
+                    ensure_ascii=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
 
             model = SurfaceReadModel(db_path)
             result = model.refresh_from_artifacts(runs_dir)
@@ -35,6 +54,8 @@ class BackendReadApiTests(unittest.TestCase):
             artifact = model.public_artifact_path("run-a", "patch.diff")
             self.assertIsNotNone(artifact)
             self.assertEqual("season_0:agent-a", bundle["leaderboard"][0]["participant_id"])
+            self.assertTrue(bundle["seasons"][0]["paused"])
+            self.assertEqual("ok", model.season_runtime("season_0")["season"]["heartbeat"]["last_status"])
             self.assertEqual("season_0:agent-a", model.participants("season_0")[0]["participant_id"])
             self.assertEqual("agent framework", model.discovery_calls("run-a")[0]["query"])
             self.assertEqual("open", model.pr_lifecycle(season_id="season_0")[0]["state"])
@@ -60,6 +81,7 @@ class BackendReadApiTests(unittest.TestCase):
             self.assertIn("/api/seasons/{season_id}/pr-lifecycle", routes)
             self.assertIn("/api/seasons/{season_id}/scheduler", routes)
             self.assertIn("/api/seasons/{season_id}/workspaces", routes)
+            self.assertIn("/api/seasons/{season_id}/runtime", routes)
             self.assertIn("/api/runs/{run_id}", routes)
             self.assertIn("/api/runs/{run_id}/discovery", routes)
             self.assertIn("/api/runs/{run_id}/self-review", routes)

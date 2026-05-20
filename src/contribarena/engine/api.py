@@ -104,6 +104,13 @@ def create_app(
     def season_workspaces(season_id: str) -> dict[str, object]:
         return {"workspaces": model.season_workspaces(season_id)}
 
+    @app.get("/api/seasons/{season_id}/runtime")
+    def season_runtime(season_id: str) -> dict[str, object]:
+        payload = model.season_runtime(season_id)
+        if not payload.get("season"):
+            raise HTTPException(status_code=404, detail="season not found")
+        return payload
+
     @app.get("/api/stats")
     def stats(season_id: str | None = None) -> dict[str, object]:
         return model.stats(season_id)

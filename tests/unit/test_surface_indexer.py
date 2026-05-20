@@ -38,6 +38,34 @@ class SurfaceIndexerTests(unittest.TestCase):
                 judge_score=44.0,
                 arena_score=44.0,
             )
+            state_dir = root / "seasons" / "season_0"
+            state_dir.mkdir(parents=True)
+            (state_dir / "season_state.json").write_text(
+                json.dumps(
+                    {
+                        "season_id": "season_0",
+                        "name": "Season 0",
+                        "status": "active",
+                        "paused": True,
+                        "heartbeat": {
+                            "count": 2,
+                            "last_status": "ok",
+                            "last_started_at": "2026-05-20T00:00:00Z",
+                            "last_completed_at": "2026-05-20T00:00:01Z",
+                        },
+                        "runtime_events": [
+                            {
+                                "ts": "2026-05-20T00:00:00Z",
+                                "event": "heartbeat_started",
+                                "heartbeat_count": 2,
+                            }
+                        ],
+                    },
+                    ensure_ascii=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
 
             result = index_surface_data(input_dir=input_dir, output_dir=output_dir)
 
@@ -50,6 +78,11 @@ class SurfaceIndexerTests(unittest.TestCase):
             self.assertEqual("agent-a", surface["leaderboard"][0]["agent_handle"])
             self.assertEqual(104.0, surface["leaderboard"][0]["mean_arena_score"])
             self.assertEqual("season_0", surface["seasons"][0]["id"])
+            self.assertTrue(surface["seasons"][0]["paused"])
+            self.assertEqual("ok", surface["seasons"][0]["heartbeat"]["last_status"])
+            self.assertTrue(
+                any(event.get("event") == "heartbeat_started" for event in surface["scheduler"])
+            )
             self.assertEqual("season_0:agent-a", surface["participants"][0]["participant_id"])
             self.assertEqual("agent framework", surface["discovery"]["run-a"][0]["query"])
             self.assertEqual("self_review", surface["runs"][0]["self_review"][0]["reviewer_role"])

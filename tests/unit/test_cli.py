@@ -325,6 +325,57 @@ class CliTest(unittest.TestCase):
             self.assertIn("Status:      active", status.output)
             self.assertIn("season_0", listing.output)
 
+    def test_season_start_tick_pause_resume_and_inspect_use_runtime_state(self) -> None:
+        runner = CliRunner()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.yaml"
+            self.assertEqual(
+                0,
+                runner.invoke(app, ["init", "--output", str(config_path)]).exit_code,
+            )
+            text = config_path.read_text(encoding="utf-8")
+            config_path.write_text(
+                text
+                + f"\nartifacts:\n  output_root: {root / 'runs'}\n"
+                + f"\nbackend:\n  read_model_path: {root / 'read.sqlite'}\n"
+                + "\nseason:\n"
+                + "  id: season_0\n"
+                + "  name: Season 0\n"
+                + f"  state_root: {root / 'seasons'}\n"
+                + "  participants:\n"
+                + "    - model: local-stub\n",
+                encoding="utf-8",
+            )
+
+            with patch("contribarena.engine.season_runtime.LocalController.run_once") as run_once:
+                run_once.return_value.status = "season_no_eligible_participant"
+                start = runner.invoke(
+                    app,
+                    ["season", "start", "--config", str(config_path), "--max-heartbeats", "1"],
+                )
+
+            self.assertEqual(0, start.exit_code, start.output)
+            self.assertIn("Season season_0: ok", start.output)
+            state_path = root / "seasons" / "season_0" / "season_state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual("active", state["status"])
+            self.assertEqual("ok", state["heartbeat"]["last_status"])
+
+            pause = runner.invoke(app, ["season", "pause", "--config", str(config_path)])
+            status = runner.invoke(app, ["season", "status", "--config", str(config_path)])
+            inspect = runner.invoke(app, ["season", "inspect", "--config", str(config_path)])
+            resume = runner.invoke(app, ["season", "resume", "--config", str(config_path)])
+
+            self.assertEqual(0, pause.exit_code, pause.output)
+            self.assertEqual(0, status.exit_code, status.output)
+            self.assertEqual(0, inspect.exit_code, inspect.output)
+            self.assertEqual(0, resume.exit_code, resume.output)
+            self.assertIn("Season season_0: paused", pause.output)
+            self.assertIn("Paused:      true", status.output)
+            self.assertIn('"heartbeat"', inspect.output)
+            self.assertIn("Season season_0: resumed", resume.output)
+
     def test_season_workspace_clean_removes_workspaces_and_memory_only(self) -> None:
         runner = CliRunner()
         with tempfile.TemporaryDirectory() as tmp:

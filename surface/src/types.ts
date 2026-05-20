@@ -21,6 +21,19 @@ export interface Season {
   name: string;
   phase: SeasonPhase;
   status?: string;
+  paused?: boolean;
+  heartbeat?: {
+    count?: number;
+    last_started_at?: string;
+    last_completed_at?: string;
+    last_status?: string;
+    last_error?: string;
+    last_detail?: string;
+  };
+  transitions?: Array<Record<string, unknown>>;
+  runtime_events?: SchedulerEvent[];
+  updated_at?: string;
+  leaderboard_frozen?: boolean;
   runs_count?: number;
   participants_count?: number;
   wake_sources?: string[];
@@ -148,6 +161,10 @@ export interface Participant {
   pr_lifecycle?: PrLifecycle[];
   latest_goal_summary?: string;
   cumulative_cost?: number | null;
+  active_runs?: number;
+  last_wake_at?: string;
+  last_wake_source?: string;
+  last_repo_slug?: string;
 }
 
 export interface DiscoveryCall {
@@ -182,6 +199,7 @@ export interface SeasonWorkspace {
   metadata_path?: string;
   last_used_at?: string;
   clone_state?: Record<string, unknown>;
+  workspace_status?: string;
   [key: string]: unknown;
 }
 

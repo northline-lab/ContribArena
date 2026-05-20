@@ -20,8 +20,10 @@ from contribarena.engine.read_model import SurfaceReadModel
 from contribarena.engine.seasons import (
     SeasonStore,
     cleanup_season_workspaces,
+    parse_duration_seconds,
     write_leaderboard_snapshot,
 )
+from contribarena.engine.season_runtime import SeasonRuntime
 from contribarena.engine.surface_indexer import index_surface_data
 from contribarena.engine.surface_indexer import build_leaderboard_snapshot
 from contribarena.errors import ContribArenaError
@@ -110,6 +112,75 @@ def season_activate(config: Path = typer.Option(..., "--config", "-c"), season_i
     _season_transition(config, season_id, "active")
 
 
+@season_app.command("start")
+def season_start(
+    config: Path = typer.Option(..., "--config", "-c"),
+    season_id: str | None = None,
+    heartbeat_interval: str | None = typer.Option(None, "--heartbeat-interval"),
+    max_heartbeats: int | None = typer.Option(None, "--max-heartbeats", min=1),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Start or resume the long-running season heartbeat."""
+    try:
+        run_config = load_run_config(config)
+        interval_seconds = (
+            parse_duration_seconds(heartbeat_interval)
+            if heartbeat_interval is not None
+            else None
+        )
+        result = SeasonRuntime().start(
+            run_config,
+            season_id=season_id,
+            heartbeat_interval_seconds=interval_seconds,
+            max_heartbeats=max_heartbeats,
+            verbose=verbose,
+        )
+    except KeyboardInterrupt:
+        typer.echo("Season runtime interrupted; season state was left unchanged.")
+        return
+    except ContribArenaError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(exc.exit_code) from exc
+    typer.echo(f"Season {result.season_id}: {result.status}")
+    typer.echo(f"Heartbeats:  {len(result.heartbeats)}")
+    for index, heartbeat in enumerate(result.heartbeats, start=1):
+        typer.echo(
+            f"  {index}: {heartbeat.status} "
+            f"(season={heartbeat.season_status}, paused={str(heartbeat.paused).lower()}, detail={heartbeat.detail})"
+        )
+
+
+@season_app.command("tick")
+def season_tick(
+    config: Path = typer.Option(..., "--config", "-c"),
+    season_id: str | None = None,
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Run one season heartbeat."""
+    try:
+        run_config = load_run_config(config)
+        result = SeasonRuntime().tick(run_config, season_id=season_id, verbose=verbose)
+    except ContribArenaError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(exc.exit_code) from exc
+    typer.echo(f"Season {result.season_id}: {result.status}")
+    typer.echo(f"Status:      {result.season_status}")
+    typer.echo(f"Paused:      {str(result.paused).lower()}")
+    typer.echo(f"Detail:      {result.detail}")
+
+
+@season_app.command("pause")
+def season_pause(config: Path = typer.Option(..., "--config", "-c"), season_id: str | None = None) -> None:
+    """Pause automatic participant wakes without changing lifecycle status."""
+    _season_pause(config, season_id, paused=True)
+
+
+@season_app.command("resume")
+def season_resume(config: Path = typer.Option(..., "--config", "-c"), season_id: str | None = None) -> None:
+    """Resume automatic participant wakes."""
+    _season_pause(config, season_id, paused=False)
+
+
 @season_app.command("observe")
 def season_observe(config: Path = typer.Option(..., "--config", "-c"), season_id: str | None = None) -> None:
     """Stop admitting new work while continuing observation."""
@@ -140,12 +211,56 @@ def season_status(config: Path = typer.Option(..., "--config", "-c"), season_id:
     """Show one season's state."""
     run_config = load_run_config(config)
     target = season_id or (run_config.season.id if run_config.season else "season_0")
-    season = SeasonStore.from_config(run_config).load(target, run_config.season)
+    store = SeasonStore.from_config(run_config)
+    season = store.load(target, run_config.season)
+    state = store.state(target)
+    heartbeat = state.get("heartbeat", {}) if isinstance(state.get("heartbeat"), dict) else {}
     typer.echo(f"Season:      {season.id}")
     typer.echo(f"Name:        {season.name}")
     typer.echo(f"Status:      {season.status}")
+    typer.echo(f"Paused:      {str(bool(state.get('paused', False))).lower()}")
+    typer.echo(f"Heartbeat:   {heartbeat.get('last_status') or 'never'}")
+    typer.echo(f"Last start:  {heartbeat.get('last_started_at') or ''}")
+    typer.echo(f"Last end:    {heartbeat.get('last_completed_at') or ''}")
+    typer.echo(f"Last error:  {heartbeat.get('last_error') or ''}")
     typer.echo(f"Participants:{len(season.participants):>3}")
     typer.echo(f"Discovery:   {season.discovery_profile.scope}")
+
+
+@season_app.command("inspect")
+def season_inspect(config: Path = typer.Option(..., "--config", "-c"), season_id: str | None = None) -> None:
+    """Show detailed season runtime state."""
+    try:
+        run_config = load_run_config(config)
+        target = season_id or (run_config.season.id if run_config.season else "season_0")
+        store = SeasonStore.from_config(run_config)
+        season = store.load(target, run_config.season)
+        state = store.state(target)
+    except ContribArenaError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(exc.exit_code) from exc
+    typer.echo(json.dumps({"season": season.model_dump(mode="json"), "state": state}, indent=2, sort_keys=True))
+
+
+@season_app.command("validate")
+def season_validate(config: Path = typer.Option(..., "--config", "-c"), season_id: str | None = None) -> None:
+    """Preflight season operation without launching runs."""
+    try:
+        run_config = load_run_config(config)
+        target = season_id or (run_config.season.id if run_config.season else "season_0")
+        season = SeasonStore.from_config(run_config).load(target, run_config.season)
+        if not season.participants:
+            raise ContribArenaError("season has no participants")
+        if not any("agent" in participant.role for participant in season.participants):
+            raise ContribArenaError("season has no agent participants")
+        run_config.artifacts.output_root.mkdir(parents=True, exist_ok=True)
+        run_config.backend.read_model_path.parent.mkdir(parents=True, exist_ok=True)
+    except ContribArenaError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(exc.exit_code) from exc
+    typer.echo(f"Season valid: {season.id}")
+    typer.echo(f"Participants: {len(season.participants)}")
+    typer.echo(f"Discovery:    {season.discovery_profile.scope}")
 
 
 @season_app.command("list")
@@ -612,6 +727,21 @@ def _season_transition(
         typer.echo(str(exc), err=True)
         raise typer.Exit(exc.exit_code) from exc
     typer.echo(f"Season {target}: {state.get('status')}")
+
+
+def _season_pause(config: Path, season_id: str | None, *, paused: bool) -> None:
+    try:
+        run_config = load_run_config(config)
+        target = season_id or (run_config.season.id if run_config.season else "season_0")
+        state = SeasonStore.from_config(run_config).set_paused(
+            target,
+            paused,
+            run_config.season,
+        )
+    except ContribArenaError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(exc.exit_code) from exc
+    typer.echo(f"Season {target}: {'paused' if state.get('paused') else 'resumed'}")
 
 
 def _season_workspace_clean(config: Path, season_id: str | None, *, quiet: bool = False) -> int:

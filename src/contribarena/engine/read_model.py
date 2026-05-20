@@ -12,6 +12,11 @@ from contribarena.engine.surface_indexer import (
     _apply_frozen_leaderboard,
     _leaderboard,
     _load_run_summaries,
+    _merge_runtime_events,
+    _merge_season_state,
+    _merge_state_workspaces,
+    _scheduler_events,
+    _season_workspaces,
     _stats,
 )
 
@@ -91,8 +96,17 @@ class SurfaceReadModel:
             workspace_rows.extend(_workspace_rows(run, loaded.run_dir))
         leaderboard = _apply_frozen_leaderboard(input_dir, _leaderboard(public_runs))
         stats = _stats(public_runs)
-        seasons = _season_rows(public_runs)
+        seasons = _season_payload_rows(_merge_season_state(input_dir, _seasons_from_runs(public_runs)))
         participants = _participant_rows(public_runs)
+        scheduler_rows.extend(
+            _scheduler_event_tuple(row)
+            for row in _merge_runtime_events(input_dir, _scheduler_events(loaded_runs))
+            if str(row.get("status") or "") != "started"
+        )
+        workspace_rows = [
+            _workspace_tuple(row)
+            for row in _merge_state_workspaces(input_dir, _season_workspaces(loaded_runs))
+        ]
         generated_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         with self._connect() as db:
             _replace_data(
@@ -125,12 +139,22 @@ class SurfaceReadModel:
     def surface_bundle(self) -> dict[str, Any]:
         with self._connect() as db:
             runs = _payloads(db.execute("select payload_json from runs order by started_at desc, run_id"))
+            seasons = _payloads(db.execute("select payload_json from seasons order by season_id"))
+            participants = _payloads(db.execute("select payload_json from participants order by season_id, participant_id"))
+            pr_lifecycle = _payloads(db.execute("select payload_json from pr_lifecycle order by season_id, participant_id, repository, number"))
+            scheduler = _payloads(db.execute("select payload_json from scheduler_events order by created_at, participant_id"))
+            workspaces = _payloads(db.execute("select payload_json from season_workspaces order by season_id, participant_id, repo_slug"))
             return {
                 "schema_version": SURFACE_SCHEMA_VERSION,
                 "generated_at": _meta(db, "generated_at"),
                 "stats": _json_meta(db, "stats", default={}),
                 "leaderboard": _json_meta(db, "leaderboard", default=[]),
                 "runs": runs,
+                "seasons": seasons,
+                "participants": participants,
+                "pr_lifecycle": pr_lifecycle,
+                "scheduler": scheduler,
+                "workspaces": workspaces,
                 "skipped": _json_meta(db, "skipped", default=[]),
             }
 
@@ -269,6 +293,14 @@ class SurfaceReadModel:
         query += " order by season_id, participant_id, repo_slug"
         with self._connect() as db:
             return _payloads(db.execute(query, params))
+
+    def season_runtime(self, season_id: str) -> dict[str, Any]:
+        season = next((item for item in self.seasons() if item.get("id") == season_id), None)
+        return {
+            "season": season or {},
+            "scheduler": self.scheduler_events(season_id),
+            "workspaces": self.season_workspaces(season_id),
+        }
 
     def phase_history(self, run_id: str) -> list[dict[str, Any]]:
         with self._connect() as db:
@@ -658,6 +690,10 @@ def _run_row(run: dict[str, Any]) -> tuple[str, str, str, str, str, str, str, st
 
 
 def _season_rows(runs: list[dict[str, Any]]) -> list[tuple[str, str, str]]:
+    return _season_payload_rows(_seasons_from_runs(runs))
+
+
+def _seasons_from_runs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seasons: dict[str, dict[str, Any]] = {}
     for run in runs:
         season = run.get("season", {}) if isinstance(run.get("season"), dict) else {}
@@ -691,8 +727,38 @@ def _season_rows(runs: list[dict[str, Any]]) -> list[tuple[str, str, str]]:
     rows = []
     for season_id, payload in seasons.items():
         payload["participants_count"] = len(participant_counts.get(season_id, set()))
+        rows.append(payload)
+    return rows
+
+
+def _season_payload_rows(seasons: list[dict[str, Any]]) -> list[tuple[str, str, str]]:
+    rows: list[tuple[str, str, str]] = []
+    for payload in seasons:
+        season_id = str(payload.get("id") or "")
+        if not season_id:
+            continue
         rows.append((season_id, str(payload.get("status") or "unknown"), json.dumps(payload, ensure_ascii=True)))
     return rows
+
+
+def _scheduler_event_tuple(row: dict[str, Any]) -> tuple[str, str, str, str, str]:
+    return (
+        str(row.get("season_id") or ""),
+        str(row.get("participant_id") or ""),
+        str(row.get("created_at") or row.get("ts") or ""),
+        str(row.get("status") or row.get("event") or ""),
+        json.dumps(row, ensure_ascii=True),
+    )
+
+
+def _workspace_tuple(row: dict[str, Any]) -> tuple[str, str, str, str, str]:
+    return (
+        str(row.get("season_id") or ""),
+        str(row.get("participant_id") or ""),
+        str(row.get("repo_slug") or ""),
+        str(row.get("container_id") or ""),
+        json.dumps(row, ensure_ascii=True),
+    )
 
 
 def _participant_rows(runs: list[dict[str, Any]]) -> list[tuple[str, str, str]]:

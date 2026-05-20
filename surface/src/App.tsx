@@ -411,6 +411,9 @@ function SeasonDetailPage({ surface, seasonId }: { surface: SurfaceData; seasonI
       <MetricGrid
         items={[
           ["Status", detail.season.status || "unknown"],
+          ["Paused", detail.season.paused ? "yes" : "no"],
+          ["Heartbeat", detail.season.heartbeat?.last_status || "never"],
+          ["Frozen", detail.season.leaderboard_frozen ? "yes" : "no"],
           ["Runs", detail.season.runs_count ?? detail.stats?.runs ?? 0],
           ["Participants", detail.season.participants_count ?? detail.participants.length],
           ["PRs opened", detail.stats?.prs_opened ?? 0],
@@ -429,11 +432,19 @@ function SeasonDetailPage({ surface, seasonId }: { surface: SurfaceData; seasonI
           meta: event.created_at || event.run_id || event.reason || "",
         }))} empty="No scheduler events projected for this season." />
       </EvidenceSection>
+      <EvidenceSection title="Runtime">
+        <TimelineList items={(detail.season.runtime_events ?? []).map((event: SchedulerEvent, idx) => ({
+          key: `${event.event || event.status || "event"}-${idx}`,
+          title: String(event.event || event.status || "runtime event"),
+          detail: String(event.reason || event.detail || event.error || event.heartbeat_status || ""),
+          meta: String(event.ts || event.created_at || ""),
+        }))} empty="No runtime heartbeat events projected for this season." />
+      </EvidenceSection>
       <EvidenceSection title="Workspace Inventory">
         <TimelineList items={detail.workspaces.map((workspace: SeasonWorkspace, idx) => ({
           key: `${workspace.participant_id}-${workspace.repo_slug}-${idx}`,
           title: `${workspace.participant_id || "participant"} · ${workspace.repo_slug || "repo"}`,
-          detail: workspace.container_id || "container not recorded",
+          detail: `${workspace.workspace_status || "recorded"} · ${workspace.container_id || "container not recorded"}`,
           meta: workspace.last_used_at || workspace.metadata_path || "",
         }))} empty="No persistent workspace rows projected for this season." />
       </EvidenceSection>
