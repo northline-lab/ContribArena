@@ -65,6 +65,7 @@ def index_surface_data(
     participants = _participants(public_runs)
     discovery_calls = _discovery_calls(loaded_runs)
     self_reviews = _self_reviews(loaded_runs)
+    assistant_updates = _assistant_updates(loaded_runs)
     phase_history = _phase_history(loaded_runs)
     tool_violations = _tool_violations(loaded_runs)
     pr_lifecycle = _pr_lifecycle(loaded_runs)
@@ -80,6 +81,7 @@ def index_surface_data(
     files_written.append(_write_json(output_dir / "participants.json", {"participants": participants}))
     files_written.append(_write_json(output_dir / "pr_lifecycle.json", {"pr_lifecycle": pr_lifecycle}))
     files_written.append(_write_json(output_dir / "discovery_calls.json", {"discovery": discovery_calls}))
+    files_written.append(_write_json(output_dir / "assistant_updates.json", {"assistant_updates": assistant_updates}))
     files_written.append(_write_json(output_dir / "scheduler_events.json", {"scheduler": scheduler_events}))
     files_written.append(_write_json(output_dir / "season_workspaces.json", {"workspaces": season_workspaces}))
 
@@ -91,12 +93,19 @@ def index_surface_data(
         run_payload["phase_history"] = phase_history.get(run_id, [])
         run_payload["tool_violations"] = tool_violations.get(run_id, [])
         run_payload["self_review"] = self_reviews.get(run_id, [])
+        run_payload["assistant_updates"] = assistant_updates.get(run_id, [])
         files_written.append(_write_json(run_output_dir / f"{run_id}.json", run_payload))
         files_written.append(
             _write_json(run_output_dir / f"{run_id}.discovery.json", {"discovery": discovery_calls.get(run_id, [])})
         )
         files_written.append(
             _write_json(run_output_dir / f"{run_id}.self_review.json", {"self_review": self_reviews.get(run_id, [])})
+        )
+        files_written.append(
+            _write_json(
+                run_output_dir / f"{run_id}.assistant_updates.json",
+                {"updates": assistant_updates.get(run_id, [])},
+            )
         )
 
     files_written.append(
@@ -113,6 +122,7 @@ def index_surface_data(
                         "phase_history": phase_history.get(str(run.get("run_id") or ""), []),
                         "tool_violations": tool_violations.get(str(run.get("run_id") or ""), []),
                         "self_review": self_reviews.get(str(run.get("run_id") or ""), []),
+                        "assistant_updates": assistant_updates.get(str(run.get("run_id") or ""), []),
                     }
                     for run in public_runs
                 ],
@@ -120,6 +130,7 @@ def index_surface_data(
                 "participants": participants,
                 "pr_lifecycle": pr_lifecycle,
                 "discovery": discovery_calls,
+                "assistant_updates": assistant_updates,
                 "scheduler": scheduler_events,
                 "workspaces": season_workspaces,
                 "skipped": skipped,
@@ -664,6 +675,19 @@ def _self_reviews(loaded_runs: list[_LoadedRun]) -> dict[str, list[dict[str, Any
     for loaded in loaded_runs:
         run_id = str(loaded.payload.get("run_id") or "")
         rows[run_id] = _read_jsonl(loaded.run_dir / "phase_review_maintainer_review.jsonl")
+    return rows
+
+
+def _assistant_updates(loaded_runs: list[_LoadedRun]) -> dict[str, list[dict[str, Any]]]:
+    rows: dict[str, list[dict[str, Any]]] = {}
+    for loaded in loaded_runs:
+        run_id = str(loaded.payload.get("run_id") or "")
+        updates = []
+        for payload in _read_jsonl(loaded.run_dir / "assistant_updates.jsonl"):
+            item = dict(payload)
+            item.setdefault("run_id", run_id)
+            updates.append(item)
+        rows[run_id] = updates
     return rows
 
 

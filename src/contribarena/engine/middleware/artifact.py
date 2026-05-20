@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contribarena.models.assistant_updates import AssistantUpdate
 from contribarena.models.tool_results import AciResult, AgentStep, CommandResult, PatchResult
 
 
@@ -17,6 +18,7 @@ class ArtifactCapture:
         self.phase_review_maintainer_rows: list[dict[str, object]] = []
         self.phase_review_response_rows: list[dict[str, object]] = []
         self.discovery_rows: list[dict[str, object]] = []
+        self.assistant_updates: list[AssistantUpdate] = []
 
     def record_command(self, result: CommandResult) -> None:
         self.commands.append(result)
@@ -50,3 +52,6 @@ class ArtifactCapture:
 
     def record_discovery(self, payload: dict[str, object]) -> None:
         self.discovery_rows.append(payload)
+
+    def record_assistant_update(self, update: AssistantUpdate) -> None:
+        self.assistant_updates.append(update)

@@ -8,19 +8,29 @@ from agents.items import ModelResponse
 from agents.models.chatcmpl_converter import Converter
 from agents.usage import Usage
 from openai.types.chat import ChatCompletionMessage
+from openai.types.chat.chat_completion_message_function_tool_call import (
+    ChatCompletionMessageFunctionToolCall,
+    Function,
+)
 from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
 from contribarena.providers.action_guard import (
     RECOVERY_TOOL_NAME,
     guard_model_response,
     guard_structured_model_response,
+    visible_text_from_turn,
 )
 from contribarena.providers.adapters import (
+    _anthropic_response_to_chat_message,
+    _gemini_response_to_chat_message,
     _repair_structured_output_message,
     _to_anthropic_tools,
     _to_gemini_contents,
     _to_gemini_tools,
 )
+from contribarena.models.assistant_updates import AssistantUpdate
+from contribarena.providers.turns import provider_turn_from_response
 
 
 class ProviderAdapterRepairTest(unittest.TestCase):
@@ -107,7 +117,7 @@ class ProviderToolSchemaTest(unittest.TestCase):
 
 
 class ProviderActionGuardTest(unittest.TestCase):
-    def test_accepts_multiple_valid_tool_calls(self) -> None:
+    def test_rejects_multiple_valid_tool_calls(self) -> None:
         response = _model_response(
             [
                 _tool_call("sample_tool", {"path": "repo/app.py"}),
@@ -117,7 +127,10 @@ class ProviderActionGuardTest(unittest.TestCase):
 
         guarded = guard_model_response(response, [_sample_tool, _view_tool, _recovery_tool])
 
-        self.assertIs(guarded, response)
+        recovery = guarded.output[0]
+        self.assertIsInstance(recovery, ResponseFunctionToolCall)
+        payload = json.loads(recovery.arguments)
+        self.assertEqual("multiple_tool_calls", payload["recovery_kind"])
 
     def test_rejects_invalid_call_inside_multiple_tool_calls(self) -> None:
         response = _model_response(
@@ -134,7 +147,31 @@ class ProviderActionGuardTest(unittest.TestCase):
         self.assertIsInstance(recovery, ResponseFunctionToolCall)
         self.assertEqual(RECOVERY_TOOL_NAME, recovery.name)
         payload = json.loads(recovery.arguments)
-        self.assertEqual("invalid_tool_arguments", payload["recovery_kind"])
+        self.assertEqual("multiple_tool_calls", payload["recovery_kind"])
+
+    def test_captures_visible_text_with_single_tool_call(self) -> None:
+        captured: list[AssistantUpdate] = []
+        response = _text_and_tool_response("I will inspect the file.", "sample_tool", {"path": "repo/app.py"})
+
+        guarded = guard_structured_model_response(
+            response,
+            [_sample_tool, _recovery_tool],
+            _StructuredSchema(),
+            update_builder=lambda turn, call: AssistantUpdate(
+                run_id="run-a",
+                text="\n".join(segment.text for segment in turn.visible_segments),
+                tool_name=call.name if call else "",
+                evidence_refs=[f"tool_call:{call.name}"] if call else [],
+                hidden_dropped_count=turn.hidden_dropped_count,
+            ),
+            update_sink=captured.append,
+        )
+
+        self.assertIs(guarded, response)
+        self.assertEqual(1, len(captured))
+        self.assertEqual("I will inspect the file.", captured[0].text)
+        self.assertEqual("sample_tool", captured[0].tool_name)
+        self.assertEqual(["tool_call:sample_tool"], captured[0].evidence_refs)
 
     def test_rejects_missing_required_tool_argument(self) -> None:
         response = _model_response([_tool_call("sample_tool", {})])
@@ -236,6 +273,71 @@ class ProviderActionGuardTest(unittest.TestCase):
 
         self.assertIs(guarded, response)
 
+    def test_anthropic_drops_thinking_blocks_from_visible_text(self) -> None:
+        message, hidden = _anthropic_response_to_chat_message(
+            {
+                "content": [
+                    {"type": "thinking", "thinking": "hidden chain"},
+                    {"type": "text", "text": "Visible update."},
+                    {"type": "redacted_thinking", "data": "..."},
+                ]
+            }
+        )
+
+        self.assertEqual("Visible update.", message.content)
+        self.assertEqual(2, hidden)
+
+    def test_gemini_drops_thought_text_and_carries_signature(self) -> None:
+        message, hidden = _gemini_response_to_chat_message(
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {"text": "hidden", "thought": True},
+                                {"text": "Visible update."},
+                                {
+                                    "functionCall": {"name": "sample_tool", "args": {"path": "repo/app.py"}},
+                                    "thoughtSignature": "opaque",
+                                },
+                            ]
+                        }
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual("Visible update.", message.content)
+        self.assertEqual(2, hidden)
+        self.assertEqual("opaque", message.tool_calls[0].extra_content["google"]["thought_signature"])
+
+    def test_provider_turn_drops_openai_reasoning_items(self) -> None:
+        reasoning = ResponseReasoningItem(
+            id="rsn_123",
+            summary=[],
+            type="reasoning",
+        )
+        response = ModelResponse(
+            output=[reasoning, *_text_response("Visible update.").output],
+            usage=Usage(),
+            response_id="response-id",
+        )
+
+        turn = provider_turn_from_response(response)
+
+        self.assertEqual("Visible update.", turn.visible_segments[0].text)
+        self.assertEqual(1, turn.hidden_dropped_count)
+
+    def test_visible_text_is_redacted_and_truncated(self) -> None:
+        response = _text_response("api_key=abcdef1234567890 " + ("x" * 600))
+
+        text, redacted, truncated = visible_text_from_turn(provider_turn_from_response(response), max_chars=80)
+
+        self.assertTrue(redacted)
+        self.assertTrue(truncated)
+        self.assertIn("***", text)
+        self.assertLessEqual(len(text), 80)
+
 
 @function_tool(name_override="sample_tool")
 def _sample_tool(path: str) -> str:
@@ -276,6 +378,29 @@ def _tool_call(name: str, arguments: dict[str, object]) -> ResponseFunctionToolC
 
 def _model_response(output: list[ResponseFunctionToolCall]) -> ModelResponse:
     return ModelResponse(output=output, usage=Usage(), response_id="response-id")
+
+
+def _text_and_tool_response(
+    text: str,
+    name: str,
+    arguments: dict[str, object],
+) -> ModelResponse:
+    message = ChatCompletionMessage(
+        role="assistant",
+        content=text,
+        tool_calls=[
+            ChatCompletionMessageFunctionToolCall(
+                id=f"call-{name}",
+                type="function",
+                function=Function(name=name, arguments=json.dumps(arguments)),
+            )
+        ],
+    )
+    return ModelResponse(
+        output=Converter.message_to_output_items(message, provider_data={"model": "adapter"}),
+        usage=Usage(),
+        response_id="response-id",
+    )
 
 
 def _text_response(text: str) -> ModelResponse:

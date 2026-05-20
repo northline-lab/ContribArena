@@ -32,7 +32,7 @@ from contribarena.config.schema import (
 from contribarena.agent import AgentInvocationResult
 from contribarena.agent.contributor import build_agent_instructions
 from contribarena.engine.goals import GoalService, goal_state_path
-from contribarena.engine.runner import Runner, _owned_live_push_command
+from contribarena.engine.runner import Runner, _build_assistant_update, _owned_live_push_command
 from contribarena.engine.seasons import derive_participant_id, normalize_model_identity
 from contribarena.engine.middleware.governance import load_governance_state, save_governance_state
 from contribarena.errors import AgentError
@@ -48,6 +48,7 @@ from contribarena.models import (
 )
 from contribarena.models.lifecycle import CiCheck, CiStatus
 from contribarena.models.agent_result import WorkspaceSummary
+from contribarena.providers.turns import ProviderTurn, VisibleSegment
 from contribarena.providers import TracingModelProvider
 from contribarena.tools.github_pr import (
     ForkEnsureResult,
@@ -2038,27 +2039,45 @@ class RunnerM02Test(unittest.TestCase):
             self.assertIn("judge_dimension_packets.json", manifest_names)
             self.assertIn("judgement.json", manifest_names)
 
-    def test_agent_reported_progress_tool_writes_agent_source_event(self) -> None:
+    def test_new_agent_surface_retires_operator_progress_tool(self) -> None:
+        instructions = build_agent_instructions(_issue_config(Path("runs")))
+
+        self.assertNotIn("operator_report_progress", instructions)
+
+    def test_runner_writes_empty_assistant_updates_artifact_for_legacy_agent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             result = _run_with_fake_docker(
-                FakeIssueAgent(report_progress=True),
+                FakeIssueAgent(),
                 _issue_config(tmp_path / "runs"),
                 tmp_path,
             )
 
-            events = [
-                json.loads(line)
-                for line in (result.run_dir / "operator_events.jsonl").read_text().splitlines()
-                if line.strip()
-            ]
-            agent_events = [event for event in events if event["source"] == "agent"]
-            self.assertEqual(1, len(agent_events))
-            self.assertEqual("task_discovery", agent_events[0]["phase"])
-            self.assertEqual("working", agent_events[0]["status"])
-            self.assertIn("repo/app.py", agent_events[0]["evidence"])
+            updates_path = result.run_dir / "assistant_updates.jsonl"
+            self.assertTrue(updates_path.exists())
+            self.assertEqual("", updates_path.read_text(encoding="utf-8").strip())
             trajectory = json.loads((result.run_dir / "trajectory.json").read_text())
-            self.assertIn("operator_report_progress", {step["tool"] for step in trajectory})
+            self.assertNotIn("operator_report_progress", {step["tool"] for step in trajectory})
+
+    def test_assistant_update_uses_runtime_run_id(self) -> None:
+        config = _issue_config(Path("runs"))
+        goals = GoalService(config, run_id="runtime-run")
+        invocation_context = type("InvocationContext", (), {"invocation_seq": 2})()
+        tool_call = type("ToolCall", (), {"name": "repo_search"})()
+
+        update = _build_assistant_update(
+            config=config,
+            run_id="runtime-run",
+            goals=goals,
+            invocation_context=invocation_context,
+            turn=ProviderTurn(visible_segments=[VisibleSegment(text="I will search repos.")]),
+            tool_call=tool_call,
+        )
+
+        self.assertIsNotNone(update)
+        assert update is not None
+        self.assertEqual("runtime-run", update.run_id)
+        self.assertEqual(["tool_call:repo_search"], update.evidence_refs)
 
     def test_runner_writes_guidance_and_memory_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

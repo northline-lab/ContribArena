@@ -85,7 +85,9 @@ class SurfaceIndexerTests(unittest.TestCase):
             )
             self.assertEqual("season_0:agent-a", surface["participants"][0]["participant_id"])
             self.assertEqual("agent framework", surface["discovery"]["run-a"][0]["query"])
+            self.assertEqual("I will inspect the repo.", surface["assistant_updates"]["run-a"][0]["text"])
             self.assertEqual("self_review", surface["runs"][0]["self_review"][0]["reviewer_role"])
+            self.assertEqual("I will inspect the repo.", surface["runs"][0]["assistant_updates"][0]["text"])
             self.assertEqual("work", surface["runs"][0]["phase_history"][0]["phase"])
             self.assertEqual("aci_submit_patch", surface["runs"][0]["tool_violations"][0]["tool"])
             self.assertEqual("open", surface["pr_lifecycle"][0]["state"])
@@ -98,10 +100,12 @@ class SurfaceIndexerTests(unittest.TestCase):
             self.assertTrue((output_dir / "participants.json").exists())
             self.assertTrue((output_dir / "pr_lifecycle.json").exists())
             self.assertTrue((output_dir / "discovery_calls.json").exists())
+            self.assertTrue((output_dir / "assistant_updates.json").exists())
             self.assertTrue((output_dir / "scheduler_events.json").exists())
             self.assertTrue((output_dir / "season_workspaces.json").exists())
             self.assertTrue((output_dir / "runs" / "run-a.discovery.json").exists())
             self.assertTrue((output_dir / "runs" / "run-a.self_review.json").exists())
+            self.assertTrue((output_dir / "runs" / "run-a.assistant_updates.json").exists())
             self.assertTrue((output_dir / "runs" / "run-a.json").exists())
             self.assertTrue((output_dir / "runs" / "run-a" / "artifacts" / "patch.diff").exists())
 
@@ -346,6 +350,23 @@ def _write_run(
     )
     (path / "phase_review_maintainer_review.jsonl").write_text(
         json.dumps({"reviewer_role": "self_review", "severity": "low"}, ensure_ascii=True)
+        + "\n",
+        encoding="utf-8",
+    )
+    (path / "assistant_updates.jsonl").write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "season_id": season_id,
+                "participant_id": f"season_0:{agent_handle}",
+                "phase": "scout",
+                "sub_phase": "project",
+                "kind": "intent",
+                "text": "I will inspect the repo.",
+                "tool_name": "repo_get_readme",
+            },
+            ensure_ascii=True,
+        )
         + "\n",
         encoding="utf-8",
     )

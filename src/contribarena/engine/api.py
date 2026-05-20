@@ -157,6 +157,13 @@ def create_app(
             raise HTTPException(status_code=404, detail="run not found")
         return {"self_review": model.self_review(run_id)}
 
+    @app.get("/api/runs/{run_id}/assistant-updates")
+    def run_assistant_updates(run_id: str) -> dict[str, object]:
+        item = model.run(run_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        return {"updates": model.assistant_updates(run_id)}
+
     @app.get("/api/agents")
     def agents() -> dict[str, object]:
         return {"agents": model.agents()}

@@ -79,7 +79,10 @@ from contribarena.models import (
     RunState,
     TerminalState,
 )
+from contribarena.models.assistant_updates import AssistantUpdate, AssistantUpdateKind
 from contribarena.providers import ContribArenaModelProvider, TracingModelProvider
+from contribarena.providers.action_guard import visible_text_from_turn
+from contribarena.providers.turns import ProviderTurn
 from contribarena.trace import TraceWriter
 from contribarena.tools.github_pr import (
     ForkEnsureResult,
@@ -346,6 +349,7 @@ class Runner:
             )
             loop_state, loop_terminal, loop_outcome = self._run_agent_loop(
                 config=config,
+                run_id=run_id,
                 registry=registry,
                 initial_prompt=prompt,
                 trace=trace,
@@ -569,6 +573,7 @@ class Runner:
         self,
         *,
         config: RunConfig,
+        run_id: str,
         registry: ToolRegistry,
         initial_prompt: str,
         trace: TraceWriter,
@@ -585,6 +590,16 @@ class Runner:
             invocation_context.current_phase = goals.context.current_phase
             invocation_context.current_sub_phase = goals.context.current_sub_phase
             seq = loop_state.counters.invocations_used + 1
+            invocation_context.invocation_seq = seq
+            invocation_context.assistant_update_builder = lambda turn, tool_call: _build_assistant_update(
+                config=config,
+                run_id=run_id,
+                goals=goals,
+                invocation_context=invocation_context,
+                turn=turn,
+                tool_call=tool_call,
+            )
+            invocation_context.assistant_update_sink = capture.record_assistant_update
             continuation = seq > 1
             trace.write(
                 RunState.AGENT_ACTING,
@@ -882,6 +897,11 @@ def _write_capture_artifacts(artifacts: ArtifactWriter, capture: ArtifactCapture
         "trajectory.json",
         [step.model_dump(mode="json") for step in capture.steps],
     )
+    _write_jsonl_artifact(
+        artifacts,
+        "assistant_updates.jsonl",
+        [update.model_dump(mode="json") for update in capture.assistant_updates],
+    )
     artifacts.write_text(
         "tool_violation_log.jsonl",
         "\n".join(json.dumps(row, ensure_ascii=True) for row in capture.tool_violations)
@@ -919,6 +939,52 @@ def _write_capture_artifacts(artifacts: ArtifactWriter, capture: ArtifactCapture
         "discovery_log.jsonl",
         capture.discovery_rows,
     )
+
+
+def _build_assistant_update(
+    *,
+    config: RunConfig,
+    run_id: str,
+    goals: GoalService,
+    invocation_context: AgentInvocationContext,
+    turn: ProviderTurn,
+    tool_call: object | None,
+) -> AssistantUpdate | None:
+    text, redacted, truncated = visible_text_from_turn(turn)
+    if not text:
+        return None
+    tool_name = str(getattr(tool_call, "name", "") or "")
+    phase = goals.context.current_phase
+    sub_phase = goals.context.current_sub_phase or ""
+    return AssistantUpdate(
+        run_id=run_id,
+        season_id=config.run.season_id or "",
+        participant_id=config.run.participant_id or "",
+        invocation_seq=invocation_context.invocation_seq,
+        turn_id=turn.provider_response_id or "",
+        phase=phase,
+        sub_phase=sub_phase,
+        kind=_assistant_update_kind(tool_name, phase),
+        text=text,
+        position="before_tool" if tool_name else "commentary_only",
+        tool_name=tool_name,
+        evidence_refs=[f"tool_call:{tool_name}"] if tool_name else [],
+        truncated=truncated,
+        redacted=redacted,
+        hidden_dropped_count=turn.hidden_dropped_count,
+    )
+
+
+def _assistant_update_kind(tool_name: str, phase: str) -> AssistantUpdateKind:
+    if tool_name in {"aci_verify", "aci_suggest_verification"}:
+        return "verification"
+    if tool_name in {"aci_submit_patch", "aci_submit_patch_finalize", "aci_dispute_review"}:
+        return "review_response"
+    if tool_name == "aci_goal_update" or tool_name.startswith("repo_"):
+        return "decision" if phase == "scout" else "intent"
+    if tool_name == "workspace_run":
+        return "blocker"
+    return "intent"
 
 
 def _write_jsonl_artifact(

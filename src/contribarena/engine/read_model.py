@@ -69,6 +69,7 @@ class SurfaceReadModel:
         phase_rows: list[tuple[str, int, str, str, str, str, str, str]] = []
         violation_rows: list[tuple[str, int, str, str, str, str, str]] = []
         discovery_rows: list[tuple[str, int, str, str, str, str, str]] = []
+        assistant_update_rows: list[tuple[str, int, str, str, str, str, str, str, str]] = []
         scheduler_rows: list[tuple[str, str, str, str, str, str]] = []
         pr_rows: list[tuple[str, str, str, int, str, str]] = []
         workspace_rows: list[tuple[str, str, str, str, str]] = []
@@ -91,6 +92,7 @@ class SurfaceReadModel:
             phase_rows.extend(_phase_history_rows(run_id, loaded.run_dir))
             violation_rows.extend(_tool_violation_rows(run_id, loaded.run_dir))
             discovery_rows.extend(_discovery_call_rows(run_id, loaded.run_dir))
+            assistant_update_rows.extend(_assistant_update_rows(run_id, loaded.run_dir))
             scheduler_rows.extend(_scheduler_event_rows(run, loaded.run_dir))
             pr_rows.extend(_pr_lifecycle_rows(run, loaded.run_dir))
             workspace_rows.extend(_workspace_rows(run, loaded.run_dir))
@@ -116,6 +118,7 @@ class SurfaceReadModel:
                 phase_history=phase_rows,
                 tool_violations=violation_rows,
                 discovery_calls=discovery_rows,
+                assistant_updates=assistant_update_rows,
                 scheduler_events=scheduler_rows,
                 pr_lifecycle=pr_rows,
                 season_workspaces=workspace_rows,
@@ -155,6 +158,10 @@ class SurfaceReadModel:
                 "pr_lifecycle": pr_lifecycle,
                 "scheduler": scheduler,
                 "workspaces": workspaces,
+                "assistant_updates": _group_payloads(
+                    _payloads(db.execute("select payload_json from assistant_updates order by run_id, seq")),
+                    "run_id",
+                ),
                 "skipped": _json_meta(db, "skipped", default=[]),
             }
 
@@ -273,6 +280,14 @@ class SurfaceReadModel:
         if not row:
             return []
         return _read_jsonl(Path(str(row[0])))
+
+    def assistant_updates(self, run_id: str) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute(
+                "select payload_json from assistant_updates where run_id = ? order by seq",
+                (run_id,),
+            ).fetchall()
+        return [json.loads(row[0]) for row in rows]
 
     def scheduler_events(self, season_id: str | None = None) -> list[dict[str, Any]]:
         query = "select payload_json from scheduler_events"
@@ -542,6 +557,18 @@ def _create_schema(db: sqlite3.Connection) -> None:
             payload_json text not null,
             primary key (run_id, seq)
         );
+        create table if not exists assistant_updates (
+            run_id text not null,
+            seq integer not null,
+            season_id text not null,
+            participant_id text not null,
+            phase text not null,
+            sub_phase text not null,
+            kind text not null,
+            tool_name text not null,
+            payload_json text not null,
+            primary key (run_id, seq)
+        );
         create index if not exists idx_runs_season on runs(season_id);
         create index if not exists idx_runs_participant on runs(participant_id);
         create index if not exists idx_runs_agent on runs(agent_handle);
@@ -552,6 +579,7 @@ def _create_schema(db: sqlite3.Connection) -> None:
         create index if not exists idx_pr_lifecycle_season on pr_lifecycle(season_id);
         create index if not exists idx_phase_history_run on phase_history(run_id);
         create index if not exists idx_tool_violations_run on tool_violations(run_id);
+        create index if not exists idx_assistant_updates_run on assistant_updates(run_id);
         """
     )
     _ensure_column(db, "runs", "participant_id", "text not null default ''")
@@ -567,6 +595,7 @@ def _replace_data(
     phase_history: list[tuple[str, int, str, str, str, str, str, str]],
     tool_violations: list[tuple[str, int, str, str, str, str, str]],
     discovery_calls: list[tuple[str, int, str, str, str, str, str]],
+    assistant_updates: list[tuple[str, int, str, str, str, str, str, str, str]],
     scheduler_events: list[tuple[str, str, str, str, str, str]],
     pr_lifecycle: list[tuple[str, str, str, int, str, str]],
     season_workspaces: list[tuple[str, str, str, str, str]],
@@ -583,6 +612,7 @@ def _replace_data(
     db.execute("delete from phase_history")
     db.execute("delete from tool_violations")
     db.execute("delete from discovery_calls")
+    db.execute("delete from assistant_updates")
     db.execute("delete from scheduler_events")
     db.execute("delete from pr_lifecycle")
     db.execute("delete from season_workspaces")
@@ -632,6 +662,14 @@ def _replace_data(
         ) values (?, ?, ?, ?, ?, ?, ?)
         """,
         discovery_calls,
+    )
+    db.executemany(
+        """
+        insert into assistant_updates (
+            run_id, seq, season_id, participant_id, phase, sub_phase, kind, tool_name, payload_json
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        assistant_updates,
     )
     db.executemany(
         """
@@ -870,6 +908,30 @@ def _discovery_call_rows(
     return rows
 
 
+def _assistant_update_rows(
+    run_id: str,
+    run_dir: Path,
+) -> list[tuple[str, int, str, str, str, str, str, str, str]]:
+    rows: list[tuple[str, int, str, str, str, str, str, str, str]] = []
+    for seq, payload in enumerate(_read_jsonl(run_dir / "assistant_updates.jsonl"), start=1):
+        item = dict(payload)
+        item.setdefault("run_id", run_id)
+        rows.append(
+            (
+                run_id,
+                seq,
+                str(item.get("season_id") or ""),
+                str(item.get("participant_id") or ""),
+                str(item.get("phase") or ""),
+                str(item.get("sub_phase") or ""),
+                str(item.get("kind") or ""),
+                str(item.get("tool_name") or ""),
+                json.dumps(item, ensure_ascii=True),
+            )
+        )
+    return rows
+
+
 def _scheduler_event_rows(run: dict[str, Any], run_dir: Path) -> list[tuple[str, str, str, str, str]]:
     rows: list[tuple[str, str, str, str, str]] = []
     season = run.get("season", {}) if isinstance(run.get("season"), dict) else {}
@@ -1043,6 +1105,13 @@ def _mean(values: list[float]) -> float | None:
 
 def _payloads(rows: Any) -> list[dict[str, Any]]:
     return [json.loads(row[0]) for row in rows]
+
+
+def _group_payloads(rows: list[dict[str, Any]], key: str) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(str(row.get(key) or ""), []).append(row)
+    return grouped
 
 
 def _meta(db: sqlite3.Connection, key: str) -> str:

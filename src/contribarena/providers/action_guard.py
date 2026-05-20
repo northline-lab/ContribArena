@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from agents import ModelSettings
@@ -14,7 +14,15 @@ from agents.models.interface import Model, ModelProvider
 from agents.tool import FunctionTool, Tool
 from openai.types.responses import ResponseFunctionToolCall
 
+from contribarena.models.assistant_updates import AssistantUpdate
+from contribarena.providers.redaction import redact_visible_text
+from contribarena.providers.turns import ProviderTurn, provider_turn_from_response
+
 RECOVERY_TOOL_NAME = "aci_recover_invalid_action"
+VISIBLE_UPDATE_LIMIT = 500
+
+AssistantUpdateBuilder = Callable[[ProviderTurn, ResponseFunctionToolCall | None], AssistantUpdate | None]
+AssistantUpdateSink = Callable[[AssistantUpdate], None]
 
 
 @dataclass(frozen=True)
@@ -27,8 +35,16 @@ class ToolActionViolation:
 class ActionGuardedModel(Model):
     """Model wrapper that turns invalid tool actions into recoverable observations."""
 
-    def __init__(self, model: Model) -> None:
+    def __init__(
+        self,
+        model: Model,
+        *,
+        update_builder: AssistantUpdateBuilder | None = None,
+        update_sink: AssistantUpdateSink | None = None,
+    ) -> None:
         self._model = model
+        self._update_builder = update_builder
+        self._update_sink = update_sink
 
     async def get_response(
         self,
@@ -56,7 +72,13 @@ class ActionGuardedModel(Model):
             conversation_id=conversation_id,
             prompt=prompt,
         )
-        return guard_structured_model_response(response, tools, output_schema)
+        return guard_structured_model_response(
+            response,
+            tools,
+            output_schema,
+            update_builder=self._update_builder,
+            update_sink=self._update_sink,
+        )
 
     def stream_response(
         self,
@@ -94,13 +116,25 @@ class ActionGuardedModel(Model):
 class ActionGuardingModelProvider(ModelProvider):
     """ModelProvider wrapper that applies action guarding only inside contributor runs."""
 
-    def __init__(self, provider: ModelProvider) -> None:
+    def __init__(
+        self,
+        provider: ModelProvider,
+        *,
+        update_builder: AssistantUpdateBuilder | None = None,
+        update_sink: AssistantUpdateSink | None = None,
+    ) -> None:
         self._provider = provider
         self._cache: dict[str | None, Model] = {}
+        self._update_builder = update_builder
+        self._update_sink = update_sink
 
     def get_model(self, model_name: str | None) -> Model:
         if model_name not in self._cache:
-            self._cache[model_name] = ActionGuardedModel(self._provider.get_model(model_name))
+            self._cache[model_name] = ActionGuardedModel(
+                self._provider.get_model(model_name),
+                update_builder=self._update_builder,
+                update_sink=self._update_sink,
+            )
         return self._cache[model_name]
 
 
@@ -112,16 +146,28 @@ def guard_structured_model_response(
     response: ModelResponse,
     tools: list[Tool],
     output_schema: AgentOutputSchemaBase | None,
+    *,
+    update_builder: AssistantUpdateBuilder | None = None,
+    update_sink: AssistantUpdateSink | None = None,
 ) -> ModelResponse:
-    return _guard_model_response(response, tools, output_schema=output_schema)
+    return _guard_model_response(
+        response,
+        tools,
+        output_schema=output_schema,
+        update_builder=update_builder,
+        update_sink=update_sink,
+    )
 
 
 def _guard_model_response(
     response: ModelResponse,
     tools: list[Tool],
     output_schema: AgentOutputSchemaBase | None,
+    update_builder: AssistantUpdateBuilder | None = None,
+    update_sink: AssistantUpdateSink | None = None,
 ) -> ModelResponse:
-    tool_calls = [item for item in response.output if isinstance(item, ResponseFunctionToolCall)]
+    turn = provider_turn_from_response(response)
+    tool_calls = turn.tool_calls
     if not tool_calls:
         text_tool_call = _text_tool_call(response, tools)
         if text_tool_call is not None:
@@ -139,9 +185,11 @@ def _guard_model_response(
                 response_id=response.response_id,
                 request_id=response.request_id,
             )
+        _capture_assistant_update(turn, None, update_builder, update_sink)
         return response
     violation = _tool_action_violation(tool_calls, tools)
     if violation is None:
+        _capture_assistant_update(turn, tool_calls[0], update_builder, update_sink)
         return response
     return ModelResponse(
         output=[_recovery_call(violation)],
@@ -184,6 +232,11 @@ def _tool_action_violation(
     }
     if RECOVERY_TOOL_NAME not in tool_schemas:
         return None
+    if len([call for call in tool_calls if call.name != RECOVERY_TOOL_NAME]) > 1:
+        return ToolActionViolation(
+            recovery_kind="multiple_tool_calls",
+            message="Rejected multiple tool calls in one assistant turn. Use exactly one tool call.",
+        )
     for call in tool_calls:
         if call.name == RECOVERY_TOOL_NAME:
             continue
@@ -212,6 +265,21 @@ def _tool_action_violation(
         if violation is not None:
             return violation
     return None
+
+
+def _capture_assistant_update(
+    turn: ProviderTurn,
+    tool_call: ResponseFunctionToolCall | None,
+    update_builder: AssistantUpdateBuilder | None,
+    update_sink: AssistantUpdateSink | None,
+) -> None:
+    if update_builder is None or update_sink is None:
+        return
+    if not turn.visible_segments and turn.hidden_dropped_count <= 0:
+        return
+    update = update_builder(turn, tool_call)
+    if update is not None:
+        update_sink(update)
 
 
 def _text_tool_call(response: ModelResponse, tools: list[Tool]) -> ResponseFunctionToolCall | None:
@@ -315,6 +383,13 @@ def _response_text(response: ModelResponse) -> str:
             if text:
                 chunks.append(str(text))
     return "\n".join(chunks)
+
+
+def visible_text_from_turn(turn: ProviderTurn, *, max_chars: int = VISIBLE_UPDATE_LIMIT) -> tuple[str, bool, bool]:
+    text = "\n".join(segment.text for segment in turn.visible_segments if segment.text.strip()).strip()
+    redacted = redact_visible_text(text, max_chars=max_chars)
+    truncated = "truncated" in redacted.classes
+    return redacted.text, redacted.redacted, truncated
 
 
 def _looks_like_json(text: str) -> bool:

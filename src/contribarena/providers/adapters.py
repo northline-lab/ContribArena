@@ -83,12 +83,14 @@ class AnthropicMessagesModel(Model):
         )
         _raise_for_status_with_body(response)
         payload = response.json()
-        message = _anthropic_response_to_chat_message(payload)
+        message, hidden_dropped_count = _anthropic_response_to_chat_message(payload)
         message = _repair_structured_output_message(message)
+        output = Converter.message_to_output_items(
+            message, provider_data={"model": self.model_name}
+        )
+        _annotate_hidden_dropped(output, hidden_dropped_count)
         return ModelResponse(
-            output=Converter.message_to_output_items(
-                message, provider_data={"model": self.model_name}
-            ),
+            output=output,
             usage=_anthropic_usage(payload),
             response_id=payload.get("id"),
         )
@@ -161,12 +163,14 @@ class GeminiGenerateContentModel(Model):
         )
         _raise_for_status_with_body(response)
         payload = _parse_gemini_payload(response)
-        message = _gemini_response_to_chat_message(payload)
+        message, hidden_dropped_count = _gemini_response_to_chat_message(payload)
         message = _repair_structured_output_message(message)
+        output = Converter.message_to_output_items(
+            message, provider_data={"model": self.model_name}
+        )
+        _annotate_hidden_dropped(output, hidden_dropped_count)
         return ModelResponse(
-            output=Converter.message_to_output_items(
-                message, provider_data={"model": self.model_name}
-            ),
+            output=output,
             usage=_gemini_usage(payload),
             response_id=None,
         )
@@ -337,9 +341,10 @@ def _to_anthropic_tools(tools: list[Tool]) -> list[dict[str, Any]]:
     return result
 
 
-def _anthropic_response_to_chat_message(payload: dict[str, Any]) -> ChatCompletionMessage:
+def _anthropic_response_to_chat_message(payload: dict[str, Any]) -> tuple[ChatCompletionMessage, int]:
     text_parts: list[str] = []
     tool_calls: list[ChatCompletionMessageFunctionToolCall] = []
+    hidden_dropped_count = 0
     for block in payload.get("content") or []:
         if block.get("type") == "text":
             text_parts.append(str(block.get("text", "")))
@@ -354,13 +359,18 @@ def _anthropic_response_to_chat_message(payload: dict[str, Any]) -> ChatCompleti
                     ),
                 )
             )
+        elif block.get("type") in {"thinking", "redacted_thinking"}:
+            hidden_dropped_count += 1
     text = "\n".join(text_parts) if text_parts else None
     parsed_text, parsed_calls = _parse_text_tool_calls(text or "")
     tool_calls.extend(parsed_calls)
-    return ChatCompletionMessage(
-        role="assistant",
-        content=parsed_text or None,
-        tool_calls=tool_calls or None,
+    return (
+        ChatCompletionMessage(
+            role="assistant",
+            content=parsed_text or None,
+            tool_calls=tool_calls or None,
+        ),
+        hidden_dropped_count,
     )
 
 
@@ -537,14 +547,17 @@ def _parse_gemini_payload(response: httpx.Response) -> dict[str, Any]:
     return merged
 
 
-def _gemini_response_to_chat_message(payload: dict[str, Any]) -> ChatCompletionMessage:
+def _gemini_response_to_chat_message(payload: dict[str, Any]) -> tuple[ChatCompletionMessage, int]:
     candidates = payload.get("candidates") or []
     parts = (((candidates[0] or {}).get("content") or {}).get("parts") or []) if candidates else []
     text_parts: list[str] = []
     tool_calls: list[ChatCompletionMessageFunctionToolCall] = []
     last_thought_signature: str | None = None
+    hidden_dropped_count = 0
     for index, part in enumerate(parts):
-        if "text" in part:
+        if part.get("thought") is True:
+            hidden_dropped_count += 1
+        elif "text" in part:
             text_parts.append(str(part["text"]))
         function_call = part.get("functionCall") or part.get("function_call")
         if function_call:
@@ -559,16 +572,28 @@ def _gemini_response_to_chat_message(payload: dict[str, Any]) -> ChatCompletionM
             thought_signature = part.get("thoughtSignature") or part.get("thought_signature")
             if thought_signature:
                 last_thought_signature = thought_signature
+                hidden_dropped_count += 1
             elif last_thought_signature:
                 thought_signature = last_thought_signature
             if thought_signature:
                 tool_call.extra_content = {"google": {"thought_signature": thought_signature}}
             tool_calls.append(tool_call)
-    return ChatCompletionMessage(
-        role="assistant",
-        content="\n".join(text_parts) if text_parts else None,
-        tool_calls=tool_calls or None,
+    return (
+        ChatCompletionMessage(
+            role="assistant",
+            content="\n".join(text_parts) if text_parts else None,
+            tool_calls=tool_calls or None,
+        ),
+        hidden_dropped_count,
     )
+
+
+def _annotate_hidden_dropped(output: list[Any], hidden_dropped_count: int) -> None:
+    if hidden_dropped_count <= 0:
+        return
+    for item in output:
+        setattr(item, "hidden_dropped_count", hidden_dropped_count)
+        return
 
 
 def _gemini_usage(payload: dict[str, Any]) -> Usage:

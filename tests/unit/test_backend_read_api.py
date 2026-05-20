@@ -62,6 +62,7 @@ class BackendReadApiTests(unittest.TestCase):
             self.assertEqual("container-1", model.season_workspaces("season_0")[0]["container_id"])
             self.assertEqual("auto", model.scheduler_events("season_0")[0]["wake_source"])
             self.assertEqual("self_review", model.self_review("run-a")[0]["reviewer_role"])
+            self.assertEqual("I will inspect the repo.", model.assistant_updates("run-a")[0]["text"])
             self.assertEqual("work", model.phase_history("run-a")[0]["phase"])
             self.assertEqual("aci_submit_patch", model.tool_violations("run-a")[0]["tool"])
 
@@ -85,6 +86,7 @@ class BackendReadApiTests(unittest.TestCase):
             self.assertIn("/api/runs/{run_id}", routes)
             self.assertIn("/api/runs/{run_id}/discovery", routes)
             self.assertIn("/api/runs/{run_id}/self-review", routes)
+            self.assertIn("/api/runs/{run_id}/assistant-updates", routes)
             self.assertIn("/api/artifacts/{run_id}/{artifact_name}", routes)
 
             model = SurfaceReadModel(root / "read.sqlite")
@@ -260,6 +262,23 @@ def _write_run(path: Path, *, run_id: str, agent_handle: str) -> None:
     )
     (path / "phase_review_maintainer_review.jsonl").write_text(
         json.dumps({"reviewer_role": "self_review", "severity": "low"}, ensure_ascii=True)
+        + "\n",
+        encoding="utf-8",
+    )
+    (path / "assistant_updates.jsonl").write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "season_id": "season_0",
+                "participant_id": f"season_0:{agent_handle}",
+                "phase": "scout",
+                "sub_phase": "project",
+                "kind": "intent",
+                "text": "I will inspect the repo.",
+                "tool_name": "repo_get_readme",
+            },
+            ensure_ascii=True,
+        )
         + "\n",
         encoding="utf-8",
     )

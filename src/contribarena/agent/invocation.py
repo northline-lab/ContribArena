@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Callable, Literal
+
+from contribarena.models.assistant_updates import AssistantUpdate
 
 from contribarena.models import AgentFinalResult
 from contribarena.models.goals import RunPhase, SubPhase
@@ -35,3 +37,6 @@ class AgentInvocationContext:
     sdk_session: Any | None = None
     current_phase: RunPhase = "scout"
     current_sub_phase: SubPhase = "project"
+    invocation_seq: int = 0
+    assistant_update_builder: Callable[[Any, Any], AssistantUpdate | None] | None = None
+    assistant_update_sink: Callable[[AssistantUpdate], None] | None = None

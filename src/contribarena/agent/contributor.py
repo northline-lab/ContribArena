@@ -348,7 +348,6 @@ class ContributorAgent:
                 aci_verify,
                 aci_suggest_verification,
                 aci_clean_generated,
-                operator_report_progress,
                 aci_runtime_get_context,
                 aci_memory_get_context,
                 aci_memory_search,
@@ -368,7 +367,15 @@ class ContributorAgent:
         )
         try:
             run_config = AgentsRunConfig(
-                model_provider=ActionGuardingModelProvider(model_provider),
+                model_provider=ActionGuardingModelProvider(
+                    model_provider,
+                    update_builder=invocation_context.assistant_update_builder
+                    if invocation_context is not None
+                    else None,
+                    update_sink=invocation_context.assistant_update_sink
+                    if invocation_context is not None
+                    else None,
+                ),
                 workflow_name="ContribArena M0.2.2" if config.issue else "ContribArena M0.2.1",
                 # trace.jsonl is the M0 source of truth; SDK spans can be enabled later.
                 tracing_disabled=True,
@@ -509,10 +516,10 @@ def build_agent_instructions(config: RunConfig) -> str:
         "once, or use aci_undo before trying a safer edit. Ask aci_suggest_verification "
         "when unsure how to test, verify locally with aci_verify or workspace_run. In Work, call "
         "aci_submit_patch to enter Review; in Review, respond with aci_dispute_review, "
-        "bounded edit plus aci_submit_patch, or aci_submit_patch_finalize. Use "
-        "operator_report_progress at phase boundaries or when discovery, selection, "
-        "verification, governance, or PR work would otherwise look silent; keep it short, "
-        "evidence-linked, and do not expose hidden chain-of-thought. Call "
+        "bounded edit plus aci_submit_patch, or aci_submit_patch_finalize. Before "
+        "meaningful tool calls, you may write one short visible update about the "
+        "observable action you are taking next; keep it evidence-oriented and do "
+        "not expose hidden chain-of-thought. Call "
         "aci_runtime_get_context(scope='run') early; it returns guidance availability, "
         "goal context, current phase/sub_phase, memory hints, and tracked PR summaries. Treat "
         "the long-term goal as direction, not a replacement for this run's concrete task. "
