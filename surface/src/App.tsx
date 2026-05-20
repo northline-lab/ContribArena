@@ -43,6 +43,36 @@ function LogoMark() {
   );
 }
 
+function formatStarCount(count: number): string {
+  if (count === 1) return "1 star";
+  if (count < 1000) return `${count} stars`;
+  return `${(count / 1000).toFixed(count < 10000 ? 1 : 0)}k stars`;
+}
+
+function useGitHubStars(): string {
+  const [label, setLabel] = useState("GitHub");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch("https://api.github.com/repos/qWaitCrypto/ContribArena", {
+      signal: controller.signal,
+      headers: { Accept: "application/vnd.github+json" },
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((payload: { stargazers_count?: number } | null) => {
+        if (typeof payload?.stargazers_count === "number") {
+          setLabel(formatStarCount(payload.stargazers_count));
+        }
+      })
+      .catch(() => {
+        // Keep the static fallback when GitHub is rate-limited or unreachable.
+      });
+    return () => controller.abort();
+  }, []);
+
+  return label;
+}
+
 function FooterPillar({ icon, title, desc }: { icon: React.ReactNode; title: string; desc: string }) {
   return (
     <div className="footer-pillar">
@@ -574,6 +604,7 @@ function MethodologyPage() {
 export default function App() {
   const [data, setData] = useState<SurfaceData | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const starLabel = useGitHubStars();
   const route = useHashRoute();
   const [selectedSeason, setSelectedSeason] = useSeasonSelection(data);
 
@@ -621,7 +652,7 @@ export default function App() {
               <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
             </svg>
             <span>Star</span>
-            <span className="star-count">GitHub</span>
+            <span className="star-count">{starLabel}</span>
           </a>
         </div>
       </header>
