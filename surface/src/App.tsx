@@ -12,7 +12,6 @@ import type {
 } from "./types";
 import {
   apiEnabled,
-  dataSourceLabel,
   defaultSeasonId,
   filterSurfaceBySeason,
   loadParticipantDetail,
