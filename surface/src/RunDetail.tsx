@@ -101,9 +101,12 @@ function EmptyEvidence({ label }: { label: string }) {
 }
 
 export function RunDetail({ run, surface }: { run: RunSummary; surface?: SurfaceData }) {
-  const pr = run.pull_request;
-  const mo = run.maintainer_outcome;
-  const publicArtifacts = run.artifacts.filter((a) => a.visibility === "public");
+  const pr = run.pull_request || { url: "", number: null, state: "unknown" };
+  const mo = run.maintainer_outcome || { status: "unknown", observed_at: "", source: "none" };
+  const qg = run.quality_gate || { status: "unknown", warnings: [] };
+  const judgement = run.judgement || { status: "unknown", judge_score: null, real_world_adjustment: 0, arena_score: null, rubric_summary: [], source_artifacts: [] };
+  const publicArtifacts = (run.artifacts || []).filter((a) => a.visibility === "public");
+  const pipeline = run.pipeline || [];
   const [evidenceState, setEvidenceState] = useState<{
     runId: string;
     loading: boolean;
@@ -183,15 +186,15 @@ export function RunDetail({ run, surface }: { run: RunSummary; surface?: Surface
       </div>
 
       <div className="score-breakdown">
-        <span>Judge <strong>{run.judgement.judge_score ?? "not judged"}</strong></span>
-        <span>Adjustment <strong>{run.judgement.real_world_adjustment}</strong></span>
-        <span>Arena <strong>{run.judgement.arena_score ?? "not judged"}</strong></span>
-        <span className={`badge badge-${run.judgement.status}`}>{run.judgement.status}</span>
+        <span>Judge <strong>{judgement.judge_score ?? "not judged"}</strong></span>
+        <span>Adjustment <strong>{judgement.real_world_adjustment}</strong></span>
+        <span>Arena <strong>{judgement.arena_score ?? "not judged"}</strong></span>
+        <span className={`badge badge-${judgement.status}`}>{judgement.status}</span>
       </div>
 
       {/* Mini pipeline timeline with timestamps */}
       <div className="run-timeline">
-        {run.pipeline.map((stage, idx) => {
+        {pipeline.map((stage, idx) => {
           const color = DOT_STATUS_COLOR[stage.status] ?? "var(--border)";
           return (
             <div key={stage.stage_id} style={{ display: "contents" }}>
@@ -206,7 +209,7 @@ export function RunDetail({ run, surface }: { run: RunSummary; surface?: Surface
                   <div className="timeline-stage-time">{fmtTime(stage.started_at)}</div>
                 )}
               </div>
-              {idx < run.pipeline.length - 1 && (
+              {idx < pipeline.length - 1 && (
                 <div className={`timeline-line ${stage.status === "passed" ? "passed" : ""}`} />
               )}
             </div>
@@ -307,7 +310,7 @@ export function RunDetail({ run, surface }: { run: RunSummary; surface?: Surface
               <span className="log-time">[{fmtTime(run.started_at)}]</span>{" "}
               <span className="log-level">INFO</span> {run.terminal_reason}
             </div>
-            {run.quality_gate.warnings.map((w, i) => (
+            {qg.warnings.map((w, i) => (
               <div key={i}>
                 <span className="log-time">[{fmtTime(run.completed_at)}]</span>{" "}
                 <span style={{ color: "#ce9178" }}>WARN</span> {w}

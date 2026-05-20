@@ -34,7 +34,7 @@ export function filterSurfaceBySeason(data: SurfaceData, seasonId: string): Surf
   if (!seasonId || seasonId === "all") return data;
   return {
     ...data,
-    runs: data.runs.filter((run) => run.season.id === seasonId),
+    runs: data.runs.filter((run) => run.season?.id === seasonId),
     leaderboard: data.leaderboard.filter((row) => row.season_id === seasonId),
   };
 }
@@ -43,7 +43,7 @@ export function seasonsFromSurface(data: SurfaceData): Season[] {
   if (data.seasons?.length) return [...data.seasons].sort((a, b) => a.id.localeCompare(b.id));
   const seasons = new Map<string, Season>();
   for (const run of data.runs) {
-    if (run.season.id) seasons.set(run.season.id, run.season);
+    if (run.season?.id) seasons.set(run.season.id, run.season);
   }
   for (const row of data.leaderboard) {
     if (!row.season_id || seasons.has(row.season_id)) continue;
@@ -87,7 +87,7 @@ export function participantsFromSurface(data: SurfaceData, seasonId: string): Pa
     const participantId = run.agent.participant_id || run.agent.handle || run.agent.name;
     if (!participantId) continue;
     const existing = buckets.get(participantId) ?? {
-      season_id: run.season.id,
+      season_id: run.season?.id,
       participant_id: participantId,
       agent_name: run.agent.name || "builtin",
       agent_handle: run.agent.handle || participantId,
@@ -104,17 +104,17 @@ export function participantsFromSurface(data: SurfaceData, seasonId: string): Pa
     };
     existing.runs_count += 1;
     if (run.run_status !== "completed") existing.failures += 1;
-    if (run.pull_request.url || ["open", "closed", "merged"].includes(run.pull_request.state)) {
+    if (run.pull_request?.url || ["open", "closed", "merged"].includes(run.pull_request?.state ?? "")) {
       existing.prs_opened += 1;
     }
-    if (run.pull_request.state === "merged" || run.maintainer_outcome.status === "merged") {
+    if (run.pull_request?.state === "merged" || run.maintainer_outcome?.status === "merged") {
       existing.merged_prs += 1;
     }
     if (run.started_at >= existing.last_run_at) {
       existing.last_run_at = run.started_at;
       existing.latest_run_id = run.run_id;
     }
-    if (run.judgement.arena_score != null) existing._scores.push(run.judgement.arena_score);
+    if (run.judgement?.arena_score != null) existing._scores.push(run.judgement.arena_score);
     existing.runs_detail?.push(run);
     buckets.set(participantId, existing);
   }

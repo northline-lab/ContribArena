@@ -61,10 +61,12 @@ const DOT_STATUS_COLOR: Record<string, string> = {
 };
 
 export function FeaturedRun({ run }: { run: RunSummary }) {
-  const pr = run.pull_request;
-  const mo = run.maintainer_outcome;
+  const pr = run.pull_request || { url: "", number: null, state: "unknown" };
+  const mo = run.maintainer_outcome || { status: "unknown", observed_at: "", source: "none" };
+  const qg = run.quality_gate || { status: "unknown", warnings: [] };
   const judgement = run.judgement;
-  const publicArtifacts = run.artifacts.filter((a) => a.visibility === "public");
+  const publicArtifacts = (run.artifacts || []).filter((a) => a.visibility === "public");
+  const pipeline = run.pipeline || [];
 
   return (
     <div className="featured-run-card">
@@ -109,7 +111,7 @@ export function FeaturedRun({ run }: { run: RunSummary }) {
       </div>
 
       <div className="run-timeline">
-        {run.pipeline.map((stage, idx) => {
+        {pipeline.map((stage, idx) => {
           const color = DOT_STATUS_COLOR[stage.status] ?? "var(--border)";
           return (
             <div key={stage.stage_id} style={{ display: "contents" }}>
@@ -124,7 +126,7 @@ export function FeaturedRun({ run }: { run: RunSummary }) {
                   <div className="timeline-stage-time">{fmtTime(stage.started_at)}</div>
                 )}
               </div>
-              {idx < run.pipeline.length - 1 && (
+              {idx < pipeline.length - 1 && (
                 <div className={`timeline-line ${stage.status === "passed" ? "passed" : ""}`} />
               )}
             </div>
@@ -133,12 +135,12 @@ export function FeaturedRun({ run }: { run: RunSummary }) {
       </div>
 
       <div className="featured-run-status-row">
-        <div className={`fr-status-chip fr-qg-${run.quality_gate.status}`}>
+        <div className={`fr-status-chip fr-qg-${qg.status}`}>
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-            {run.quality_gate.status === "pass" && <path d="M9 12l2 2 4-4" />}
+            {qg.status === "pass" && <path d="M9 12l2 2 4-4" />}
           </svg>
-          Quality Gate: <strong>{run.quality_gate.status}</strong>
+          Quality Gate: <strong>{qg.status}</strong>
         </div>
 
         {pr.url ? (
@@ -205,13 +207,13 @@ export function FeaturedRun({ run }: { run: RunSummary }) {
         </div>
       )}
 
-      {(run.terminal_reason || run.quality_gate.warnings.length > 0) && (
+      {(run.terminal_reason || qg.warnings.length > 0) && (
         <div className="fr-evidence-note">
           <span className="fr-evidence-label">run note</span>
           {run.terminal_reason && (
             <span className="fr-evidence-reason">{run.terminal_reason}</span>
           )}
-          {run.quality_gate.warnings.map((w, i) => (
+          {qg.warnings.map((w, i) => (
             <span key={i} className="fr-evidence-warn">{w}</span>
           ))}
         </div>

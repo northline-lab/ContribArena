@@ -29,9 +29,9 @@ import { RunDetail } from "./RunDetail";
 function pickFeaturedRun(runs: RunSummary[]): RunSummary | null {
   if (!runs.length) return null;
   return (
-    runs.find((r) => r.maintainer_outcome.status === "merged") ??
-    runs.find((r) => r.maintainer_outcome.status === "reviewed") ??
-    runs.find((r) => r.maintainer_outcome.status !== "pending" && r.maintainer_outcome.status !== "unknown") ??
+    runs.find((r) => r.maintainer_outcome?.status === "merged") ??
+    runs.find((r) => r.maintainer_outcome?.status === "reviewed") ??
+    runs.find((r) => r.maintainer_outcome?.status && r.maintainer_outcome.status !== "pending" && r.maintainer_outcome.status !== "unknown") ??
     runs[0]
   );
 }
@@ -155,8 +155,8 @@ function RunsPage({ runs }: { runs: RunSummary[] }) {
       run.agent.handle,
       run.agent.name,
       run.contribution_class,
-      run.quality_gate.status,
-      run.maintainer_outcome.status,
+      run.quality_gate?.status,
+      run.maintainer_outcome?.status,
     ].some((value) => String(value ?? "").toLowerCase().includes(normalizedQuery));
     return statusMatches && queryMatches;
   });
@@ -192,8 +192,8 @@ function RunsPage({ runs }: { runs: RunSummary[] }) {
               <strong>{run.repository.full_name || "unknown repo"}</strong>
               <em>{run.agent.participant_id || run.agent.handle || run.agent.name} · {run.wake_source} · {run.contribution_class}</em>
             </span>
-            <span>{run.judgement.arena_score ?? "–"}</span>
-            <span>{run.quality_gate.status}</span>
+            <span>{run.judgement?.arena_score ?? "–"}</span>
+            <span>{run.quality_gate?.status ?? "unknown"}</span>
             <span>{compactDate(run.started_at)}</span>
           </a>
         ))}
@@ -351,8 +351,8 @@ function ParticipantDetailPage({
                   <strong>{run.repository.full_name}</strong>
                   <em>{run.run_status} · {run.wake_source}</em>
                 </span>
-                <span>{run.judgement.arena_score ?? "–"}</span>
-                <span>{run.quality_gate.status}</span>
+                <span>{run.judgement?.arena_score ?? "–"}</span>
+                <span>{run.quality_gate?.status ?? "unknown"}</span>
                 <span>{compactDate(run.started_at)}</span>
               </a>
             ))}
