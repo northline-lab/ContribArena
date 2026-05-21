@@ -403,6 +403,45 @@ class JudgementScoringTests(unittest.TestCase):
             self.assertIsNone(updated["judgement"]["judge_score"])
             self.assertIsNone(updated["judgement"]["arena_score"])
 
+    def test_transient_judge_retry_exhaustion_marks_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            judgement = {
+                "status": "partial_fallback",
+                "judge_score": 10,
+                "arena_score": 10,
+                "judges": [
+                    {
+                        "judge_id": "responses_gpt55",
+                        "error": "APIConnectionError: Connection error.",
+                    }
+                ],
+            }
+            (run_dir / "judgement.json").write_text(
+                json.dumps(judgement, indent=2, ensure_ascii=True) + "\n",
+                encoding="utf-8",
+            )
+            summary = {
+                "run_id": "run-a",
+                "judgement": {"status": "partial_fallback", "judge_score": 10, "arena_score": 10},
+            }
+            (run_dir / "run_summary.json").write_text(
+                json.dumps(summary, indent=2, ensure_ascii=True) + "\n",
+                encoding="utf-8",
+            )
+            (run_dir / "judgement_retry_state.json").write_text(
+                json.dumps({"status": "due", "attempts": 3}, ensure_ascii=True) + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertTrue(mark_transient_judgement_retry_due(run_dir))
+
+            retry = json.loads((run_dir / "judgement_retry_state.json").read_text(encoding="utf-8"))
+            updated = json.loads((run_dir / "run_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual("failed", retry["status"])
+            self.assertEqual(4, retry["attempts"])
+            self.assertEqual("failed", updated["judgement"]["status"])
+
 
 def _config(output_root: Path, *, explicit_judges: bool = True) -> RunConfig:
     config = RunConfig(

@@ -2435,6 +2435,8 @@ class RunnerM02Test(unittest.TestCase):
             self.assertEqual(0, participant_state["active_runs"])
             self.assertEqual(result.run_id, participant_state["last_run_id"])
             self.assertEqual("completed", participant_state["last_run_status"])
+            self.assertEqual(result.run_id, participant_state["pending_run"]["run_id"])
+            self.assertEqual("completed", participant_state["pending_run"]["status"])
             self.assertEqual(0, participant_state["prs_opened"])
             self.assertEqual(0, participant_state["merged_prs"])
             self.assertEqual(0.0, participant_state["cumulative_cost"])

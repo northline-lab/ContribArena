@@ -17,6 +17,7 @@ from contribarena.errors import ConfigError
 
 
 SeasonStatus = Literal["draft", "active", "observing", "completed"]
+MAX_REPLACEMENT_ATTEMPTS = 5
 
 
 @dataclass(frozen=True)
@@ -438,17 +439,58 @@ def mark_participant_replacement_due(
     state = load_participant_state(store, config.run.season_id, config.run.participant_id)
     replacement = state.get("replacement")
     attempts = int(replacement.get("attempts") or 0) if isinstance(replacement, dict) else 0
+    next_attempt = attempts + 1
+    status = "due" if next_attempt <= MAX_REPLACEMENT_ATTEMPTS else "exhausted"
     state["replacement"] = {
-        "status": "due",
-        "attempts": attempts + 1,
+        "status": status,
+        "attempts": next_attempt,
+        "max_attempts": MAX_REPLACEMENT_ATTEMPTS,
         "source_run_id": run_id,
         "reason": reason,
         "layer": layer,
         "message": message[:500],
         "scheduled_at": datetime.now(UTC).isoformat(),
     }
-    state["replacement_due"] = True
+    state["replacement_due"] = status == "due"
     save_participant_state(store, config.run.season_id, config.run.participant_id, state)
+
+
+def mark_stale_participant_run_replacement_due(
+    store: SeasonStore,
+    season_id: str,
+    participant_id: str,
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    pending = state.get("pending_run")
+    if not isinstance(pending, dict):
+        return state
+    run_id = str(pending.get("run_id") or "")
+    if not run_id:
+        return state
+    replacement = state.get("replacement")
+    attempts = int(replacement.get("attempts") or 0) if isinstance(replacement, dict) else 0
+    next_attempt = attempts + 1
+    status = "due" if next_attempt <= MAX_REPLACEMENT_ATTEMPTS else "exhausted"
+    updated = dict(state)
+    updated["replacement"] = {
+        "status": status,
+        "attempts": next_attempt,
+        "max_attempts": MAX_REPLACEMENT_ATTEMPTS,
+        "source_run_id": run_id,
+        "reason": "run_interrupted",
+        "layer": "season_runtime",
+        "message": "previous participant run did not reach terminal state before runtime restart",
+        "scheduled_at": datetime.now(UTC).isoformat(),
+    }
+    updated["replacement_due"] = status == "due"
+    updated["active_runs"] = 0
+    pending = dict(pending)
+    pending["status"] = "stale"
+    pending["stale_at"] = datetime.now(UTC).isoformat()
+    updated["interrupted_run"] = pending
+    updated["pending_run"] = pending
+    save_participant_state(store, season_id, participant_id, updated)
+    return updated
 
 
 def mark_participant_replacement_consumed(
@@ -579,6 +621,7 @@ def mark_participant_run_started(
     season_id: str,
     participant_id: str,
     *,
+    run_id: str = "",
     repo_slug: str,
     wake_source: str,
     increment_active: bool = True,
@@ -594,6 +637,13 @@ def mark_participant_run_started(
             "last_repo_slug": repo_slug,
             "last_wake_source": wake_source,
             "next_wake_at": "",
+            "pending_run": {
+                "run_id": run_id,
+                "repo_slug": repo_slug,
+                "wake_source": wake_source,
+                "started_at": now,
+                "status": "running",
+            },
             "active_runs": int(state.get("active_runs") or 0) + (1 if increment_active else 0),
         }
     )
@@ -637,6 +687,11 @@ def mark_participant_run_finished(
             "cumulative_cost": float(state.get("cumulative_cost") or 0.0),
         }
     )
+    pending = state.get("pending_run")
+    if isinstance(pending, dict) and str(pending.get("run_id") or "") in {run_id, "pending"}:
+        pending = dict(pending)
+        pending.update({"run_id": run_id, "status": "completed", "completed_at": now})
+        state["pending_run"] = pending
     replacement = state.get("replacement")
     if isinstance(replacement, dict) and replacement.get("status") == "running":
         replacement = dict(replacement)

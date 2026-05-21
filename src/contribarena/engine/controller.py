@@ -33,6 +33,7 @@ from contribarena.engine.seasons import (
     load_participant_state,
     mark_participant_replacement_consumed,
     mark_participant_run_started,
+    mark_stale_participant_run_replacement_due,
     participant_next_wake_at,
     participant_is_due,
     participant_id_for,
@@ -200,7 +201,7 @@ class LocalController:
             return None
         lifecycle_tick = self._run_external_lifecycle_tick(config)
         judgement_tick = _refresh_due_season_judgements(config, season.id)
-        if judgement_tick is not None:
+        if judgement_tick is not None and judgement_tick.status == "judgement_refreshed":
             return judgement_tick
         due: list[tuple[str, SeasonParticipantConfig, dict[str, object]]] = []
         for participant in season.participants:
@@ -208,6 +209,13 @@ class LocalController:
                 continue
             participant_id = participant_id_for(season, participant)
             participant_state = load_participant_state(store, season.id, participant_id)
+            participant_state = _mark_stale_pending_run_if_due(
+                store,
+                config,
+                season.id,
+                participant_id,
+                participant_state,
+            )
             if int(participant_state.get("active_runs") or 0) >= participant_max_concurrent(
                 season,
                 participant,
@@ -281,6 +289,7 @@ class LocalController:
                 store,
                 season.id,
                 participant_id,
+                run_id="pending",
                 repo_slug=repo_slug,
                 wake_source="auto",
                 increment_active=False,
@@ -487,6 +496,43 @@ def _refresh_due_season_judgements(config: RunConfig, season_id: str) -> Control
     if result.skipped:
         return ControllerTickResult(status="judgement_refresh_failed")
     return None
+
+
+def _mark_stale_pending_run_if_due(
+    store: SeasonStore,
+    config: RunConfig,
+    season_id: str,
+    participant_id: str,
+    state: dict[str, object],
+) -> dict[str, object]:
+    pending = state.get("pending_run")
+    if not isinstance(pending, dict) or str(pending.get("status") or "") != "running":
+        return state
+    run_id = str(pending.get("run_id") or "")
+    if not run_id:
+        return state
+    if run_id != "pending" and str(state.get("last_run_id") or "") == run_id:
+        return state
+    started_at = str(pending.get("started_at") or state.get("last_run_started_at") or "")
+    if not _pending_run_is_stale(started_at, config.run.budget.max_wall_time_seconds):
+        return state
+    return mark_stale_participant_run_replacement_due(
+        store,
+        season_id,
+        participant_id,
+        dict(state),
+    )
+
+
+def _pending_run_is_stale(started_at: str, max_wall_time_seconds: int | None) -> bool:
+    try:
+        started = datetime.fromisoformat(started_at)
+    except ValueError:
+        return True
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=UTC)
+    grace = int(max_wall_time_seconds or 0) + 600
+    return (datetime.now(UTC) - started).total_seconds() >= max(600, grace)
 
 
 def _active_short_term_goal(config: RunConfig) -> bool:

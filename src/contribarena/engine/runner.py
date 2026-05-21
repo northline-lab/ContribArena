@@ -260,6 +260,7 @@ class Runner:
                     SeasonStore.from_config(config),
                     admission.season_id,
                     admission.participant_id,
+                    run_id=run_id,
                     repo_slug=repo_slug,
                     wake_source=admission.wake_source,
                 )

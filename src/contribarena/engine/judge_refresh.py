@@ -31,6 +31,7 @@ TRANSIENT_JUDGE_MARKERS = (
     "bad gateway",
     "gateway timeout",
 )
+MAX_JUDGEMENT_RETRY_ATTEMPTS = 3
 
 
 @dataclass(frozen=True)
@@ -123,15 +124,18 @@ def mark_transient_judgement_retry_due(run_dir: Path) -> bool:
         else summary.get("judgement_retry")
     )
     attempts = int(existing.get("attempts") or 0) if isinstance(existing, dict) else 0
+    next_attempt = attempts + 1
+    status = "due" if next_attempt <= MAX_JUDGEMENT_RETRY_ATTEMPTS else "failed"
     retry_state = {
-        "status": "due",
-        "attempts": attempts + 1,
+        "status": status,
+        "attempts": next_attempt,
+        "max_attempts": MAX_JUDGEMENT_RETRY_ATTEMPTS,
         "reason": "transient_judge_failure",
         "source": "judge_panel",
     }
     _write_json(run_dir / "judgement_retry_state.json", retry_state)
     summary["judgement_retry"] = retry_state
-    judgement["status"] = "deferred"
+    judgement["status"] = "deferred" if status == "due" else "failed"
     judgement["judge_score"] = None
     judgement["arena_score"] = None
     if judgement_path.exists():
@@ -168,7 +172,14 @@ def refresh_due_judgements(
                 force=True,
             )
         except Exception as exc:
-            state["status"] = "due" if _transient_text(str(exc)) else "failed"
+            attempts = int(state.get("attempts") or 0) + 1
+            state["attempts"] = attempts
+            state["max_attempts"] = MAX_JUDGEMENT_RETRY_ATTEMPTS
+            state["status"] = (
+                "due"
+                if _transient_text(str(exc)) and attempts < MAX_JUDGEMENT_RETRY_ATTEMPTS
+                else "failed"
+            )
             state["last_error"] = str(exc)[:500]
             _write_json(run_dir / "judgement_retry_state.json", state)
             skipped.append(f"{run_dir}: {exc}")
