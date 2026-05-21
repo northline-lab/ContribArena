@@ -212,12 +212,12 @@ class SurfaceReadModel:
             f"{where} order by started_at desc, run_id limit ? offset ?"
         )
         with self._connect() as db:
-            return _payloads(db.execute(query, params))
+            return [_annotate_ranking_state(run) for run in _payloads(db.execute(query, params))]
 
     def run(self, run_id: str) -> dict[str, Any] | None:
         with self._connect() as db:
             row = db.execute("select payload_json from runs where run_id = ?", (run_id,)).fetchone()
-        return json.loads(row[0]) if row else None
+        return _annotate_ranking_state(json.loads(row[0])) if row else None
 
     def participants(self, season_id: str | None = None) -> list[dict[str, Any]]:
         query = "select payload_json from participants"
@@ -1128,6 +1128,30 @@ def _judgement_retry_excluded(run: dict[str, Any]) -> bool:
 
 def _ranking_excluded(run: dict[str, Any]) -> bool:
     return _replacement_excluded(run) or _judgement_retry_excluded(run)
+
+
+def _ranking_exclusion_reason(run: dict[str, Any]) -> str:
+    replacement = run.get("replacement")
+    if isinstance(replacement, dict) and str(replacement.get("status") or "") in {
+        "due",
+        "replaced",
+    }:
+        return f"replacement_{replacement.get('status')}"
+    retry = run.get("judgement_retry")
+    if isinstance(retry, dict) and str(retry.get("status") or "") in {"due", "running"}:
+        return f"judgement_retry_{retry.get('status')}"
+    judgement = run.get("judgement", {}) if isinstance(run.get("judgement"), dict) else {}
+    if str(judgement.get("status") or "") == "deferred":
+        return "judgement_deferred"
+    return ""
+
+
+def _annotate_ranking_state(run: dict[str, Any]) -> dict[str, Any]:
+    annotated = dict(run)
+    reason = _ranking_exclusion_reason(annotated)
+    annotated["ranking_excluded"] = bool(reason)
+    annotated["ranking_exclusion_reason"] = reason
+    return annotated
 
 
 def _agent_display_name(run: dict[str, Any], agent: dict[str, Any]) -> str:

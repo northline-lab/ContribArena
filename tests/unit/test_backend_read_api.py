@@ -212,6 +212,10 @@ class BackendReadApiTests(unittest.TestCase):
 
             self.assertEqual(1, model.stats("season_0")["runs"])
             self.assertEqual(["qwen-3.6-plus"], [row["agent_name"] for row in model.leaderboard("season_0")])
+            runs = model.runs(season_id="season_0")
+            excluded = next(run for run in runs if run["run_id"] == "run-b")
+            self.assertTrue(excluded["ranking_excluded"])
+            self.assertEqual("judgement_retry_due", excluded["ranking_exclusion_reason"])
 
     def test_builtin_agent_name_is_normalized_from_participant_for_read_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

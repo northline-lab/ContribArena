@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 
 from contribarena.cli import app
 from contribarena.engine.runner import RunResult
+from contribarena.errors import ContribArenaError
 
 
 class CliTest(unittest.TestCase):
@@ -375,6 +376,84 @@ class CliTest(unittest.TestCase):
             self.assertIn("Paused:      true", status.output)
             self.assertIn('"heartbeat"', inspect.output)
             self.assertIn("Season season_0: resumed", resume.output)
+
+    def test_season_start_blocks_when_provider_preflight_fails(self) -> None:
+        runner = CliRunner()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.yaml"
+            self.assertEqual(
+                0,
+                runner.invoke(app, ["init", "--output", str(config_path)]).exit_code,
+            )
+            text = config_path.read_text(encoding="utf-8")
+            config_path.write_text(
+                text
+                + f"\nartifacts:\n  output_root: {root / 'runs'}\n"
+                + f"\nbackend:\n  read_model_path: {root / 'read.sqlite'}\n"
+                + "\nseason:\n"
+                + "  id: season_0\n"
+                + "  name: Season 0\n"
+                + f"  state_root: {root / 'seasons'}\n"
+                + "  participants:\n"
+                + "    - model: compatible/bad\n",
+                encoding="utf-8",
+            )
+
+            with patch("contribarena.cli.check_season_provider_connectivity") as check_connectivity:
+                check_connectivity.return_value.checks = []
+                with patch("contribarena.cli.raise_for_provider_preflight") as raise_preflight:
+                    raise_preflight.side_effect = ContribArenaError("preflight failed")
+                    start = runner.invoke(
+                        app,
+                        ["season", "start", "--config", str(config_path), "--max-heartbeats", "1"],
+                    )
+
+            self.assertNotEqual(0, start.exit_code)
+            self.assertIn("preflight failed", start.output)
+
+    def test_season_start_can_skip_provider_preflight(self) -> None:
+        runner = CliRunner()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.yaml"
+            self.assertEqual(
+                0,
+                runner.invoke(app, ["init", "--output", str(config_path)]).exit_code,
+            )
+            text = config_path.read_text(encoding="utf-8")
+            config_path.write_text(
+                text
+                + f"\nartifacts:\n  output_root: {root / 'runs'}\n"
+                + f"\nbackend:\n  read_model_path: {root / 'read.sqlite'}\n"
+                + "\nseason:\n"
+                + "  id: season_0\n"
+                + "  name: Season 0\n"
+                + f"  state_root: {root / 'seasons'}\n"
+                + "  participants:\n"
+                + "    - model: local-stub\n",
+                encoding="utf-8",
+            )
+
+            with patch("contribarena.cli.check_season_provider_connectivity") as check:
+                with patch("contribarena.engine.season_runtime.LocalController.run_once") as run_once:
+                    run_once.return_value.status = "season_no_eligible_participant"
+                    start = runner.invoke(
+                        app,
+                        [
+                            "season",
+                            "start",
+                            "--config",
+                            str(config_path),
+                            "--max-heartbeats",
+                            "1",
+                            "--skip-provider-preflight",
+                        ],
+                    )
+
+            self.assertEqual(0, start.exit_code, start.output)
+            check.assert_not_called()
+            self.assertIn("Season season_0: ok", start.output)
 
     def test_season_workspace_clean_removes_workspaces_and_memory_only(self) -> None:
         runner = CliRunner()

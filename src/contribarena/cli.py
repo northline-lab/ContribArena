@@ -16,6 +16,10 @@ from contribarena.config.schema import DEFAULT_READ_MODEL_RELATIVE
 from contribarena.engine import LocalController, Runner
 from contribarena.engine.api import create_app
 from contribarena.engine.judge_refresh import refresh_judgement
+from contribarena.engine.provider_preflight import (
+    check_season_provider_connectivity,
+    raise_for_provider_preflight,
+)
 from contribarena.engine.read_model import SurfaceReadModel
 from contribarena.engine.seasons import (
     SeasonStore,
@@ -118,6 +122,7 @@ def season_start(
     season_id: str | None = None,
     heartbeat_interval: str | None = typer.Option(None, "--heartbeat-interval"),
     max_heartbeats: int | None = typer.Option(None, "--max-heartbeats", min=1),
+    skip_provider_preflight: bool = typer.Option(False, "--skip-provider-preflight"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Start or resume the long-running season heartbeat."""
@@ -128,6 +133,15 @@ def season_start(
             if heartbeat_interval is not None
             else None
         )
+        if not skip_provider_preflight:
+            typer.echo("Checking season provider connectivity...")
+            preflight = check_season_provider_connectivity(run_config, season_id=season_id)
+            raise_for_provider_preflight(preflight)
+            checked = [check for check in preflight.checks if check.status != "skipped"]
+            skipped = [check for check in preflight.checks if check.status == "skipped"]
+            typer.echo(
+                f"Provider preflight passed: {len(checked)} checked, {len(skipped)} skipped."
+            )
         result = SeasonRuntime().start(
             run_config,
             season_id=season_id,
@@ -136,7 +150,7 @@ def season_start(
             verbose=verbose,
         )
     except KeyboardInterrupt:
-        typer.echo("Season runtime interrupted; season state was left unchanged.")
+        typer.echo("Season runtime interrupted; runtime state was marked interrupted.")
         return
     except ContribArenaError as exc:
         typer.echo(str(exc), err=True)
