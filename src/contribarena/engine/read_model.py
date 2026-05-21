@@ -569,6 +569,13 @@ def _create_schema(db: sqlite3.Connection) -> None:
             payload_json text not null,
             primary key (run_id, seq)
         );
+        """
+    )
+    _ensure_column(db, "runs", "participant_id", "text not null default ''")
+    _ensure_column(db, "runs", "wake_source", "text not null default ''")
+    _ensure_column(db, "runs", "repo_slug", "text not null default ''")
+    db.executescript(
+        """
         create index if not exists idx_runs_season on runs(season_id);
         create index if not exists idx_runs_participant on runs(participant_id);
         create index if not exists idx_runs_agent on runs(agent_handle);
@@ -582,9 +589,6 @@ def _create_schema(db: sqlite3.Connection) -> None:
         create index if not exists idx_assistant_updates_run on assistant_updates(run_id);
         """
     )
-    _ensure_column(db, "runs", "participant_id", "text not null default ''")
-    _ensure_column(db, "runs", "wake_source", "text not null default ''")
-    _ensure_column(db, "runs", "repo_slug", "text not null default ''")
 
 
 def _replace_data(

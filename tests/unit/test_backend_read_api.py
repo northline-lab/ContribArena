@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -65,6 +66,36 @@ class BackendReadApiTests(unittest.TestCase):
             self.assertEqual("I will inspect the repo.", model.assistant_updates("run-a")[0]["text"])
             self.assertEqual("work", model.phase_history("run-a")[0]["phase"])
             self.assertEqual("aci_submit_patch", model.tool_violations("run-a")[0]["tool"])
+
+    def test_read_model_migrates_existing_runs_table_before_indexing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db_path = root / "read.sqlite"
+            with sqlite3.connect(db_path) as db:
+                db.execute(
+                    """
+                    create table runs (
+                        run_id text primary key,
+                        season_id text not null,
+                        agent_handle text not null,
+                        agent_name text not null,
+                        run_status text not null,
+                        started_at text not null,
+                        payload_json text not null
+                    )
+                    """
+                )
+
+            model = SurfaceReadModel(db_path)
+            model.initialize()
+
+            with sqlite3.connect(db_path) as db:
+                columns = {str(row[1]) for row in db.execute("pragma table_info(runs)").fetchall()}
+                indexes = {str(row[1]) for row in db.execute("pragma index_list(runs)").fetchall()}
+            self.assertIn("participant_id", columns)
+            self.assertIn("wake_source", columns)
+            self.assertIn("repo_slug", columns)
+            self.assertIn("idx_runs_participant", indexes)
 
     def test_api_registers_read_routes_and_model_serves_payloads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
