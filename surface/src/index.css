@@ -500,9 +500,9 @@ button {
   height: 52px;
   right: -20px;
   top: 20px;
-  border-right: 2px solid #a06410;
-  border-bottom: 2px solid #a06410;
-  border-radius: 0 0 28px 0;
+  border: none;
+  border-radius: 0;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='48' height='52' fill='none'%3E%3Cpath d='M42 2C40 16 32 30 18 40C14 43 10 47 6 50' stroke='%23a06410' stroke-width='1.5' stroke-linecap='round'/%3E%3Cpath d='M9 46L6 50L10 51' stroke='%23a06410' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat center / contain;
   transform: rotate(-12deg);
 }
 
@@ -523,9 +523,9 @@ button {
   height: 34px;
   left: 68px;
   top: 22px;
-  border-bottom: 2px solid #a06410;
-  border-right: 2px solid #a06410;
-  border-radius: 0 0 32px 0;
+  border: none;
+  border-radius: 0;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='62' height='34' fill='none'%3E%3Cpath d='M2 4C10 14 26 22 44 28C50 30 56 31 60 30' stroke='%23a06410' stroke-width='1.5' stroke-linecap='round'/%3E%3Cpath d='M57 27L60 30L57 33' stroke='%23a06410' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat center / contain;
   transform: rotate(12deg);
 }
 
@@ -540,9 +540,9 @@ button {
   height: 28px;
   right: 50px;
   top: 12px;
-  border-bottom: 2px solid #a06410;
-  border-left: 2px solid #a06410;
-  border-radius: 0 0 0 30px;
+  border: none;
+  border-radius: 0;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='52' height='28' fill='none'%3E%3Cpath d='M50 2C42 8 28 16 14 22C10 24 6 25 2 26' stroke='%23a06410' stroke-width='1.5' stroke-linecap='round'/%3E%3Cpath d='M6 23L2 26L5 28' stroke='%23a06410' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat center / contain;
 }
 
 .hero-pipeline {
@@ -1773,6 +1773,15 @@ button {
   gap: 20px;
   color: var(--ink-faint);
   font-size: 12px;
+}
+
+.footer-bottom > span:first-child {
+  flex: 1;
+}
+
+.footer-bottom > .footer-data-source {
+  flex: 1;
+  text-align: right;
 }
 
 .footer-script {
