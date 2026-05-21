@@ -8,6 +8,7 @@ from typing import Any
 
 from contribarena.config.schema import RunConfig
 from contribarena.engine.seasons import derive_participant_id
+from contribarena.engine.seasons import normalize_model_identity
 from contribarena.models.artifacts import ArtifactEntry
 from contribarena.models.lifecycle import TerminalState
 from contribarena.models.surface import (
@@ -97,6 +98,8 @@ def build_run_summary(
         workspace={
             "persistent_metadata_path": str(config.workspace.persistent_metadata_path or ""),
         },
+        replacement=_replacement_payload(run_dir, terminal),
+        judgement_retry=_judgement_retry_payload(run_dir),
     )
 
 
@@ -105,10 +108,53 @@ def _agent(config: RunConfig) -> SurfaceAgent:
     participant_id = config.run.participant_id or (
         derive_participant_id(season_id, config.run.model) if season_id else ""
     )
+    display_name = normalize_model_identity(participant_id or config.run.model)
     return SurfaceAgent(
-        name="builtin",
-        handle=participant_id or config.run.model,
+        name=display_name,
+        handle=display_name,
         participant_id=participant_id,
+    )
+
+
+def _replacement_payload(run_dir: Path, terminal: TerminalState) -> dict[str, object]:
+    path = run_dir / "replacement_state.json"
+    if path.exists():
+        payload = _read_json(path)
+        return payload if isinstance(payload, dict) else {}
+    if terminal.layer in {"model_runtime", "pr"} and _transient_message(terminal.message):
+        return {
+            "status": "due",
+            "reason": terminal.reason,
+            "layer": terminal.layer,
+            "source": "terminal_state",
+        }
+    return {}
+
+
+def _judgement_retry_payload(run_dir: Path) -> dict[str, object]:
+    path = run_dir / "judgement_retry_state.json"
+    if not path.exists():
+        return {}
+    payload = _read_json(path)
+    return payload if isinstance(payload, dict) else {}
+
+
+def _transient_message(message: str) -> bool:
+    text = message.lower()
+    return any(
+        marker in text
+        for marker in (
+            "apiconnectionerror",
+            "connection error",
+            "connection reset",
+            "socket reset",
+            "timeout",
+            "timed out",
+            "503",
+            "502",
+            "504",
+            "service unavailable",
+        )
     )
 
 

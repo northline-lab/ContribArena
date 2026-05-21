@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from contribarena.engine.seasons import normalize_model_identity
 from contribarena.errors import InfrastructureError
 from contribarena.models.surface import RunSummary
 
@@ -163,6 +164,7 @@ def build_leaderboard_snapshot(
         run
         for run in public_runs
         if isinstance(run.get("season"), dict) and run["season"].get("id") == season_id
+        and not _ranking_excluded(run)
     ]
     generated_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     return {
@@ -209,7 +211,17 @@ def _normalize_run_summary(payload: dict[str, Any]) -> dict[str, Any]:
     normalized.setdefault("run_id", "")
     normalized.setdefault("run_mode", "")
     normalized.setdefault("model", "")
-    normalized.setdefault("agent", {"name": "builtin", "handle": ""})
+    agent = normalized.get("agent")
+    if not isinstance(agent, dict):
+        agent = {}
+    display_name = _agent_display_name(normalized, agent)
+    participant_id = str(agent.get("participant_id") or "")
+    normalized["agent"] = {
+        **agent,
+        "name": display_name,
+        "handle": str(agent.get("handle") or display_name),
+        "participant_id": participant_id,
+    }
     normalized.setdefault("repository", {"full_name": "", "url": ""})
     normalized.setdefault("season", {"id": "", "name": "", "phase": "unknown"})
     normalized.setdefault("opportunity_source", "none")
@@ -366,13 +378,16 @@ def _copy_public_artifacts(
 def _leaderboard(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     buckets: dict[tuple[str, str, str], dict[str, Any]] = {}
     for run in runs:
+        if _ranking_excluded(run):
+            continue
         agent = run.get("agent", {}) if isinstance(run.get("agent"), dict) else {}
         season = run.get("season", {}) if isinstance(run.get("season"), dict) else {}
         participant_id = str(agent.get("participant_id") or "")
-        agent_handle = str(agent.get("handle") or agent.get("name") or "builtin")
+        agent_name = _agent_display_name(run, agent)
+        agent_handle = str(agent.get("handle") or agent_name)
         handle = participant_id or agent_handle
         season_id = str(season.get("id") or "")
-        key = (season_id, handle, str(agent.get("name") or "builtin"))
+        key = (season_id, handle, agent_name)
         bucket = buckets.setdefault(
             key,
             {
@@ -380,7 +395,7 @@ def _leaderboard(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "season_name": str(season.get("name") or ""),
                 "season_phase": str(season.get("phase") or "unknown"),
                 "participant_id": participant_id,
-                "agent_name": str(agent.get("name") or "builtin"),
+                "agent_name": agent_name,
                 "agent_handle": agent_handle,
                 "runs": 0,
                 "prs_opened": 0,
@@ -483,6 +498,8 @@ def _seasons(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seasons: dict[str, dict[str, Any]] = {}
     participant_counts: dict[str, set[str]] = {}
     for run in runs:
+        if _ranking_excluded(run):
+            continue
         season = run.get("season", {}) if isinstance(run.get("season"), dict) else {}
         agent = run.get("agent", {}) if isinstance(run.get("agent"), dict) else {}
         season_id = str(season.get("id") or "")
@@ -539,6 +556,8 @@ def _merge_season_state(input_dir: Path, seasons: list[dict[str, Any]]) -> list[
                 "heartbeat": state.get("heartbeat", {}) if isinstance(state.get("heartbeat"), dict) else {},
                 "transitions": state.get("transitions", []) if isinstance(state.get("transitions"), list) else [],
                 "runtime_events": state.get("runtime_events", []) if isinstance(state.get("runtime_events"), list) else [],
+                "runtime_status": str(state.get("runtime_status") or ""),
+                "next_tick_at": str(state.get("next_tick_at") or ""),
                 "updated_at": str(state.get("updated_at") or ""),
                 "leaderboard_frozen": (state_path.parent / "leaderboard_snapshot.json").exists(),
             }
@@ -563,6 +582,8 @@ def _participants(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     participants: dict[tuple[str, str], dict[str, Any]] = {}
     scores: dict[tuple[str, str], list[float]] = {}
     for run in runs:
+        if _ranking_excluded(run):
+            continue
         season = run.get("season", {}) if isinstance(run.get("season"), dict) else {}
         agent = run.get("agent", {}) if isinstance(run.get("agent"), dict) else {}
         season_id = str(season.get("id") or "")
@@ -575,7 +596,7 @@ def _participants(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
             {
                 "season_id": season_id,
                 "participant_id": participant_id,
-                "agent_name": str(agent.get("name") or "builtin"),
+                "agent_name": _agent_display_name(run, agent),
                 "agent_handle": str(agent.get("handle") or participant_id),
                 "runs_count": 0,
                 "prs_opened": 0,
@@ -606,6 +627,7 @@ def _participants(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _stats(runs: list[dict[str, Any]]) -> dict[str, Any]:
+    runs = [run for run in runs if not _ranking_excluded(run)]
     prs_opened = sum(1 for run in runs if _pr_opened(run))
     judged_runs = sum(1 for run in runs if _judged(run))
     merged_prs = sum(1 for run in runs if _merged(run))
@@ -660,6 +682,39 @@ def _merged(run: dict[str, Any]) -> bool:
 def _judged(run: dict[str, Any]) -> bool:
     judgement = run.get("judgement", {}) if isinstance(run.get("judgement"), dict) else {}
     return judgement.get("status") in {"judged", "partial_fallback", "fallback"}
+
+
+def _replacement_excluded(run: dict[str, Any]) -> bool:
+    replacement = run.get("replacement")
+    if not isinstance(replacement, dict):
+        return False
+    return str(replacement.get("status") or "") in {"due", "replaced"}
+
+
+def _judgement_retry_excluded(run: dict[str, Any]) -> bool:
+    retry = run.get("judgement_retry")
+    if not isinstance(retry, dict):
+        return False
+    if str(retry.get("status") or "") in {"due", "running"}:
+        return True
+    judgement = run.get("judgement", {}) if isinstance(run.get("judgement"), dict) else {}
+    return str(judgement.get("status") or "") == "deferred"
+
+
+def _ranking_excluded(run: dict[str, Any]) -> bool:
+    return _replacement_excluded(run) or _judgement_retry_excluded(run)
+
+
+def _agent_display_name(run: dict[str, Any], agent: dict[str, Any]) -> str:
+    for raw in (
+        str(agent.get("name") or ""),
+        str(agent.get("handle") or ""),
+        str(agent.get("participant_id") or ""),
+        str(run.get("model") or ""),
+    ):
+        if raw and raw != "builtin":
+            return normalize_model_identity(raw)
+    return normalize_model_identity(str(run.get("model") or "unknown"))
 
 
 def _discovery_calls(loaded_runs: list[_LoadedRun]) -> dict[str, list[dict[str, Any]]]:

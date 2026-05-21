@@ -4,6 +4,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from contribarena.config.schema import (
@@ -14,7 +15,7 @@ from contribarena.config.schema import (
     RunSection,
     WorkspaceConfig,
 )
-from contribarena.engine.api import create_app
+from contribarena.engine.api import _default_season_id, _surface_bundle_for_season, create_app
 from contribarena.engine.read_model import SurfaceReadModel
 
 
@@ -71,7 +72,7 @@ class BackendReadApiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             db_path = root / "read.sqlite"
-            with sqlite3.connect(db_path) as db:
+            with closing(sqlite3.connect(db_path)) as db:
                 db.execute(
                     """
                     create table runs (
@@ -85,11 +86,12 @@ class BackendReadApiTests(unittest.TestCase):
                     )
                     """
                 )
+                db.commit()
 
             model = SurfaceReadModel(db_path)
             model.initialize()
 
-            with sqlite3.connect(db_path) as db:
+            with closing(sqlite3.connect(db_path)) as db:
                 columns = {str(row[1]) for row in db.execute("pragma table_info(runs)").fetchall()}
                 indexes = {str(row[1]) for row in db.execute("pragma index_list(runs)").fetchall()}
             self.assertIn("participant_id", columns)
@@ -130,6 +132,116 @@ class BackendReadApiTests(unittest.TestCase):
             self.assertIsNotNone(model.public_artifact_path("run-a", "patch.diff"))
             self.assertIsNone(model.public_artifact_path("run-a", "trace.jsonl"))
 
+    def test_default_api_scope_prefers_active_season_over_old_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runs_dir = root / "runs"
+            _write_run(
+                runs_dir / "old-run",
+                run_id="old-run",
+                agent_handle="old-agent",
+                season_id="old_test",
+            )
+            _write_run(
+                runs_dir / "season-run",
+                run_id="season-run",
+                agent_handle="gpt-5.5",
+                season_id="season_0",
+            )
+            state_dir = root / "seasons" / "season_0"
+            state_dir.mkdir(parents=True)
+            (state_dir / "season_state.json").write_text(
+                json.dumps(
+                    {"season_id": "season_0", "name": "Season 0", "status": "active"},
+                    ensure_ascii=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            old_state_dir = root / "seasons" / "old_test"
+            old_state_dir.mkdir(parents=True)
+            (old_state_dir / "season_state.json").write_text(
+                json.dumps(
+                    {"season_id": "old_test", "name": "Old Test", "status": "unknown"},
+                    ensure_ascii=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            model = SurfaceReadModel(root / "read.sqlite")
+            model.refresh_from_artifacts(runs_dir)
+
+            self.assertEqual("season_0", _default_season_id(model))
+            self.assertEqual(1, model.stats(_default_season_id(model))["runs"])
+            self.assertEqual("season-run", model.runs(season_id=_default_season_id(model))[0]["run_id"])
+            scoped = _surface_bundle_for_season(model, _default_season_id(model))
+            self.assertEqual(["season-run"], [run["run_id"] for run in scoped["runs"]])
+            self.assertEqual(["season_0"], [season["id"] for season in scoped["seasons"]])
+            self.assertEqual(["season_0:gpt-5.5"], [row["participant_id"] for row in scoped["participants"]])
+
+    def test_deferred_judgement_retry_is_excluded_from_default_rankings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runs_dir = root / "runs"
+            _write_run(
+                runs_dir / "run-a",
+                run_id="run-a",
+                agent_handle="qwen-3.6-plus",
+                season_id="season_0",
+            )
+            _write_run(
+                runs_dir / "run-b",
+                run_id="run-b",
+                agent_handle="gpt-5.5",
+                season_id="season_0",
+            )
+            summary_path = runs_dir / "run-b" / "run_summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary["judgement"]["status"] = "deferred"
+            summary["judgement"]["judge_score"] = None
+            summary["judgement"]["arena_score"] = None
+            summary["judgement_retry"] = {"status": "due", "reason": "transient_judge_failure"}
+            summary_path.write_text(
+                json.dumps(summary, indent=2, ensure_ascii=True) + "\n",
+                encoding="utf-8",
+            )
+
+            model = SurfaceReadModel(root / "read.sqlite")
+            model.refresh_from_artifacts(runs_dir)
+
+            self.assertEqual(1, model.stats("season_0")["runs"])
+            self.assertEqual(["qwen-3.6-plus"], [row["agent_name"] for row in model.leaderboard("season_0")])
+
+    def test_builtin_agent_name_is_normalized_from_participant_for_read_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runs_dir = root / "runs"
+            _write_run(
+                runs_dir / "run-a",
+                run_id="run-a",
+                agent_handle="builtin",
+                season_id="season_0",
+            )
+            summary_path = runs_dir / "run-a" / "run_summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary["model"] = "responses/gpt55"
+            summary["agent"] = {
+                "name": "builtin",
+                "handle": "builtin",
+                "participant_id": "season_0:gpt-5.5",
+            }
+            summary_path.write_text(
+                json.dumps(summary, indent=2, ensure_ascii=True) + "\n",
+                encoding="utf-8",
+            )
+
+            model = SurfaceReadModel(root / "read.sqlite")
+            model.refresh_from_artifacts(runs_dir)
+
+            self.assertEqual(["gpt-5.5"], [row["agent_name"] for row in model.leaderboard("season_0")])
+            self.assertEqual("gpt-5.5", model.runs(season_id="season_0")[0]["agent"]["name"])
+
 
 def _config(root: Path) -> RunConfig:
     return RunConfig(
@@ -149,7 +261,13 @@ def _config(root: Path) -> RunConfig:
     )
 
 
-def _write_run(path: Path, *, run_id: str, agent_handle: str) -> None:
+def _write_run(
+    path: Path,
+    *,
+    run_id: str,
+    agent_handle: str,
+    season_id: str = "season_0",
+) -> None:
     path.mkdir(parents=True)
     payload = {
         "schema_version": "1",
@@ -157,9 +275,9 @@ def _write_run(path: Path, *, run_id: str, agent_handle: str) -> None:
         "run_mode": "shadow",
         "model": "local-stub",
         "wake_source": "auto",
-        "agent": {"name": "Agent A", "handle": agent_handle, "participant_id": f"season_0:{agent_handle}"},
+        "agent": {"name": agent_handle, "handle": agent_handle, "participant_id": f"{season_id}:{agent_handle}"},
         "repository": {"full_name": "example/repo", "url": "https://github.com/example/repo"},
-        "season": {"id": "season_0", "name": "Season 0", "phase": "owned_repo_calibration"},
+        "season": {"id": season_id, "name": season_id, "phase": "owned_repo_calibration"},
         "opportunity_source": "none",
         "opportunity_source_ref": "",
         "started_at": "2026-05-15T00:00:00Z",
@@ -251,8 +369,8 @@ def _write_run(path: Path, *, run_id: str, agent_handle: str) -> None:
     (path / "discovery_log.jsonl").write_text(
         json.dumps(
             {
-                "season_id": "season_0",
-                "participant_id": f"season_0:{agent_handle}",
+                "season_id": season_id,
+                "participant_id": f"{season_id}:{agent_handle}",
                 "query": "agent framework",
                 "filters_resolved": {"language": "Python"},
                 "github_query_string": "agent framework language:Python",
@@ -300,8 +418,8 @@ def _write_run(path: Path, *, run_id: str, agent_handle: str) -> None:
         json.dumps(
             {
                 "run_id": run_id,
-                "season_id": "season_0",
-                "participant_id": f"season_0:{agent_handle}",
+                "season_id": season_id,
+                "participant_id": f"{season_id}:{agent_handle}",
                 "phase": "scout",
                 "sub_phase": "project",
                 "kind": "intent",
@@ -313,7 +431,7 @@ def _write_run(path: Path, *, run_id: str, agent_handle: str) -> None:
         + "\n",
         encoding="utf-8",
     )
-    workspace_dir = path.parent / "seasons" / "season_0" / "participants" / f"season_0:{agent_handle}" / "workspaces" / "example-repo"
+    workspace_dir = path.parent / "seasons" / season_id / "participants" / f"{season_id}:{agent_handle}" / "workspaces" / "example-repo"
     workspace_dir.mkdir(parents=True)
     (workspace_dir / "container_id").write_text("container-1\n", encoding="utf-8")
     (workspace_dir / "last_used_at").write_text("2026-05-15T00:00:00Z\n", encoding="utf-8")

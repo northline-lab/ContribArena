@@ -1971,6 +1971,40 @@ class RunnerM02Test(unittest.TestCase):
             self.assertIn("judge_packet.json", judgement["evidence"])
             self.assertIn("judge_dimension_packets.json", judgement["evidence"])
 
+    def test_runner_defers_transient_judgement_fallback_for_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            result = _run_with_fake_docker(
+                FakeIssueAgent(),
+                _issue_config(tmp_path / "runs"),
+                tmp_path,
+            )
+            judgement_path = result.run_dir / "judgement.json"
+            judgement = json.loads(judgement_path.read_text(encoding="utf-8"))
+            judgement["status"] = "partial_fallback"
+            judgement["judge_score"] = 12
+            judgement["arena_score"] = 12
+            judgement["judges"] = [
+                {
+                    "judge_id": "responses_gpt55",
+                    "model": "responses/gpt55",
+                    "error": "project_fit: APIConnectionError: Connection error.",
+                    "rubric": [],
+                }
+            ]
+            judgement_path.write_text(
+                json.dumps(judgement, indent=2, ensure_ascii=True) + "\n",
+                encoding="utf-8",
+            )
+
+            from contribarena.engine.judge_refresh import mark_transient_judgement_retry_due
+
+            self.assertTrue(mark_transient_judgement_retry_due(result.run_dir))
+
+            summary = json.loads((result.run_dir / "run_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual("deferred", summary["judgement"]["status"])
+            self.assertEqual("due", summary["judgement_retry"]["status"])
+
     def test_workspace_cleanup_runs_before_judgement_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

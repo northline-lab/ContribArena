@@ -45,19 +45,24 @@ class SeasonEndToEndTests(unittest.TestCase):
             )
             launcher = _ArtifactLauncher(root)
 
-            result = LocalController(launcher=launcher).run_once(config)
+            result = None
+            controller = LocalController(launcher=launcher)
+            for _ in range(5):
+                result = controller.run_once(config)
 
+            self.assertIsNotNone(result)
+            assert result is not None
             self.assertEqual("run_completed", result.status)
             self.assertEqual(5, len(launcher.launched))
             self.assertEqual(
-                [
+                {
                     "season_0:qwen36plus",
                     "season_0:deepseekv4pro",
                     "season_0:gpt55",
                     "season_0:gemini31pro",
                     "season_0:claudeopus47",
-                ],
-                [item.run.participant_id for item in launcher.launched],
+                },
+                {item.run.participant_id for item in launcher.launched},
             )
             for launched in launcher.launched:
                 participant_id = launched.run.participant_id

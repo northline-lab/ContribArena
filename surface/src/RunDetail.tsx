@@ -205,6 +205,16 @@ export function RunDetail({ run, surface }: { run: RunSummary; surface?: Surface
         <span>Adjustment <strong>{judgement.real_world_adjustment}</strong></span>
         <span>Arena <strong>{judgement.arena_score ?? "not judged"}</strong></span>
         <span className={`badge badge-${judgement.status}`}>{judgement.status}</span>
+        {run.judgement_retry?.status && (
+          <span className={`badge badge-${run.judgement_retry.status === "succeeded" ? "judged" : "deferred"}`}>
+            judge retry {run.judgement_retry.status}
+          </span>
+        )}
+        {run.replacement?.status && (
+          <span className={`badge badge-${run.replacement.status === "replaced" ? "judged" : "deferred"}`}>
+            replacement {run.replacement.status}
+          </span>
+        )}
       </div>
 
       {/* Mini pipeline timeline with timestamps */}

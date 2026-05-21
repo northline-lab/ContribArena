@@ -22,14 +22,17 @@ from contribarena.config.schema import (
     WorkspaceConfig,
 )
 from contribarena.engine.controller import LocalController
+from contribarena.engine import controller as controller_module
 from contribarena.engine.external_lifecycle import lifecycle_record_for_opened_pr
 from contribarena.engine.goals import GoalService
+from contribarena.engine.judge_refresh import JudgeRefreshResult
 from contribarena.engine.middleware.governance import (
     GovernanceMiddleware,
     load_governance_state,
     record_governance_pr,
     save_governance_state,
 )
+from contribarena.engine.seasons import mark_participant_run_finished
 from contribarena.engine.runner import RunResult
 from contribarena.models import GovernanceAttempt, GovernancePrRef, GovernanceState, QualityGateResult
 from contribarena.models.governance import MaintainerSignal, PrLifecycleRecord
@@ -264,6 +267,30 @@ class GovernanceM04Test(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp) / "runs" / "fake-run"
             run_dir.mkdir(parents=True)
+            (run_dir / "run_summary.json").write_text(
+                json.dumps(
+                    {
+                        "pull_request": {
+                            "url": "https://github.com/external/repo/pull/7",
+                            "number": 7,
+                            "state": "open",
+                        },
+                        "maintainer_outcome": {
+                            "status": "pending",
+                            "observed_at": "",
+                            "source": "none",
+                        },
+                        "judgement": {
+                            "judge_score": 70,
+                            "real_world_adjustment": 0,
+                            "arena_score": 70,
+                        },
+                    },
+                    ensure_ascii=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
             config = _external_config(live_enabled=True, output_root=Path(tmp) / "runs")
             state = GovernanceState(
                 pull_requests=[
@@ -322,6 +349,104 @@ class GovernanceM04Test(unittest.TestCase):
             self.assertIn("lifecycle_observed", memory_events)
             self.assertFalse((run_dir / "resume_context.json").exists())
             self.assertFalse((config.artifacts.output_root / "pr_review_log.jsonl").exists())
+            summary = json.loads((run_dir / "run_summary.json").read_text())
+            self.assertEqual("merged", summary["pull_request"]["state"])
+            self.assertEqual("merged", summary["maintainer_outcome"]["status"])
+            self.assertGreater(summary["judgement"]["arena_score"], 70)
+
+    def test_season_tick_observes_participant_owned_pr_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "runs" / "owned-run"
+            run_dir.mkdir(parents=True)
+            (run_dir / "run_summary.json").write_text(
+                json.dumps(
+                    {
+                        "season": {"id": "season_0"},
+                        "agent": {"participant_id": "season_0:local-stub"},
+                        "repository": {"full_name": "example/repo"},
+                        "pull_request": {
+                            "url": "https://github.com/example/repo/pull/42",
+                            "number": 42,
+                            "state": "open",
+                        },
+                        "maintainer_outcome": {
+                            "status": "pending",
+                            "observed_at": "",
+                            "source": "none",
+                        },
+                        "judgement": {
+                            "judge_score": 70,
+                            "real_world_adjustment": 0,
+                            "arena_score": 70,
+                        },
+                    },
+                    ensure_ascii=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            config = _owned_config(live_enabled=True, output_root=root / "runs")
+            config.season = SeasonConfig(
+                id="season_0",
+                status="active",
+                state_root=root / "seasons",
+                defaults={"wake_interval": "6h", "max_concurrent_runs": 1},
+                participants=[SeasonParticipantConfig(model="local-stub")],
+            )
+            participant_id = "season_0:local-stub"
+            participant_config = config.model_copy(
+                update={
+                    "run": config.run.model_copy(
+                        update={
+                            "season_id": "season_0",
+                            "participant_id": participant_id,
+                        }
+                    )
+                },
+                deep=True,
+            )
+            save_governance_state(
+                participant_config,
+                GovernanceState(
+                    pull_requests=[
+                        GovernancePrRef(
+                            season_id="season_0",
+                            participant_id=participant_id,
+                            repository="example/repo",
+                            number=42,
+                            url="https://github.com/example/repo/pull/42",
+                            branch="contribarena/test",
+                        )
+                    ]
+                ),
+            )
+            participant_dir = root / "seasons" / "season_0" / "participants" / participant_id
+            participant_dir.mkdir(parents=True, exist_ok=True)
+            (participant_dir / "participant_state.json").write_text(
+                json.dumps({"active_runs": 1}) + "\n",
+                encoding="utf-8",
+            )
+
+            result = LocalController(
+                launcher=FakeLauncher(),
+                pr_client=FakeLifecycleClient(merged=True),
+            ).run_once(config)
+
+            self.assertEqual("lifecycle_terminal", result.status)
+            state = load_governance_state(participant_config)
+            self.assertEqual("merged", state.pull_requests[0].state)
+            self.assertEqual(1, len(state.lifecycle_records))
+            self.assertEqual("merged", state.lifecycle_records[0].state)
+            self.assertEqual(participant_id, state.lifecycle_records[0].participant_id)
+            self.assertEqual(str(run_dir), state.lifecycle_records[0].originating_run_dir)
+            participant_state = json.loads((participant_dir / "participant_state.json").read_text())
+            self.assertEqual(1, participant_state["prs_opened"])
+            self.assertEqual(1, participant_state["merged_prs"])
+            summary = json.loads((run_dir / "run_summary.json").read_text())
+            self.assertEqual("merged", summary["pull_request"]["state"])
+            self.assertEqual("merged", summary["maintainer_outcome"]["status"])
+            self.assertGreater(summary["judgement"]["arena_score"], 70)
 
     def test_completed_season_records_post_completion_outcome_without_rewriting_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -583,7 +708,7 @@ class GovernanceM04Test(unittest.TestCase):
             self.assertEqual("example/repo", participant_state["last_repo_slug"])
             self.assertEqual("auto", participant_state["last_wake_source"])
 
-    def test_active_season_fans_out_to_all_due_agent_participants(self) -> None:
+    def test_active_season_dispatches_one_due_agent_per_tick(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             config = _owned_config(live_enabled=True, output_root=tmp_path / "runs")
@@ -602,16 +727,87 @@ class GovernanceM04Test(unittest.TestCase):
             result = LocalController(launcher=launcher).run_once(config)
 
             self.assertEqual("run_completed", result.status)
-            self.assertEqual(2, launcher.calls)
+            self.assertEqual(1, launcher.calls)
             self.assertEqual(
-                ["season_0:qwen36plus", "season_0:gpt55"],
+                ["season_0:qwen36plus"],
                 [item.run.participant_id for item in launcher.configs],
             )
-            self.assertEqual(["compatible/qwen36plus", "responses/gpt55"], [item.run.model for item in launcher.configs])
+            self.assertEqual(["compatible/qwen36plus"], [item.run.model for item in launcher.configs])
             for launched in launcher.configs:
                 state = load_governance_state(launched)
                 self.assertEqual(1, len(state.attempts))
                 self.assertEqual("prepared", state.attempts[0].status)
+
+    def test_active_season_replacement_due_participant_runs_first(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _owned_config(live_enabled=True, output_root=tmp_path / "runs")
+            config.season = SeasonConfig(
+                id="season_0",
+                status="active",
+                state_root=tmp_path / "seasons",
+                participants=[
+                    SeasonParticipantConfig(model="compatible/qwen36plus"),
+                    SeasonParticipantConfig(model="responses/gpt55"),
+                ],
+            )
+            participant_dir = tmp_path / "seasons" / "season_0" / "participants" / "season_0:gpt55"
+            participant_dir.mkdir(parents=True)
+            (participant_dir / "participant_state.json").write_text(
+                json.dumps(
+                    {
+                        "replacement": {
+                            "status": "due",
+                            "source_run_id": "failed-run",
+                            "reason": "model_runtime",
+                            "layer": "model_runtime",
+                        },
+                        "replacement_due": True,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            launcher = FakeLauncher()
+
+            result = LocalController(launcher=launcher).run_once(config)
+
+            self.assertEqual("run_completed", result.status)
+            self.assertEqual(1, launcher.calls)
+            launched = launcher.configs[0]
+            self.assertEqual("season_0:gpt55", launched.run.participant_id)
+            state = json.loads((participant_dir / "participant_state.json").read_text(encoding="utf-8"))
+            self.assertEqual("replaced", state["replacement"]["status"])
+            self.assertEqual("fake", state["replacement"]["replacement_run_id"])
+            self.assertEqual("fake", state["replacement"]["completed_run_id"])
+
+    def test_active_season_refreshes_due_judgement_before_waking_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _owned_config(live_enabled=True, output_root=tmp_path / "runs")
+            config.season = SeasonConfig(
+                id="season_0",
+                status="active",
+                state_root=tmp_path / "seasons",
+                participants=[SeasonParticipantConfig(model="compatible/qwen36plus")],
+            )
+            calls: list[str] = []
+
+            def fake_refresh_due_judgements(**kwargs: object) -> object:
+                calls.append(str(kwargs.get("season_id")))
+                return JudgeRefreshResult(runs_judged=1, skipped=[])
+
+            launcher = FakeLauncher()
+            with patch.object(
+                controller_module,
+                "refresh_due_judgements",
+                fake_refresh_due_judgements,
+            ):
+                result = LocalController(launcher=launcher).run_once(config)
+
+            self.assertEqual("judgement_refreshed", result.status)
+            self.assertEqual(["season_0"], calls)
+            self.assertEqual(0, launcher.calls)
 
     def test_active_season_without_agent_participant_does_not_launch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -713,6 +909,12 @@ class FakeLauncher:
                 participant_id=config.run.participant_id or "",
             )
             save_governance_state(config, state)
+        mark_participant_run_finished(
+            config,
+            run_id="fake",
+            status="completed",
+            repo_slug="example/repo",
+        )
         return RunResult(
             run_id="fake",
             run_dir=Path("runs/fake"),

@@ -244,6 +244,137 @@ class SurfaceIndexerTests(unittest.TestCase):
             self.assertEqual("", artifacts["missing.md"]["url"])
             self.assertIn("missing public artifact 'missing.md'", result.skipped[0])
 
+    def test_replacement_due_runs_do_not_count_in_leaderboard_or_stats(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "runs"
+            output_dir = root / "public" / "data"
+            _write_run(
+                input_dir / "run-a",
+                run_id="run-a",
+                agent_name="gpt-5.5",
+                agent_handle="gpt-5.5",
+                season_id="season_0",
+                qg_status="pass",
+                pr_state="open",
+                maintainer_status="pending",
+                judge_score=70.0,
+                arena_score=70.0,
+            )
+            _write_run(
+                input_dir / "run-b",
+                run_id="run-b",
+                agent_name="gpt-5.5",
+                agent_handle="gpt-5.5",
+                season_id="season_0",
+                qg_status="fail",
+                pr_state="none",
+                maintainer_status="unknown",
+                judge_score=10.0,
+                arena_score=10.0,
+            )
+            summary_path = input_dir / "run-b" / "run_summary.json"
+            payload = _read_json(summary_path)
+            payload["replacement"] = {
+                "status": "due",
+                "reason": "model_runtime",
+                "layer": "model_runtime",
+            }
+            summary_path.write_text(
+                json.dumps(payload, indent=2, ensure_ascii=True) + "\n",
+                encoding="utf-8",
+            )
+
+            index_surface_data(input_dir=input_dir, output_dir=output_dir)
+
+            surface = _read_json(output_dir / "surface.json")
+            self.assertEqual(1, surface["stats"]["runs"])
+            self.assertEqual(1, surface["seasons"][0]["runs_count"])
+            self.assertEqual(1, surface["participants"][0]["runs_count"])
+            self.assertEqual(1, surface["leaderboard"][0]["runs"])
+            self.assertEqual(70.0, surface["leaderboard"][0]["mean_arena_score"])
+
+    def test_judgement_retry_due_runs_do_not_count_in_leaderboard_or_stats(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "runs"
+            output_dir = root / "public" / "data"
+            _write_run(
+                input_dir / "run-a",
+                run_id="run-a",
+                agent_name="qwen-3.6-plus",
+                agent_handle="qwen-3.6-plus",
+                season_id="season_0",
+                qg_status="pass",
+                pr_state="open",
+                maintainer_status="pending",
+                judge_score=75.0,
+                arena_score=75.0,
+            )
+            _write_run(
+                input_dir / "run-b",
+                run_id="run-b",
+                agent_name="gpt-5.5",
+                agent_handle="gpt-5.5",
+                season_id="season_0",
+                qg_status="pass",
+                pr_state="open",
+                maintainer_status="pending",
+                judge_score=10.0,
+                arena_score=10.0,
+            )
+            summary_path = input_dir / "run-b" / "run_summary.json"
+            payload = _read_json(summary_path)
+            payload["judgement"]["status"] = "deferred"
+            payload["judgement"]["judge_score"] = None
+            payload["judgement"]["arena_score"] = None
+            payload["judgement_retry"] = {
+                "status": "due",
+                "reason": "transient_judge_failure",
+            }
+            summary_path.write_text(
+                json.dumps(payload, indent=2, ensure_ascii=True) + "\n",
+                encoding="utf-8",
+            )
+
+            index_surface_data(input_dir=input_dir, output_dir=output_dir)
+
+            surface = _read_json(output_dir / "surface.json")
+            self.assertEqual(1, surface["stats"]["runs"])
+            self.assertEqual(["qwen-3.6-plus"], [row["agent_name"] for row in surface["leaderboard"]])
+
+    def test_builtin_agent_name_is_normalized_from_participant_for_public_surface(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_dir = root / "runs"
+            output_dir = root / "public" / "data"
+            _write_run(
+                input_dir / "run-a",
+                run_id="run-a",
+                agent_name="builtin",
+                agent_handle="builtin",
+                season_id="season_0",
+                qg_status="pass",
+                pr_state="open",
+                maintainer_status="pending",
+                judge_score=72.0,
+                arena_score=72.0,
+            )
+            summary_path = input_dir / "run-a" / "run_summary.json"
+            payload = _read_json(summary_path)
+            payload["model"] = "responses/gpt55"
+            payload["agent"]["participant_id"] = "season_0:gpt-5.5"
+            summary_path.write_text(
+                json.dumps(payload, indent=2, ensure_ascii=True) + "\n",
+                encoding="utf-8",
+            )
+
+            index_surface_data(input_dir=input_dir, output_dir=output_dir)
+
+            surface = _read_json(output_dir / "surface.json")
+            self.assertEqual(["gpt-5.5"], [row["agent_name"] for row in surface["leaderboard"]])
+            self.assertEqual("gpt-5.5", surface["runs"][0]["agent"]["name"])
+
 
 def _write_run(
     path: Path,
@@ -391,7 +522,7 @@ def _write_run(
         encoding="utf-8",
     )
     workspace_dir = path.parent / "seasons" / season_id / "participants" / f"season_0:{agent_handle}" / "workspaces" / "example-repo"
-    workspace_dir.mkdir(parents=True)
+    workspace_dir.mkdir(parents=True, exist_ok=True)
     (workspace_dir / "container_id").write_text("container-1\n", encoding="utf-8")
     (workspace_dir / "last_used_at").write_text("2026-05-15T00:00:00Z\n", encoding="utf-8")
     (workspace_dir / "clone_state.json").write_text(

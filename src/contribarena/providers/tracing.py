@@ -461,6 +461,8 @@ def _classify_model_runtime_error(exc: Exception) -> str:
     if any(
         marker in message
         for marker in (
+            "apiconnectionerror",
+            "connection error",
             "socket reset",
             "connection reset",
             "tcp reset",

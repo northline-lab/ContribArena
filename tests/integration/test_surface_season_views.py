@@ -85,6 +85,7 @@ class SurfaceSeasonViewTests(unittest.TestCase):
             routes = {getattr(route, "path", "") for route in app.routes}
             self.assertIn("/api/seasons/{season_id}", routes)
             self.assertIn("/api/seasons/{season_id}/participants", routes)
+            self.assertIn("/api/seasons/{season_id}/leaderboard", routes)
             self.assertIn("/api/participants/{participant_id}", routes)
             self.assertIn("/api/seasons/{season_id}/pr-lifecycle", routes)
             self.assertIn("/api/seasons/{season_id}/scheduler", routes)

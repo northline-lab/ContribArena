@@ -57,6 +57,7 @@ from contribarena.engine.runtime_config import apply_output_dir
 from contribarena.engine.seasons import admit_run
 from contribarena.engine.seasons import (
     SeasonStore,
+    mark_participant_replacement_due,
     mark_participant_run_finished,
     mark_participant_run_started,
     participant_memory_root,
@@ -478,6 +479,7 @@ class Runner:
                     "terminal_layer": terminal.layer,
                 },
             )
+            _record_replacement_if_due(artifacts, config, run_id, terminal)
             if workspace_started:
                 _finalize_workspace(workspace, trace, terminal, config.workspace.cleanup_policy)
                 workspace_finalized = True
@@ -550,6 +552,7 @@ class Runner:
                 "run.terminal",
                 terminal.model_dump(mode="json"),
             )
+            _record_replacement_if_due(artifacts, config, run_id, terminal)
             if workspace_started:
                 _finalize_workspace(workspace, trace, terminal, config.workspace.cleanup_policy)
                 workspace_finalized = True
@@ -1177,6 +1180,68 @@ def _write_judgement_artifacts(
         progress=_judgement_progress_reporter(trace=trace, operator=operator),
     )
     artifacts.write_json("judgement.json", judgement.model_dump(mode="json"), required=False)
+    from contribarena.engine.judge_refresh import mark_transient_judgement_retry_due
+
+    mark_transient_judgement_retry_due(artifacts.run_dir)
+
+
+def _record_replacement_if_due(
+    artifacts: ArtifactWriter,
+    config: RunConfig,
+    run_id: str,
+    terminal: TerminalState,
+) -> None:
+    if not _replacement_due_terminal(terminal):
+        return
+    payload = {
+        "status": "due",
+        "source_run_id": run_id,
+        "reason": terminal.reason,
+        "layer": terminal.layer,
+        "message": terminal.message[:500],
+    }
+    artifacts.write_json("replacement_state.json", payload, required=False)
+    mark_participant_replacement_due(
+        config,
+        run_id=run_id,
+        reason=terminal.reason,
+        layer=terminal.layer,
+        message=terminal.message,
+    )
+
+
+def _replacement_due_terminal(terminal: TerminalState) -> bool:
+    if terminal.layer not in {"model_runtime", "pr"}:
+        return False
+    if terminal.layer == "model_runtime":
+        return _transient_runtime_message(terminal.message)
+    if terminal.layer == "pr":
+        return _transient_runtime_message(terminal.message) or terminal.reason in {
+            "pr_open_failed",
+            "pr_branch_push_failed",
+        }
+    return False
+
+
+def _transient_runtime_message(message: str) -> bool:
+    text = message.lower()
+    return any(
+        marker in text
+        for marker in (
+            "apiconnectionerror",
+            "connection error",
+            "connection reset",
+            "socket reset",
+            "timeout",
+            "timed out",
+            "503",
+            "502",
+            "504",
+            "service unavailable",
+            "bad gateway",
+            "gateway timeout",
+        )
+    )
 
 
 def _judgement_progress_reporter(
@@ -1831,27 +1896,26 @@ def _record_opened_live_pr(
             season_id=config.run.season_id or "",
             participant_id=config.run.participant_id or "",
         )
-        if config.run.mode == "external_live":
-            upsert_lifecycle_record(
-                state,
-                lifecycle_record_for_opened_pr(
-                    repository=decision.target_repository,
-                    number=pr_result.number,
-                    url=pr_result.url,
-                    originating_run_dir=str(run_dir),
-                    branch=draft.branch,
-                    head=live_pr_result.head,
-                    base=_live_base_branch(config, target),
-                    head_sha=pr_result.head_sha,
-                    ci_status=ci_status,
-                    poll_interval_seconds=config.governance.external_live.poll_interval_seconds,
-                    initial_poll_delay_seconds=(
-                        config.governance.external_live.initial_poll_delay_seconds
-                    ),
-                    season_id=config.run.season_id or "",
-                    participant_id=config.run.participant_id or "",
+        upsert_lifecycle_record(
+            state,
+            lifecycle_record_for_opened_pr(
+                repository=decision.target_repository,
+                number=pr_result.number,
+                url=pr_result.url,
+                originating_run_dir=str(run_dir),
+                branch=draft.branch,
+                head=live_pr_result.head,
+                base=_live_base_branch(config, target),
+                head_sha=pr_result.head_sha,
+                ci_status=ci_status,
+                poll_interval_seconds=config.governance.external_live.poll_interval_seconds,
+                initial_poll_delay_seconds=(
+                    config.governance.external_live.initial_poll_delay_seconds
                 ),
-            )
+                season_id=config.run.season_id or "",
+                participant_id=config.run.participant_id or "",
+            ),
+        )
     save_governance_state(config, state)
 
 

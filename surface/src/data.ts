@@ -32,7 +32,7 @@ async function fetchJson<T>(path: string): Promise<T | null> {
 }
 
 export function filterSurfaceBySeason(data: SurfaceData, seasonId: string): SurfaceData {
-  if (!seasonId || seasonId === "all") return data;
+  if (!seasonId) return data;
   return {
     ...data,
     runs: data.runs.filter((run) => run.season?.id === seasonId),
@@ -59,7 +59,7 @@ export function seasonsFromSurface(data: SurfaceData): Season[] {
 
 export function defaultSeasonId(data: SurfaceData): string {
   const seasons = seasonsFromSurface(data);
-  return seasons[0]?.id ?? "all";
+  return seasons[0]?.id ?? "";
 }
 
 export function participantsFromSurface(data: SurfaceData, seasonId: string): Participant[] {
@@ -75,7 +75,7 @@ export function participantsFromSurface(data: SurfaceData, seasonId: string): Pa
       lifecycleByParticipant.set(participantId, [...(lifecycleByParticipant.get(participantId) ?? []), item]);
     }
     return data.participants
-      .filter((participant) => seasonId === "all" || participant.season_id === seasonId)
+      .filter((participant) => !seasonId || participant.season_id === seasonId)
       .map((participant) => ({
         ...participant,
         runs_detail: participant.runs_detail ?? runsByParticipant.get(participant.participant_id) ?? [],
@@ -90,8 +90,8 @@ export function participantsFromSurface(data: SurfaceData, seasonId: string): Pa
     const existing = buckets.get(participantId) ?? {
       season_id: run.season?.id,
       participant_id: participantId,
-      agent_name: run.agent.name || "builtin",
-      agent_handle: run.agent.handle || participantId,
+      agent_name: displayAgentName(run),
+      agent_handle: run.agent.handle || displayAgentName(run),
       runs_count: 0,
       prs_opened: 0,
       merged_prs: 0,
@@ -138,6 +138,22 @@ export function participantsFromSurface(data: SurfaceData, seasonId: string): Pa
       pr_lifecycle: item.pr_lifecycle,
     };
   });
+}
+
+function displayAgentName(run: RunSummary): string {
+  for (const raw of [run.agent.name, run.agent.handle, run.agent.participant_id, run.model]) {
+    const normalized = normalizeIdentity(raw ?? "");
+    if (normalized && normalized !== "builtin") return normalized;
+  }
+  return normalizeIdentity(run.model) || "unknown";
+}
+
+function normalizeIdentity(raw: string): string {
+  let value = raw.trim().toLowerCase();
+  if (!value) return "";
+  if (value.includes("/")) value = value.split("/").pop() ?? value;
+  if (value.includes(":")) value = value.split(":").pop() ?? value;
+  return value.replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
 }
 
 export async function loadSeasonDetail(surface: SurfaceData, seasonId: string): Promise<SeasonDetailData> {

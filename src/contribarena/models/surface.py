@@ -34,6 +34,13 @@ class SurfaceAgent(BaseModel):
     participant_id: str = ""
 
 
+class RuntimeStatus(BaseModel):
+    status: str = ""
+    reason: str = ""
+    message: str = ""
+    attempts: int = 0
+
+
 class SurfaceRepository(BaseModel):
     full_name: str = ""
     url: str = ""
@@ -148,3 +155,5 @@ class RunSummary(BaseModel):
     judgement: SurfaceJudgement = Field(default_factory=SurfaceJudgement)
     artifacts: list[SurfaceArtifact] = Field(default_factory=list)
     workspace: dict[str, object] = Field(default_factory=dict)
+    replacement: dict[str, object] = Field(default_factory=dict)
+    judgement_retry: dict[str, object] = Field(default_factory=dict)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from contribarena.config.schema import RunConfig
@@ -57,25 +58,40 @@ class SeasonRuntime:
         season = store.load(target, run_config.season)
         if season.status == "draft":
             store.transition(target, "active", run_config.season)
+        store.record_runtime_status(target, runtime_status="running", fallback=run_config.season)
         heartbeats: list[SeasonHeartbeatResult] = []
         count = 0
-        while True:
-            heartbeat = self.tick(
-                run_config,
-                season_id=target,
-                output_dir=output_dir,
-                verbose=verbose,
-            )
-            heartbeats.append(heartbeat)
-            count += 1
-            if heartbeat.season_status == "completed":
-                return SeasonRuntimeResult(target, "completed", heartbeats)
-            if max_heartbeats is not None and count >= max_heartbeats:
-                return SeasonRuntimeResult(target, heartbeat.status, heartbeats)
-            interval = heartbeat_interval_seconds
-            if interval is None:
-                interval = run_config.controller.interval_seconds
-            time.sleep(max(1, interval))
+        try:
+            while True:
+                store.record_runtime_status(target, runtime_status="running", fallback=run_config.season)
+                heartbeat = self.tick(
+                    run_config,
+                    season_id=target,
+                    output_dir=output_dir,
+                    verbose=verbose,
+                )
+                heartbeats.append(heartbeat)
+                count += 1
+                if heartbeat.season_status == "completed":
+                    store.record_runtime_status(target, runtime_status="completed", fallback=run_config.season)
+                    return SeasonRuntimeResult(target, "completed", heartbeats)
+                if max_heartbeats is not None and count >= max_heartbeats:
+                    store.record_runtime_status(target, runtime_status="stopped", fallback=run_config.season)
+                    return SeasonRuntimeResult(target, heartbeat.status, heartbeats)
+                interval = heartbeat_interval_seconds
+                if interval is None:
+                    interval = run_config.controller.interval_seconds
+                next_tick = datetime.now(UTC) + timedelta(seconds=max(1, interval))
+                store.record_runtime_status(
+                    target,
+                    runtime_status="sleeping",
+                    next_tick_at=next_tick.isoformat(),
+                    fallback=run_config.season,
+                )
+                time.sleep(max(1, interval))
+        except KeyboardInterrupt:
+            store.record_runtime_status(target, runtime_status="interrupted", fallback=run_config.season)
+            raise
 
     def tick(
         self,
@@ -94,11 +110,13 @@ class SeasonRuntime:
             state = store.state(target)
             paused = bool(state.get("paused", False))
             if season.status == "completed":
+                tick = self.controller._run_external_lifecycle_tick(run_config)
                 self._refresh_read_model(run_config)
+                detail = tick.status if tick is not None else "season_completed"
                 store.record_heartbeat_completed(
                     target,
                     status="completed",
-                    detail="season_completed",
+                    detail=detail,
                     fallback=run_config.season,
                 )
                 return SeasonHeartbeatResult(
@@ -106,7 +124,8 @@ class SeasonRuntime:
                     status="completed",
                     season_status=season.status,
                     paused=paused,
-                    detail="season_completed",
+                    tick=tick,
+                    detail=detail,
                 )
             if season.status == "observing" or paused:
                 tick = self.controller._run_external_lifecycle_tick(run_config)

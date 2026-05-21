@@ -44,9 +44,8 @@ function LogoMark() {
 }
 
 function formatStarCount(count: number): string {
-  if (count === 1) return "1 star";
-  if (count < 1000) return `${count} stars`;
-  return `${(count / 1000).toFixed(count < 10000 ? 1 : 0)}k stars`;
+  if (count < 1000) return `${count}`;
+  return `${(count / 1000).toFixed(count < 10000 ? 1 : 0)}k`;
 }
 
 function useGitHubStars(): string {
@@ -135,12 +134,12 @@ function useSeasonSelection(data: SurfaceData | null): [string, (seasonId: strin
   const setSelectedSeason = (seasonId: string) => {
     setSelectedSeasonState(seasonId);
     const url = new URL(window.location.href);
-    if (seasonId && seasonId !== "all") url.searchParams.set("season", seasonId);
+    if (seasonId) url.searchParams.set("season", seasonId);
     else url.searchParams.delete("season");
     window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
   };
 
-  return [selectedSeason || (data ? defaultSeasonId(data) : "all"), setSelectedSeason];
+  return [selectedSeason || (data ? defaultSeasonId(data) : ""), setSelectedSeason];
 }
 
 function score(v: number | null | undefined) {
@@ -165,7 +164,6 @@ function SeasonSelector({
         {seasons.map((season) => (
           <option value={season.id} key={season.id}>{season.name || season.id}</option>
         ))}
-        <option value="all">All runs</option>
       </select>
     </label>
   );
@@ -453,6 +451,8 @@ function SeasonDetailPage({ surface, seasonId }: { surface: SurfaceData; seasonI
       <MetricGrid
         items={[
           ["Status", detail.season.status || "unknown"],
+          ["Runtime", detail.season.runtime_status || "unknown"],
+          ["Next tick", detail.season.next_tick_at ? compactDate(detail.season.next_tick_at) : "not scheduled"],
           ["Paused", detail.season.paused ? "yes" : "no"],
           ["Heartbeat", detail.season.heartbeat?.last_status || "never"],
           ["Frozen", detail.season.leaderboard_frozen ? "yes" : "no"],

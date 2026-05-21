@@ -4,6 +4,7 @@ import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from collections.abc import AsyncIterator
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -61,8 +62,9 @@ def create_app(
         }
 
     @app.get("/api/surface")
-    def surface() -> dict[str, object]:
-        return model.surface_bundle()
+    def surface(season_id: str | None = None) -> dict[str, object]:
+        season_id = season_id or _default_season_id(model)
+        return _surface_bundle_for_season(model, season_id)
 
     @app.get("/api/seasons")
     def seasons() -> dict[str, object]:
@@ -113,10 +115,16 @@ def create_app(
 
     @app.get("/api/stats")
     def stats(season_id: str | None = None) -> dict[str, object]:
+        season_id = season_id or _default_season_id(model)
         return model.stats(season_id)
 
     @app.get("/api/leaderboard")
     def leaderboard(season_id: str | None = None) -> dict[str, object]:
+        season_id = season_id or _default_season_id(model)
+        return {"leaderboard": model.leaderboard(season_id)}
+
+    @app.get("/api/seasons/{season_id}/leaderboard")
+    def season_leaderboard(season_id: str) -> dict[str, object]:
         return {"leaderboard": model.leaderboard(season_id)}
 
     @app.get("/api/runs")
@@ -128,6 +136,7 @@ def create_app(
         limit: int = Query(default=100, ge=1, le=500),
         offset: int = Query(default=0, ge=0),
     ) -> dict[str, object]:
+        season_id = season_id or _default_season_id(model)
         return {
             "runs": model.runs(
                 season_id=season_id,
@@ -250,3 +259,49 @@ def _artifact_signature(path: Path) -> str:
         count += 1
         latest = max(latest, int(stat.st_mtime_ns))
     return f"{count}:{latest}"
+
+
+def _default_season_id(model: SurfaceReadModel) -> str | None:
+    seasons = model.seasons()
+    if not seasons:
+        return None
+    active = [
+        str(season.get("id") or "")
+        for season in seasons
+        if str(season.get("status") or "") in {"active", "observing", "completed"}
+        and season.get("id")
+    ]
+    if active:
+        return active[0]
+    first = str(seasons[0].get("id") or "")
+    return first or None
+
+
+def _surface_bundle_for_season(
+    model: SurfaceReadModel,
+    season_id: str | None,
+) -> dict[str, Any]:
+    bundle = model.surface_bundle()
+    if not season_id:
+        return bundle
+    runs = model.runs(season_id=season_id, limit=500, offset=0)
+    run_ids = {str(run.get("run_id") or "") for run in runs}
+    updates = bundle.get("assistant_updates", {})
+    if isinstance(updates, dict):
+        updates = {run_id: rows for run_id, rows in updates.items() if run_id in run_ids}
+    else:
+        updates = {}
+    return {
+        **bundle,
+        "stats": model.stats(season_id),
+        "leaderboard": model.leaderboard(season_id),
+        "runs": runs,
+        "seasons": [
+            season for season in model.seasons() if str(season.get("id") or "") == season_id
+        ],
+        "participants": model.participants(season_id),
+        "pr_lifecycle": model.pr_lifecycle(season_id=season_id),
+        "scheduler": model.scheduler_events(season_id),
+        "workspaces": model.season_workspaces(season_id),
+        "assistant_updates": updates,
+    }

@@ -220,6 +220,8 @@ def season_status(config: Path = typer.Option(..., "--config", "-c"), season_id:
     typer.echo(f"Status:      {season.status}")
     typer.echo(f"Paused:      {str(bool(state.get('paused', False))).lower()}")
     typer.echo(f"Heartbeat:   {heartbeat.get('last_status') or 'never'}")
+    typer.echo(f"Runtime:     {state.get('runtime_status') or ''}")
+    typer.echo(f"Next tick:   {state.get('next_tick_at') or ''}")
     typer.echo(f"Last start:  {heartbeat.get('last_started_at') or ''}")
     typer.echo(f"Last end:    {heartbeat.get('last_completed_at') or ''}")
     typer.echo(f"Last error:  {heartbeat.get('last_error') or ''}")

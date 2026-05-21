@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 import subprocess
+import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -261,6 +262,42 @@ class SeasonStore:
         path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return state
 
+    def record_runtime_status(
+        self,
+        season_id: str,
+        *,
+        runtime_status: str,
+        next_tick_at: str = "",
+        fallback: SeasonConfig | None = None,
+    ) -> dict[str, Any]:
+        config = self.load(season_id, fallback)
+        state = self._load_state(season_id)
+        now = datetime.now(UTC).isoformat()
+        state.update(
+            {
+                "season_id": config.id,
+                "name": config.name,
+                "status": config.status,
+                "runtime_status": runtime_status,
+                "next_tick_at": next_tick_at,
+                "updated_at": now,
+            }
+        )
+        _append_runtime_event(
+            state,
+            {
+                "ts": now,
+                "event": "runtime_status",
+                "status": config.status,
+                "runtime_status": runtime_status,
+                "next_tick_at": next_tick_at,
+            },
+        )
+        path = self.state_path(season_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return state
+
     def _load_state(self, season_id: str) -> dict[str, Any]:
         path = self.state_path(season_id)
         if not path.exists():
@@ -387,6 +424,51 @@ def save_participant_state(
     path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def mark_participant_replacement_due(
+    config: RunConfig,
+    *,
+    run_id: str,
+    reason: str,
+    layer: str,
+    message: str = "",
+) -> None:
+    if not config.run.season_id or not config.run.participant_id:
+        return
+    store = SeasonStore.from_config(config)
+    state = load_participant_state(store, config.run.season_id, config.run.participant_id)
+    replacement = state.get("replacement")
+    attempts = int(replacement.get("attempts") or 0) if isinstance(replacement, dict) else 0
+    state["replacement"] = {
+        "status": "due",
+        "attempts": attempts + 1,
+        "source_run_id": run_id,
+        "reason": reason,
+        "layer": layer,
+        "message": message[:500],
+        "scheduled_at": datetime.now(UTC).isoformat(),
+    }
+    state["replacement_due"] = True
+    save_participant_state(store, config.run.season_id, config.run.participant_id, state)
+
+
+def mark_participant_replacement_consumed(
+    store: SeasonStore,
+    season_id: str,
+    participant_id: str,
+    *,
+    replacement_run_id: str,
+) -> None:
+    state = load_participant_state(store, season_id, participant_id)
+    replacement = state.get("replacement")
+    if not isinstance(replacement, dict) or replacement.get("status") not in {"due", "running"}:
+        return
+    replacement = dict(replacement)
+    replacement.update({"status": "running", "replacement_run_id": replacement_run_id})
+    state["replacement"] = replacement
+    state["replacement_due"] = False
+    save_participant_state(store, season_id, participant_id, state)
+
+
 def tracked_open_prs(
     store: SeasonStore,
     season_id: str,
@@ -443,6 +525,9 @@ def participant_is_due(
     state: dict[str, Any],
     now: datetime | None = None,
 ) -> bool:
+    replacement = state.get("replacement")
+    if isinstance(replacement, dict) and replacement.get("status") == "due":
+        return True
     last_wake_at = str(state.get("last_wake_at") or "")
     if not last_wake_at:
         return True
@@ -454,6 +539,39 @@ def participant_is_due(
         last = last.replace(tzinfo=UTC)
     interval = parse_duration_seconds(participant.wake_interval or season.defaults.wake_interval)
     return (now or datetime.now(UTC)) - last >= timedelta(seconds=interval)
+
+
+def participant_next_wake_at(
+    *,
+    season: SeasonConfig,
+    participant: SeasonParticipantConfig,
+    participant_id: str,
+    state: dict[str, Any],
+    now: datetime | None = None,
+) -> datetime:
+    current = now or datetime.now(UTC)
+    replacement = state.get("replacement")
+    if isinstance(replacement, dict) and replacement.get("status") == "due":
+        return current
+    last_wake_at = str(state.get("last_wake_at") or "")
+    if not last_wake_at:
+        return current + timedelta(seconds=_stable_initial_jitter_seconds(participant_id, season))
+    try:
+        last = datetime.fromisoformat(last_wake_at)
+    except ValueError:
+        return current
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=UTC)
+    interval = parse_duration_seconds(participant.wake_interval or season.defaults.wake_interval)
+    return last + timedelta(seconds=interval)
+
+
+def _stable_initial_jitter_seconds(participant_id: str, season: SeasonConfig) -> int:
+    interval = parse_duration_seconds(season.defaults.wake_interval)
+    if interval <= 1:
+        return 0
+    digest = hashlib.sha256(f"{season.id}:{participant_id}".encode("utf-8")).hexdigest()
+    return int(digest[:8], 16) % max(1, min(interval, 3600))
 
 
 def mark_participant_run_started(
@@ -475,6 +593,7 @@ def mark_participant_run_started(
             "last_run_started_at": now,
             "last_repo_slug": repo_slug,
             "last_wake_source": wake_source,
+            "next_wake_at": "",
             "active_runs": int(state.get("active_runs") or 0) + (1 if increment_active else 0),
         }
     )
@@ -518,6 +637,19 @@ def mark_participant_run_finished(
             "cumulative_cost": float(state.get("cumulative_cost") or 0.0),
         }
     )
+    replacement = state.get("replacement")
+    if isinstance(replacement, dict) and replacement.get("status") == "running":
+        replacement = dict(replacement)
+        replacement.update(
+            {
+                "status": "replaced" if status == "completed" else "failed",
+                "replacement_run_id": run_id,
+                "completed_run_id": run_id,
+                "completed_at": now,
+            }
+        )
+        state["replacement"] = replacement
+        state["replacement_due"] = False
     if latest_goal_summary:
         state["latest_goal_summary"] = latest_goal_summary[:1000]
     path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")

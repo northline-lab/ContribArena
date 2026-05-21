@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import json
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -19,6 +20,7 @@ from contribarena.config.schema import (
     WorkspaceConfig,
 )
 from contribarena.engine import judgement as judgement_module
+from contribarena.engine.judge_refresh import mark_transient_judgement_retry_due
 from contribarena.engine.judgement import judge_run
 from contribarena.models.judgement import JudgePacket, JudgementSeason
 
@@ -365,6 +367,41 @@ class JudgementScoringTests(unittest.TestCase):
 
         self.assertEqual(3, calls)
         self.assertEqual([1.0, 2.0], sleeps)
+
+    def test_transient_judge_fallback_is_deferred_for_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            summary = {
+                "run_id": "run-1",
+                "run_status": "completed",
+                "season": {"id": "season_0"},
+                "judgement": {
+                    "status": "partial_fallback",
+                    "judge_score": 50,
+                    "arena_score": 50,
+                    "judges": [
+                        {
+                            "judge_id": "gpt",
+                            "model": "responses/gpt55",
+                            "error": "execution_correctness: APIConnectionError: Connection error.",
+                            "rubric": [],
+                        }
+                    ],
+                },
+            }
+            (run_dir / "run_summary.json").write_text(
+                json.dumps(summary, indent=2, ensure_ascii=True) + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertTrue(mark_transient_judgement_retry_due(run_dir))
+
+            updated = json.loads((run_dir / "run_summary.json").read_text(encoding="utf-8"))
+            retry = json.loads((run_dir / "judgement_retry_state.json").read_text(encoding="utf-8"))
+            self.assertEqual("due", retry["status"])
+            self.assertEqual("deferred", updated["judgement"]["status"])
+            self.assertIsNone(updated["judgement"]["judge_score"])
+            self.assertIsNone(updated["judgement"]["arena_score"])
 
 
 def _config(output_root: Path, *, explicit_judges: bool = True) -> RunConfig:

@@ -55,17 +55,36 @@ class SeasonRuntimeTests(unittest.TestCase):
             self.assertTrue(result.paused)
             self.assertEqual(0, controller.calls)
 
+    def test_completed_tick_observes_lifecycle_without_waking_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = _config(root, status="completed")
+            SeasonStore.from_config(config).transition("season_0", "completed", config.season)
+            controller = _ControllerStub(lifecycle_status="lifecycle_terminal")
+
+            result = SeasonRuntime(controller=controller).tick(config)
+
+            self.assertEqual("completed", result.status)
+            self.assertEqual("lifecycle_terminal", result.detail)
+            self.assertEqual(0, controller.calls)
+            self.assertEqual(1, controller.lifecycle_calls)
+
 
 class _ControllerStub:
-    def __init__(self) -> None:
+    def __init__(self, lifecycle_status: str | None = None) -> None:
         self.calls = 0
+        self.lifecycle_calls = 0
+        self.lifecycle_status = lifecycle_status
 
     def run_once(self, *args, **kwargs) -> ControllerTickResult:  # noqa: ANN002, ANN003
         self.calls += 1
         return ControllerTickResult(status="season_no_eligible_participant")
 
-    def _run_external_lifecycle_tick(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
-        return None
+    def _run_external_lifecycle_tick(self, *args, **kwargs) -> ControllerTickResult | None:  # noqa: ANN002, ANN003
+        self.lifecycle_calls += 1
+        if self.lifecycle_status is None:
+            return None
+        return ControllerTickResult(status=self.lifecycle_status)
 
 
 def _config(root: Path, *, status: str) -> RunConfig:

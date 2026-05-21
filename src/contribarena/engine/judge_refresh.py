@@ -17,6 +17,22 @@ from contribarena.errors import InfrastructureError
 from contribarena.trace import TraceWriter
 
 
+TRANSIENT_JUDGE_MARKERS = (
+    "apiconnectionerror",
+    "connection error",
+    "connection reset",
+    "socket reset",
+    "timeout",
+    "timed out",
+    "503",
+    "502",
+    "504",
+    "service unavailable",
+    "bad gateway",
+    "gateway timeout",
+)
+
+
 @dataclass(frozen=True)
 class JudgeRefreshResult:
     runs_judged: int
@@ -68,8 +84,133 @@ def refresh_judgement(
         _ensure_artifact(summary, "judge_dimension_packets.json", "json")
         _ensure_artifact(summary, "judgement.json", "json")
         _write_json(run_dir / "run_summary.json", summary)
+        if mark_transient_judgement_retry_due(run_dir):
+            skipped.append(f"{run_dir}: transient judgement deferred")
+            continue
+        retry_path = run_dir / "judgement_retry_state.json"
+        if retry_path.exists():
+            retry_state = {
+                "status": "succeeded",
+                "completed_at": judgement.created_at,
+                "source": "judgement_refresh",
+            }
+            _write_json(retry_path, retry_state)
+            summary = _read_json(run_dir / "run_summary.json")
+            summary["judgement_retry"] = retry_state
+            _write_json(run_dir / "run_summary.json", summary)
         judged += 1
     return JudgeRefreshResult(runs_judged=judged, skipped=skipped)
+
+
+def mark_transient_judgement_retry_due(run_dir: Path) -> bool:
+    summary_path = run_dir / "run_summary.json"
+    if not summary_path.exists():
+        return False
+    summary = _read_json(summary_path)
+    judgement_path = run_dir / "judgement.json"
+    judgement = (
+        _read_json(judgement_path)
+        if judgement_path.exists()
+        else summary.get("judgement", {})
+    )
+    if not isinstance(judgement, dict):
+        return False
+    if not _judgement_needs_transient_retry(judgement):
+        return False
+    existing = (
+        _read_json(run_dir / "judgement_retry_state.json")
+        if (run_dir / "judgement_retry_state.json").exists()
+        else summary.get("judgement_retry")
+    )
+    attempts = int(existing.get("attempts") or 0) if isinstance(existing, dict) else 0
+    retry_state = {
+        "status": "due",
+        "attempts": attempts + 1,
+        "reason": "transient_judge_failure",
+        "source": "judge_panel",
+    }
+    _write_json(run_dir / "judgement_retry_state.json", retry_state)
+    summary["judgement_retry"] = retry_state
+    judgement["status"] = "deferred"
+    judgement["judge_score"] = None
+    judgement["arena_score"] = None
+    if judgement_path.exists():
+        _write_json(judgement_path, judgement)
+        summary["judgement"] = _judgement(run_dir).model_dump(mode="json")
+    else:
+        summary["judgement"] = judgement
+    _write_json(summary_path, summary)
+    return True
+
+
+def refresh_due_judgements(
+    *,
+    config: RunConfig,
+    input_dir: Path,
+    season_id: str | None = None,
+    limit: int = 1,
+) -> JudgeRefreshResult:
+    due = [
+        run_dir
+        for run_dir in _due_judgement_run_dirs(input_dir, season_id=season_id)
+    ][: max(0, limit)]
+    judged = 0
+    skipped: list[str] = []
+    for run_dir in due:
+        state = _read_json(run_dir / "judgement_retry_state.json")
+        state["status"] = "running"
+        _write_json(run_dir / "judgement_retry_state.json", state)
+        try:
+            result = refresh_judgement(
+                config=config,
+                input_dir=input_dir,
+                run_id=_summary_run_id(run_dir / "run_summary.json"),
+                force=True,
+            )
+        except Exception as exc:
+            state["status"] = "due" if _transient_text(str(exc)) else "failed"
+            state["last_error"] = str(exc)[:500]
+            _write_json(run_dir / "judgement_retry_state.json", state)
+            skipped.append(f"{run_dir}: {exc}")
+            continue
+        judged += result.runs_judged
+        skipped.extend(result.skipped)
+    return JudgeRefreshResult(runs_judged=judged, skipped=skipped)
+
+
+def _due_judgement_run_dirs(input_dir: Path, *, season_id: str | None) -> list[Path]:
+    rows: list[tuple[str, Path]] = []
+    for state_path in sorted(input_dir.rglob("judgement_retry_state.json")):
+        state = _read_json(state_path)
+        if str(state.get("status") or "") != "due":
+            continue
+        run_dir = state_path.parent
+        summary_path = run_dir / "run_summary.json"
+        if not summary_path.exists():
+            continue
+        summary = _read_json(summary_path)
+        season = summary.get("season", {}) if isinstance(summary.get("season"), dict) else {}
+        if season_id and str(season.get("id") or "") != season_id:
+            continue
+        rows.append((str(summary.get("started_at") or run_dir.name), run_dir))
+    return [run_dir for _, run_dir in sorted(rows)]
+
+
+def _judgement_needs_transient_retry(judgement: dict[str, object]) -> bool:
+    if str(judgement.get("status") or "") not in {"fallback", "partial_fallback"}:
+        return False
+    judges = judgement.get("judges", [])
+    if not isinstance(judges, list):
+        return False
+    return any(
+        isinstance(judge, dict) and _transient_text(str(judge.get("error") or ""))
+        for judge in judges
+    )
+
+
+def _transient_text(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in TRANSIENT_JUDGE_MARKERS)
 
 
 def _target_run_dirs(

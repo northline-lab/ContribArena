@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from contribarena.engine.seasons import normalize_model_identity
 from contribarena.engine.surface_indexer import (
     SURFACE_SCHEMA_VERSION,
     _apply_frozen_leaderboard,
@@ -434,10 +437,15 @@ class SurfaceReadModel:
             skipped=len(bundle.get("skipped") or []),
         )
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         db = sqlite3.connect(self.db_path)
         db.row_factory = sqlite3.Row
-        return db
+        try:
+            yield db
+            db.commit()
+        finally:
+            db.close()
 
 
 def _api_run(run: dict[str, Any], run_dir: Path, skipped: list[str]) -> dict[str, Any]:
@@ -717,12 +725,13 @@ def _run_row(run: dict[str, Any]) -> tuple[str, str, str, str, str, str, str, st
     season = run.get("season", {}) if isinstance(run.get("season"), dict) else {}
     agent = run.get("agent", {}) if isinstance(run.get("agent"), dict) else {}
     repository = run.get("repository", {}) if isinstance(run.get("repository"), dict) else {}
+    agent_name = _agent_display_name(run, agent)
     return (
         str(run.get("run_id") or ""),
         str(season.get("id") or ""),
         str(agent.get("participant_id") or ""),
-        str(agent.get("handle") or agent.get("name") or "builtin"),
-        str(agent.get("name") or "builtin"),
+        str(agent.get("handle") or agent_name),
+        agent_name,
         str(run.get("run_status") or "unknown"),
         str(run.get("wake_source") or ""),
         str(repository.get("full_name") or ""),
@@ -738,6 +747,8 @@ def _season_rows(runs: list[dict[str, Any]]) -> list[tuple[str, str, str]]:
 def _seasons_from_runs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seasons: dict[str, dict[str, Any]] = {}
     for run in runs:
+        if _ranking_excluded(run):
+            continue
         season = run.get("season", {}) if isinstance(run.get("season"), dict) else {}
         season_id = str(season.get("id") or "")
         if not season_id:
@@ -760,6 +771,8 @@ def _seasons_from_runs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
             existing["wake_sources"].append(wake_source)
     participant_counts: dict[str, set[str]] = {}
     for run in runs:
+        if _ranking_excluded(run):
+            continue
         season = run.get("season", {}) if isinstance(run.get("season"), dict) else {}
         agent = run.get("agent", {}) if isinstance(run.get("agent"), dict) else {}
         season_id = str(season.get("id") or "")
@@ -806,6 +819,8 @@ def _workspace_tuple(row: dict[str, Any]) -> tuple[str, str, str, str, str]:
 def _participant_rows(runs: list[dict[str, Any]]) -> list[tuple[str, str, str]]:
     participants: dict[tuple[str, str], dict[str, Any]] = {}
     for run in runs:
+        if _ranking_excluded(run):
+            continue
         season = run.get("season", {}) if isinstance(run.get("season"), dict) else {}
         agent = run.get("agent", {}) if isinstance(run.get("agent"), dict) else {}
         season_id = str(season.get("id") or "")
@@ -818,7 +833,7 @@ def _participant_rows(runs: list[dict[str, Any]]) -> list[tuple[str, str, str]]:
             {
                 "season_id": season_id,
                 "participant_id": participant_id,
-                "agent_name": str(agent.get("name") or "builtin"),
+                "agent_name": _agent_display_name(run, agent),
                 "agent_handle": str(agent.get("handle") or participant_id),
                 "runs_count": 0,
                 "prs_opened": 0,
@@ -1092,6 +1107,39 @@ def _merged(run: dict[str, Any]) -> bool:
     )
     pr = run.get("pull_request", {}) if isinstance(run.get("pull_request"), dict) else {}
     return outcome.get("status") == "merged" or pr.get("state") == "merged"
+
+
+def _replacement_excluded(run: dict[str, Any]) -> bool:
+    replacement = run.get("replacement")
+    if not isinstance(replacement, dict):
+        return False
+    return str(replacement.get("status") or "") in {"due", "replaced"}
+
+
+def _judgement_retry_excluded(run: dict[str, Any]) -> bool:
+    retry = run.get("judgement_retry")
+    if not isinstance(retry, dict):
+        return False
+    if str(retry.get("status") or "") in {"due", "running"}:
+        return True
+    judgement = run.get("judgement", {}) if isinstance(run.get("judgement"), dict) else {}
+    return str(judgement.get("status") or "") == "deferred"
+
+
+def _ranking_excluded(run: dict[str, Any]) -> bool:
+    return _replacement_excluded(run) or _judgement_retry_excluded(run)
+
+
+def _agent_display_name(run: dict[str, Any], agent: dict[str, Any]) -> str:
+    for raw in (
+        str(agent.get("name") or ""),
+        str(agent.get("handle") or ""),
+        str(agent.get("participant_id") or ""),
+        str(run.get("model") or ""),
+    ):
+        if raw and raw != "builtin":
+            return normalize_model_identity(raw)
+    return normalize_model_identity(str(run.get("model") or "unknown"))
 
 
 def _append_float(values: list[float], value: object) -> None:

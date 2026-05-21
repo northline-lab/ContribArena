@@ -32,6 +32,8 @@ export interface Season {
   };
   transitions?: Array<Record<string, unknown>>;
   runtime_events?: SchedulerEvent[];
+  runtime_status?: string;
+  next_tick_at?: string;
   updated_at?: string;
   leaderboard_frozen?: boolean;
   runs_count?: number;
@@ -73,6 +75,18 @@ export interface Judgement {
   source_artifacts: string[];
 }
 
+export interface RuntimeStatus {
+  status?: string;
+  reason?: string;
+  message?: string;
+  attempts?: number;
+  source_run_id?: string;
+  replacement_run_id?: string;
+  completed_run_id?: string;
+  last_error?: string;
+  [key: string]: unknown;
+}
+
 export interface RunSummary {
   schema_version: string;
   run_id: string;
@@ -97,6 +111,8 @@ export interface RunSummary {
   maintainer_outcome: { status: MaintainerStatus; observed_at: string; source: string };
   judgement: Judgement;
   artifacts: Artifact[];
+  replacement?: RuntimeStatus;
+  judgement_retry?: RuntimeStatus;
 }
 
 export interface LeaderboardEntry {

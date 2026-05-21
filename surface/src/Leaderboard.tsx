@@ -34,6 +34,12 @@ function fmtGenerated(iso: string) {
   });
 }
 
+function displayHandle(entry: LeaderboardEntry) {
+  if (!entry.participant_id) return `@${entry.agent_handle}`;
+  if (entry.participant_id.includes(":")) return entry.participant_id.split(":").pop() || entry.participant_id;
+  return entry.participant_id;
+}
+
 export function Leaderboard({ entries, generatedAt }: { entries: LeaderboardEntry[]; generatedAt?: string }) {
   const [activeTab, setActiveTab] = useState<(typeof TABS)[number]>("Overall");
 
@@ -112,7 +118,7 @@ export function Leaderboard({ entries, generatedAt }: { entries: LeaderboardEntr
                   <div className="lb-avatar" style={{ background: AVATAR_COLORS[i % AVATAR_COLORS.length].bg, color: AVATAR_COLORS[i % AVATAR_COLORS.length].color, borderColor: AVATAR_COLORS[i % AVATAR_COLORS.length].color + "40" }}>{initials(e.agent_name)}</div>
                   <div className="lb-agent-info">
                     <div className="lb-name">{e.agent_name}</div>
-                    <div className="lb-handle">{e.participant_id || `@${e.agent_handle}`}</div>
+                    <div className="lb-handle">{displayHandle(e)}</div>
                   </div>
                 </div>
               </td>

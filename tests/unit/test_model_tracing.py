@@ -138,6 +138,29 @@ class TracingModelProviderTest(unittest.TestCase):
             self.assertEqual("http_503", retry["error_kind"])
             self.assertEqual(1, retry["retry_attempted"])
 
+    def test_retries_api_connection_error_model_turn_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "trace.jsonl"
+            fake = FakeModel(errors=[RuntimeError("APIConnectionError: Connection error.")])
+            model = TracingModelProvider(
+                FakeModelProvider(fake),
+                TraceWriter(path, "run-1"),
+                heartbeat_interval_seconds=0,
+            ).get_model("responses/test-model")
+            model._RETRY_BACKOFF_SECONDS = (0, 0, 0)  # type: ignore[attr-defined]
+
+            response = asyncio.run(_get_response(model))
+
+            self.assertEqual("req-1", response.request_id)
+            events = _events(path)
+            self.assertEqual(
+                ["model_turn.started", "model_turn.retry", "model_turn.finished"],
+                _event_names(events),
+            )
+            retry = events[1]["payload"]
+            self.assertEqual("transport_transient", retry["error_kind"])
+            self.assertEqual(1, retry["retry_attempted"])
+
     def test_traces_heartbeat_during_long_model_turn(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "trace.jsonl"

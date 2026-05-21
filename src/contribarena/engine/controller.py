@@ -8,13 +8,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
-from contribarena.config.schema import DEFAULT_MEMORY_RELATIVE, MemoryConfig, RunConfig
+from contribarena.config.schema import DEFAULT_MEMORY_RELATIVE, MemoryConfig, RunConfig, SeasonParticipantConfig
 from contribarena.engine.external_lifecycle import (
+    lifecycle_record_for_opened_pr,
     lifecycle_record_due,
     mark_lifecycle_observation_failed,
     observe_lifecycle_record,
 )
 from contribarena.engine.goals import GoalService
+from contribarena.engine.judge_refresh import refresh_due_judgements
 from contribarena.engine.middleware.governance import (
     GovernanceMiddleware,
     load_governance_state,
@@ -29,7 +31,9 @@ from contribarena.engine.seasons import (
     SeasonStore,
     append_post_completion_outcome,
     load_participant_state,
+    mark_participant_replacement_consumed,
     mark_participant_run_started,
+    participant_next_wake_at,
     participant_is_due,
     participant_id_for,
     participant_max_concurrent,
@@ -194,7 +198,11 @@ class LocalController:
         season = store.load(config.season.id, config.season)
         if season.status != "active":
             return None
-        launched_results: list[RunResult] = []
+        lifecycle_tick = self._run_external_lifecycle_tick(config)
+        judgement_tick = _refresh_due_season_judgements(config, season.id)
+        if judgement_tick is not None:
+            return judgement_tick
+        due: list[tuple[str, SeasonParticipantConfig, dict[str, object]]] = []
         for participant in season.participants:
             if "agent" not in participant.role:
                 continue
@@ -223,6 +231,24 @@ class LocalController:
                     detail="wake_interval_not_elapsed",
                 )
                 continue
+            due.append((participant_id, participant, participant_state))
+        if due:
+            due.sort(
+                key=lambda item: (
+                    0
+                    if isinstance(item[2].get("replacement"), dict)
+                    and item[2]["replacement"].get("status") == "due"
+                    else 1,
+                    participant_next_wake_at(
+                        season=season,
+                        participant=item[1],
+                        participant_id=item[0],
+                        state=item[2],
+                    ),
+                    item[0],
+                )
+            )
+            participant_id, participant, participant_state = due[0]
             run_config = config.model_copy(
                 update={
                     "run": config.run.model_copy(
@@ -243,6 +269,14 @@ class LocalController:
                 status="prepared",
                 detail="wake_dispatched",
             )
+            replacement = participant_state.get("replacement")
+            if isinstance(replacement, dict) and replacement.get("status") == "due":
+                mark_participant_replacement_consumed(
+                    store,
+                    season.id,
+                    participant_id,
+                    replacement_run_id="pending",
+                )
             mark_participant_run_started(
                 store,
                 season.id,
@@ -252,21 +286,58 @@ class LocalController:
                 increment_active=False,
             )
             run_result = self.launcher.run(run_config, output_dir=output_dir, verbose=verbose)
-            launched_results.append(run_result)
-        if launched_results:
-            status = (
-                "run_failed"
-                if any(result.status != "completed" for result in launched_results)
-                else "run_completed"
-            )
-            return ControllerTickResult(status=status, run_result=launched_results[-1])
+            if isinstance(replacement, dict) and replacement.get("status") == "due":
+                mark_participant_replacement_consumed(
+                    store,
+                    season.id,
+                    participant_id,
+                    replacement_run_id=run_result.run_id,
+                )
+            status = "run_completed" if run_result.status == "completed" else "run_failed"
+            return ControllerTickResult(status=status, run_result=run_result)
+        if lifecycle_tick is not None:
+            return lifecycle_tick
         return ControllerTickResult(status="season_no_eligible_participant")
 
     def _run_external_lifecycle_tick(
         self,
         config: RunConfig,
     ) -> ControllerTickResult | None:
+        if config.season is not None and not config.run.participant_id:
+            store = SeasonStore.from_config(config)
+            season = store.load(config.season.id, config.season)
+            observed: list[ControllerTickResult] = []
+            for participant in season.participants:
+                if "agent" not in participant.role:
+                    continue
+                participant_id = participant_id_for(season, participant)
+                participant_config = config.model_copy(
+                    update={
+                        "run": config.run.model_copy(
+                            update={
+                                "model": participant.model,
+                                "season_id": season.id,
+                                "participant_id": participant_id,
+                                "wake_source": "auto",
+                            }
+                        )
+                    },
+                    deep=True,
+                )
+                tick = self._run_external_lifecycle_tick(participant_config)
+                if tick is not None:
+                    observed.append(tick)
+            if not observed:
+                return None
+            status = (
+                "lifecycle_terminal"
+                if any(tick.status == "lifecycle_terminal" for tick in observed)
+                else "lifecycle_tracked"
+            )
+            return ControllerTickResult(status=status)
         state = load_governance_state(config)
+        if _backfill_lifecycle_records(config, state):
+            save_governance_state(config, state)
         due_records = [
             record for record in state.lifecycle_records if lifecycle_record_due(record)
         ]
@@ -356,7 +427,9 @@ class LocalController:
                     "next_poll_at": observation.record.next_poll_at,
                 },
             )
+            _update_originating_run_lifecycle_artifacts(config, observation.record)
             _append_post_completion_outcome_if_needed(config, observation.record)
+            _refresh_participant_pr_counts(config, state)
             _record_lifecycle_memory_artifacts(
                 config,
                 observation.record,
@@ -402,11 +475,269 @@ def _record_season_scheduler_attempt(
     save_governance_state(config, state)
 
 
+def _refresh_due_season_judgements(config: RunConfig, season_id: str) -> ControllerTickResult | None:
+    result = refresh_due_judgements(
+        config=config,
+        input_dir=config.artifacts.output_root,
+        season_id=season_id,
+        limit=1,
+    )
+    if result.runs_judged:
+        return ControllerTickResult(status="judgement_refreshed")
+    if result.skipped:
+        return ControllerTickResult(status="judgement_refresh_failed")
+    return None
+
+
 def _active_short_term_goal(config: RunConfig) -> bool:
     if not config.goal.enabled:
         return False
     goal = GoalService(config, run_id="controller").context.short_term
     return goal is not None and goal.status == "active"
+
+
+def _backfill_lifecycle_records(config: RunConfig, state: GovernanceState) -> bool:
+    existing = {(record.repository, record.number) for record in state.lifecycle_records}
+    changed = False
+    for pr in state.pull_requests:
+        key = (pr.repository, pr.number)
+        if key in existing:
+            continue
+        state.lifecycle_records.append(
+            lifecycle_record_for_opened_pr(
+                repository=pr.repository,
+                number=pr.number,
+                url=pr.url,
+                originating_run_dir=_originating_run_dir_for_pr(config, pr),
+                branch=pr.branch,
+                head=pr.branch,
+                base="main",
+                head_sha="",
+                ci_status=None,
+                poll_interval_seconds=config.governance.external_live.poll_interval_seconds,
+                initial_poll_delay_seconds=0,
+                season_id=pr.season_id or config.run.season_id or "",
+                participant_id=pr.participant_id or config.run.participant_id or "",
+            )
+        )
+        existing.add(key)
+        changed = True
+    return changed
+
+
+def _originating_run_dir_for_pr(config: RunConfig, pr: object) -> str:
+    repository = str(getattr(pr, "repository", "") or "")
+    number = getattr(pr, "number", None)
+    season_id = str(getattr(pr, "season_id", "") or config.run.season_id or "")
+    participant_id = str(getattr(pr, "participant_id", "") or config.run.participant_id or "")
+    try:
+        pr_number = int(number)
+    except (TypeError, ValueError):
+        return ""
+    for summary_path in config.artifacts.output_root.glob("*/run_summary.json"):
+        try:
+            payload = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        run_repo = payload.get("repository", {})
+        run_pr = payload.get("pull_request", {})
+        run_season = payload.get("season", {})
+        run_agent = payload.get("agent", {})
+        if not isinstance(run_repo, dict) or not isinstance(run_pr, dict):
+            continue
+        if str(run_repo.get("full_name") or "") != repository:
+            continue
+        try:
+            run_number = int(run_pr.get("number"))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+        if run_number != pr_number:
+            continue
+        if isinstance(run_season, dict) and season_id and str(run_season.get("id") or "") != season_id:
+            continue
+        if (
+            isinstance(run_agent, dict)
+            and participant_id
+            and str(run_agent.get("participant_id") or "") != participant_id
+        ):
+            continue
+        return str(summary_path.parent)
+    return ""
+
+
+def _update_originating_run_lifecycle_artifacts(
+    config: RunConfig,
+    record: PrLifecycleRecord,
+) -> None:
+    if season_is_completed(config):
+        return
+    if not record.originating_run_dir:
+        return
+    run_dir = Path(record.originating_run_dir)
+    if not run_dir.exists():
+        return
+    _upsert_run_lifecycle_state(config, run_dir, record)
+    _update_run_summary_outcome(config, run_dir, record)
+
+
+def _upsert_run_lifecycle_state(
+    config: RunConfig,
+    run_dir: Path,
+    record: PrLifecycleRecord,
+) -> None:
+    path = run_dir / "pr_lifecycle_state.json"
+    payload: dict[str, object] = {}
+    if path.exists():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                payload = raw
+        except json.JSONDecodeError:
+            payload = {}
+    records = payload.get("records", [])
+    if not isinstance(records, list):
+        records = []
+    updated = record.model_dump(mode="json")
+    replaced = False
+    for index, existing in enumerate(records):
+        if not isinstance(existing, dict):
+            continue
+        if existing.get("repository") == record.repository and existing.get("number") == record.number:
+            records[index] = updated
+            replaced = True
+            break
+    if not replaced:
+        records.append(updated)
+    payload.update(
+        {
+            "mode": config.run.mode,
+            "poll_interval_seconds": config.governance.external_live.poll_interval_seconds,
+            "records": records,
+        }
+    )
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _update_run_summary_outcome(
+    config: RunConfig,
+    run_dir: Path,
+    record: PrLifecycleRecord,
+) -> None:
+    path = run_dir / "run_summary.json"
+    if not path.exists():
+        return
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return
+    if not isinstance(payload, dict):
+        return
+    pr = payload.get("pull_request")
+    if not isinstance(pr, dict):
+        pr = {}
+    pr.update(
+        {
+            "url": record.url or pr.get("url") or "",
+            "number": record.number,
+            "state": record.state,
+        }
+    )
+    payload["pull_request"] = pr
+    outcome = _maintainer_outcome_from_lifecycle(record)
+    payload["maintainer_outcome"] = outcome
+    judgement = payload.get("judgement")
+    if isinstance(judgement, dict):
+        adjustment = _real_world_adjustment_for_lifecycle(config, record, outcome)
+        judgement["real_world_adjustment"] = adjustment
+        try:
+            judgement["arena_score"] = max(
+                0.0,
+                float(judgement.get("judge_score")) + adjustment,  # type: ignore[arg-type]
+            )
+        except (TypeError, ValueError):
+            pass
+        payload["judgement"] = judgement
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _maintainer_outcome_from_lifecycle(record: PrLifecycleRecord) -> dict[str, str]:
+    observed_at = record.last_observed_at
+    signal_kinds = {signal.kind for signal in record.maintainer_signals}
+    if signal_kinds & {"opt_out", "anti_ai_or_bot"}:
+        return {
+            "status": "policy_violation" if "anti_ai_or_bot" in signal_kinds else "opt_out",
+            "observed_at": observed_at,
+            "source": "maintainer_signal",
+        }
+    if record.state == "merged" or record.lifecycle_status == "merged":
+        return {"status": "merged", "observed_at": observed_at, "source": "github_pr_state"}
+    if record.lifecycle_status == "rejected":
+        return {"status": "changes_requested", "observed_at": observed_at, "source": "github_review"}
+    if record.state == "closed" or record.lifecycle_status == "closed":
+        return {"status": "closed", "observed_at": observed_at, "source": "github_pr_state"}
+    if record.lifecycle_status == "needs_response":
+        return {"status": "reviewed", "observed_at": observed_at, "source": "github_review"}
+    if record.lifecycle_status == "stale":
+        return {"status": "stale", "observed_at": observed_at, "source": "github_pr_state"}
+    return {"status": "pending", "observed_at": observed_at, "source": "github_pr_state"}
+
+
+def _real_world_adjustment_for_lifecycle(
+    config: RunConfig,
+    record: PrLifecycleRecord,
+    outcome: dict[str, str],
+) -> int:
+    adjustments = config.judgement.outcome_adjustments
+    status = outcome.get("status", "")
+    if status in {"spam", "opt_out", "policy_violation"}:
+        return adjustments.spam_or_opt_out
+    if status == "merged" or record.state == "merged":
+        return adjustments.merged
+    if status == "changes_requested":
+        return adjustments.changes_requested
+    if status == "reviewed":
+        return adjustments.reviewed
+    if status == "closed" or record.state == "closed":
+        return adjustments.closed
+    if record.state == "open":
+        return adjustments.opened
+    return 0
+
+
+def _refresh_participant_pr_counts(config: RunConfig, state: GovernanceState) -> None:
+    if not config.run.season_id or not config.run.participant_id:
+        return
+    participant_state = load_participant_state(
+        SeasonStore.from_config(config),
+        config.run.season_id,
+        config.run.participant_id,
+    )
+    refs: set[tuple[str, int]] = set()
+    merged: set[tuple[str, int]] = set()
+    for record in [*state.pull_requests, *state.lifecycle_records]:
+        ref = (record.repository, int(record.number))
+        refs.add(ref)
+        if record.state == "merged" or getattr(record, "lifecycle_status", "") == "merged":
+            merged.add(ref)
+    participant_state.update(
+        {
+            "season_id": config.run.season_id,
+            "participant_id": config.run.participant_id,
+            "prs_opened": len(refs),
+            "merged_prs": len(merged),
+        }
+    )
+    state_path = SeasonStore.from_config(config).participant_dir(
+        config.run.season_id,
+        config.run.participant_id,
+    ) / "participant_state.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        json.dumps(participant_state, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _append_external_lifecycle_log(
