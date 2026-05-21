@@ -213,6 +213,7 @@ button {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
   min-height: 38px;
   padding: 0 10px;
   border: 1px solid var(--line-strong);
@@ -223,12 +224,23 @@ button {
   font-weight: 800;
 }
 
+.season-selector > span {
+  flex: 0 0 auto;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
 .season-selector select {
-  max-width: 180px;
+  min-width: 0;
+  max-width: 160px;
   border: 0;
   background: transparent;
   color: var(--ink);
   font: inherit;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .github-star {
@@ -244,6 +256,7 @@ button {
   font-size: 13px;
   font-weight: 700;
   box-shadow: var(--sketch-shadow);
+  white-space: nowrap;
 }
 
 .github-star:hover {
@@ -403,20 +416,21 @@ button {
 }
 
 .tagline-stack u {
-  text-decoration: none;
-  padding: 0 3px 1px;
-  border-bottom: 3px solid var(--blue);
-  box-shadow: inset 0 -8px 0 rgba(31, 100, 181, 0.13);
+  text-decoration: underline wavy var(--blue);
+  text-decoration-thickness: 2px;
+  text-decoration-skip-ink: none;
+  text-underline-offset: 7px;
+  padding: 0;
+  border-bottom: 0;
+  box-shadow: none;
 }
 
 .tagline-stack span:nth-child(2) u {
-  border-bottom-color: var(--purple);
-  box-shadow: inset 0 -8px 0 rgba(129, 80, 201, 0.14);
+  text-decoration-color: var(--purple);
 }
 
 .tagline-stack span:nth-child(3) u {
-  border-bottom-color: var(--green);
-  box-shadow: inset 0 -8px 0 rgba(19, 130, 58, 0.13);
+  text-decoration-color: var(--green);
 }
 
 .hero-sub {
@@ -1690,10 +1704,10 @@ button {
 }
 
 .site-footer {
-  margin-top: 28px;
-  padding: 22px 40px 20px;
+  margin-top: 56px;
+  padding: 36px 40px 24px;
   border-top: 1px solid var(--line);
-  background: rgba(255, 253, 248, 0.48);
+  background: transparent;
 }
 
 .footer-grid {
@@ -1701,17 +1715,17 @@ button {
   margin: 0 auto;
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 26px;
+  gap: 32px;
 }
 
 .footer-pillar {
   display: grid;
-  grid-template-columns: 42px 1fr;
+  grid-template-columns: 28px 1fr;
   grid-template-rows: auto auto;
-  column-gap: 14px;
+  column-gap: 12px;
   align-items: start;
-  padding-right: 24px;
-  border-right: 1px solid var(--line);
+  padding-right: 0;
+  border-right: 0;
 }
 
 .footer-pillar:last-child {
@@ -1720,36 +1734,42 @@ button {
 
 .footer-pillar-icon {
   grid-row: 1 / -1;
-  width: 42px;
-  height: 42px;
+  width: 28px;
+  height: 28px;
   display: grid;
   place-items: center;
+  color: var(--ink-faint);
 }
 
 .footer-pillar-icon svg {
-  width: 34px;
-  height: 34px;
-  stroke: var(--ink);
+  width: 22px;
+  height: 22px;
+  stroke: currentColor;
 }
 
 .footer-pillar h3 {
-  margin: 0 0 3px;
-  font-size: 14px;
-  font-weight: 900;
+  margin: 0 0 4px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--ink-soft);
+  letter-spacing: 0.01em;
 }
 
 .footer-pillar p {
   margin: 0;
-  color: var(--ink-soft);
-  font-size: 12px;
-  line-height: 1.35;
+  color: var(--ink-faint);
+  font-size: 11.5px;
+  line-height: 1.45;
 }
 
 .footer-bottom {
   max-width: 1240px;
-  margin: 18px auto 0;
+  margin: 28px auto 0;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
   display: flex;
   justify-content: space-between;
+  align-items: center;
   gap: 20px;
   color: var(--ink-faint);
   font-size: 12px;
@@ -1821,6 +1841,35 @@ button {
 .loading-state {
   color: var(--ink-faint);
   text-align: center;
+}
+
+@media (max-width: 1280px) {
+  .site-header {
+    gap: 18px;
+    padding-left: 16px;
+    padding-right: 14px;
+  }
+
+  .nav {
+    gap: 14px;
+  }
+
+  .header-actions {
+    gap: 10px;
+  }
+
+  .season-selector > span {
+    display: none;
+  }
+
+  .season-selector select {
+    max-width: 132px;
+    font-size: 12.5px;
+  }
+
+  .github-star .star-count {
+    display: none;
+  }
 }
 
 @media (max-width: 1100px) {
