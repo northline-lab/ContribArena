@@ -206,6 +206,7 @@ class GithubToolsTest(unittest.TestCase):
         self.assertEqual("owner/project", metadata.full_name)
         self.assertEqual("Python", metadata.language)
         self.assertEqual(10, metadata.stars)
+        self.assertEqual(3, metadata.open_issues)
 
     def test_repo_issues_normalizes_gh_payload(self) -> None:
         class FakeClient:
