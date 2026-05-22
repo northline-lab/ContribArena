@@ -51,9 +51,12 @@ class ProviderPreflightTests(unittest.TestCase):
             season_provider_models(config, "season_0"),
         )
 
-    def test_default_judge_panel_uses_configured_provider_models(self) -> None:
+    def test_default_judge_panel_uses_only_season_judge_participants(self) -> None:
         config = _config(
-            participants=[SeasonParticipantConfig(model="compatible/qwen", role=["agent"])],
+            participants=[
+                SeasonParticipantConfig(model="compatible/qwen", role=["agent"]),
+                SeasonParticipantConfig(model="responses/gpt", role=["agent", "judge"]),
+            ],
             explicit_judges=False,
         )
         config.models.providers.compatible["qwen"] = CompatibleModelConfig(
@@ -61,7 +64,7 @@ class ProviderPreflightTests(unittest.TestCase):
             model="qwen",
         )
 
-        self.assertEqual(["compatible/qwen"], season_provider_models(config, "season_0"))
+        self.assertEqual(["compatible/qwen", "responses/gpt"], season_provider_models(config, "season_0"))
 
     def test_checks_models_and_skips_local_stub(self) -> None:
         config = _config(

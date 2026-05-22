@@ -17,6 +17,8 @@ from contribarena.config.schema import (
     ResponsesModelConfig,
     RunConfig,
     RunSection,
+    SeasonConfig,
+    SeasonParticipantConfig,
     WorkspaceConfig,
 )
 from contribarena.engine import judgement as judgement_module
@@ -305,9 +307,45 @@ class JudgementScoringTests(unittest.TestCase):
             packet.discovery_calls_summary,
         )
 
-    def test_default_judges_use_all_configured_provider_models(self) -> None:
+    def test_default_judges_use_season_judge_participants(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = _config(Path(tmp), explicit_judges=False)
+            config.run.model = "compatible/worker"
+            config.season = SeasonConfig(
+                id="season_0",
+                participants=[
+                    SeasonParticipantConfig(model="compatible/qwen", role=["agent"]),
+                    SeasonParticipantConfig(model="responses/gpt", role=["agent", "judge"]),
+                    SeasonParticipantConfig(model="anthropic/opus", role=["judge"]),
+                ],
+            )
+            config.models = ModelsConfig(
+                providers=ModelProvidersConfig(
+                    compatible={
+                        "qwen": CompatibleModelConfig(
+                            base_url="https://example.com/v1",
+                            api_key_env="TEST_API_KEY",
+                        )
+                    },
+                    responses={
+                        "gpt": ResponsesModelConfig(
+                            base_url="https://example.com/v1",
+                            api_key_env="TEST_API_KEY",
+                        )
+                    },
+                )
+            )
+            judges = judgement_module._judges(config)
+
+        self.assertEqual(
+            ["responses/gpt", "anthropic/opus"],
+            [judge.model for judge in judges],
+        )
+
+    def test_default_judges_use_all_configured_provider_models_without_season(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(Path(tmp), explicit_judges=False)
+            config.season = None
             config.run.model = "compatible/worker"
             config.models = ModelsConfig(
                 providers=ModelProvidersConfig(

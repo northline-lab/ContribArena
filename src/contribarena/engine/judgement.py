@@ -208,6 +208,13 @@ def _judges(config: RunConfig) -> list[JudgementJudgeConfig]:
 
 
 def _configured_judge_models(config: RunConfig) -> list[str]:
+    if config.season is not None:
+        models = [
+            participant.model
+            for participant in config.season.participants
+            if "judge" in participant.role
+        ]
+        return _unique_models(models) or [config.run.model]
     providers = config.models.providers
     models = [
         *(f"compatible/{name}" for name in providers.compatible),
@@ -216,6 +223,17 @@ def _configured_judge_models(config: RunConfig) -> list[str]:
         *(f"gemini/{name}" for name in providers.gemini),
     ]
     return models or [config.run.model]
+
+
+def _unique_models(models: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for model in models:
+        if model in seen:
+            continue
+        seen.add(model)
+        unique.append(model)
+    return unique
 
 
 def _judge_from_config(
