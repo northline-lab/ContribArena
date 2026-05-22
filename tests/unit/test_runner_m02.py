@@ -36,8 +36,10 @@ from contribarena.engine.runner import (
     Runner,
     _build_assistant_update,
     _owned_live_push_command,
+    _replacement_due_terminal,
     _transient_runtime_message,
 )
+from contribarena.engine.agent_loop import TerminalState
 from contribarena.engine.seasons import derive_participant_id, normalize_model_identity
 from contribarena.engine.middleware.governance import load_governance_state, save_governance_state
 from contribarena.errors import AgentError
@@ -1789,6 +1791,29 @@ class RunnerM02Test(unittest.TestCase):
             self.assertNotIn(token, workspace_command)
             self.assertIn("https://x-access-token:***@github.com", workspace_command)
 
+    def test_live_push_transient_failure_retries_without_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _owned_live_config(tmp_path / "runs", live_enabled=True)
+            result = _run_with_fake_docker(
+                FakeIssueAgent(),
+                config,
+                tmp_path,
+                pr_client=FakePrClient(actor="contribarena-bot"),
+                push_transient_failures_before_success=2,
+            )
+
+            self.assertEqual("completed", result.status)
+            self.assertFalse((result.run_dir / "replacement_state.json").exists())
+            workspace_command = json.loads((result.run_dir / "workspace_command.json").read_text())
+            push_commands = [
+                command
+                for command in workspace_command["commands"]
+                if "git -C repo push contribarena-submit" in command["command"]
+            ]
+            self.assertEqual(3, len(push_commands))
+            self.assertEqual([1, 1, 0], [command["exit_code"] for command in push_commands])
+
     def test_agent_exception_writes_terminal_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1859,9 +1884,21 @@ class RunnerM02Test(unittest.TestCase):
         self.assertTrue(_transient_runtime_message("APIConnectionError: Connection error."))
         self.assertTrue(_transient_runtime_message("Gateway timeout from provider"))
         self.assertTrue(_transient_runtime_message("HTTP 503 service unavailable"))
+        self.assertTrue(_transient_runtime_message("HTTP 500 internal server error"))
+        self.assertTrue(_transient_runtime_message("GnuTLS recv error (-110)"))
         self.assertFalse(_transient_runtime_message("HTTP 400 bad request"))
         self.assertFalse(_transient_runtime_message("context_length_exceeded"))
         self.assertFalse(_transient_runtime_message("unsupported tool format"))
+
+    def test_pr_publish_failure_does_not_trigger_participant_replacement(self) -> None:
+        terminal = TerminalState(
+            status="failed",
+            reason="pr_branch_push_failed",
+            layer="pr",
+            message="fatal: unable to access github: GnuTLS recv error (-110)",
+        )
+
+        self.assertFalse(_replacement_due_terminal(terminal))
 
     def test_provider_error_message_reaches_terminal_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2904,6 +2941,7 @@ def _run_with_fake_docker(
     diff_path: str = "repo/app.py",
     pr_client: object | None = None,
     push_failure_stderr: str = "",
+    push_transient_failures_before_success: int = 0,
     push_success_stdout: str = "",
     guidance_failure: bool = False,
 ):
@@ -2920,6 +2958,19 @@ def _run_with_fake_docker(
         '    *"git -C repo push contribarena-submit"*) '
         f'printf %s {json.dumps(push_success_stdout)}; exit 0 ;;\n'
         if push_success_stdout
+        else ""
+    )
+    transient_push_counter = tmp_path / "push_attempts"
+    push_transient_case = (
+        '    *"git -C repo push contribarena-submit"*) '
+        f'count="$(cat {transient_push_counter} 2>/dev/null || printf 0)"; '
+        'next=$((count + 1)); '
+        f'printf "%s" "$next" > {transient_push_counter}; '
+        f'if [ "$next" -le {push_transient_failures_before_success} ]; then '
+        'printf "fatal: unable to access github: GnuTLS recv error (-110)" >&2; exit 1; '
+        'fi; '
+        'printf "push ok"; exit 0 ;;\n'
+        if push_transient_failures_before_success
         else ""
     )
     guidance_failure_case = (
@@ -2948,6 +2999,7 @@ def _run_with_fake_docker(
         '    *"missing_test.py"*) printf "pytest failed\\n"; exit 0 ;;\n'
         f"{guidance_failure_case}"
         f"{push_failure_case}"
+        f"{push_transient_case}"
         f"{push_success_case}"
         '    *"git diff --binary -- ."*) '
         f'printf "diff --git a/{diff_path} b/{diff_path}\\n"; exit 0 ;;\n'

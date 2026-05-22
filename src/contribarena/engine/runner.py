@@ -8,6 +8,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from time import sleep
 
 from contribarena.agent import AgentInvocationContext, AgentInvocationResult
 from contribarena.agent import ContributorAgent
@@ -117,6 +118,10 @@ class OwnedLivePrExecutionResult:
     label_ensure_result: LabelOperationResult | None = None
     label_set_result: LabelOperationResult | None = None
     label_skipped_reason: str = ""
+
+
+_LIVE_PR_RETRY_ATTEMPTS = 3
+_LIVE_PR_RETRY_SLEEP_SECONDS = 2.0
 
 
 @dataclass
@@ -1237,16 +1242,9 @@ def _record_replacement_if_due(
 
 
 def _replacement_due_terminal(terminal: TerminalState) -> bool:
-    if terminal.layer not in {"model_runtime", "pr"}:
+    if terminal.layer != "model_runtime":
         return False
-    if terminal.layer == "model_runtime":
-        return _transient_runtime_message(terminal.message)
-    if terminal.layer == "pr":
-        return _transient_runtime_message(terminal.message) or terminal.reason in {
-            "pr_open_failed",
-            "pr_branch_push_failed",
-        }
-    return False
+    return _transient_runtime_message(terminal.message)
 
 
 def _transient_runtime_message(message: str) -> bool:
@@ -1258,11 +1256,14 @@ def _transient_runtime_message(message: str) -> bool:
             "connection error",
             "connection reset",
             "socket reset",
+            "gnutls",
+            "tls connection",
             "timeout",
             "timed out",
             "503",
             "502",
             "504",
+            "500",
             "service unavailable",
             "bad gateway",
             "gateway timeout",
@@ -1673,13 +1674,15 @@ def _execute_live_pr(
         actor=actor,
         token_env=token_env,
     )
-    push_result = _redact_live_command_result(
-        workspace.run_with_env(command, {token_env: token}),
-        token,
+    push_result = _run_live_push_with_retry(
+        workspace=workspace,
+        command=command,
+        env={token_env: token},
+        token=token,
+        capture=capture,
     )
     if push_result.command_type != "other":
         push_result = push_result.model_copy(update={"command_type": "other"})
-    capture.record_command(push_result)
     if push_result.exit_code != 0:
         return OwnedLivePrExecutionResult(
             strategy=strategy,
@@ -1689,8 +1692,8 @@ def _execute_live_pr(
             push_result=push_result,
         )
 
-    open_pr = getattr(client, "open_pr")
-    pr_result = open_pr(
+    pr_result = _open_live_pr_with_retry(
+        client=client,
         owner=target.owner,
         repo=target.repo,
         title=draft.title,
@@ -1749,6 +1752,61 @@ def _execute_live_pr(
         label_set_result=label_set_result,
         label_skipped_reason=label_skipped_reason,
     )
+
+
+def _run_live_push_with_retry(
+    *,
+    workspace: DockerWorkspaceManager,
+    command: str,
+    env: dict[str, str],
+    token: str,
+    capture: ArtifactCapture,
+) -> CommandResult:
+    result: CommandResult | None = None
+    for attempt in range(1, _LIVE_PR_RETRY_ATTEMPTS + 1):
+        result = _redact_live_command_result(workspace.run_with_env(command, env), token)
+        if result.command_type != "other":
+            result = result.model_copy(update={"command_type": "other"})
+        capture.record_command(result)
+        if result.exit_code == 0 or not _transient_runtime_message(
+            "\n".join((result.stderr, result.stdout))
+        ):
+            return result
+        if attempt < _LIVE_PR_RETRY_ATTEMPTS:
+            sleep(_LIVE_PR_RETRY_SLEEP_SECONDS)
+    if result is None:
+        raise RuntimeError("live PR push did not run")
+    return result
+
+
+def _open_live_pr_with_retry(
+    *,
+    client: object,
+    owner: str,
+    repo: str,
+    title: str,
+    body: str,
+    head: str,
+    base: str,
+) -> PullRequestCreateResult:
+    open_pr = getattr(client, "open_pr")
+    result: PullRequestCreateResult | None = None
+    for attempt in range(1, _LIVE_PR_RETRY_ATTEMPTS + 1):
+        result = open_pr(
+            owner=owner,
+            repo=repo,
+            title=title,
+            body=body,
+            head=head,
+            base=base,
+        )
+        if result.ok or not _transient_runtime_message(result.error):
+            return result
+        if attempt < _LIVE_PR_RETRY_ATTEMPTS:
+            sleep(_LIVE_PR_RETRY_SLEEP_SECONDS)
+    if result is None:
+        raise RuntimeError("live PR open did not run")
+    return result
 
 
 def _observe_live_ci(
