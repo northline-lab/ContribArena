@@ -10,6 +10,7 @@ from contribarena.engine.gateway import (
     DoctorResult,
     GatewayCommandResult,
     GatewayPaths,
+    _participant_ranking_state,
     _write_gateway_state,
     load_gateway_state,
     resolve_gateway_paths,
@@ -96,7 +97,21 @@ class GatewayLifecycleTests(unittest.TestCase):
 
             self.assertEqual("started", result.status)
             self.assertEqual(4321, result.pid)
-            self.assertEqual(False, doctor.call_args.kwargs["repair"])
+        self.assertEqual(False, doctor.call_args.kwargs["repair"])
+
+    def test_participant_ranking_state_matches_judgement_retry_exclusion_statuses(self) -> None:
+        self.assertEqual(
+            "excluded:judgement_retry_due",
+            _participant_ranking_state("WAITING", {}, {"status": "due"}),
+        )
+        self.assertEqual(
+            "excluded:judgement_retry_running",
+            _participant_ranking_state("WAITING", {}, {"status": "running"}),
+        )
+        self.assertEqual(
+            "none",
+            _participant_ranking_state("WAITING", {}, {"status": "failed"}),
+        )
 
 
 def _paths(config_path: Path) -> GatewayPaths:

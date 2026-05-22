@@ -275,7 +275,7 @@ class SurfaceIndexerTests(unittest.TestCase):
             )
             summary_path = input_dir / "run-b" / "run_summary.json"
             payload = _read_json(summary_path)
-            payload["replacement"] = {"status": "exhausted", "reason": "model_runtime", "layer": "model_runtime"}
+            payload["replacement"] = {"status": "replaced", "reason": "model_runtime", "layer": "model_runtime"}
             summary_path.write_text(
                 json.dumps(payload, indent=2, ensure_ascii=True) + "\n",
                 encoding="utf-8",

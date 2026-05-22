@@ -255,6 +255,43 @@ class BackendReadApiTests(unittest.TestCase):
             self.assertTrue(excluded["ranking_excluded"])
             self.assertEqual("replacement_exhausted", excluded["ranking_exclusion_reason"])
 
+    def test_replaced_run_is_excluded_from_default_rankings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runs_dir = root / "runs"
+            _write_run(
+                runs_dir / "run-a",
+                run_id="run-a",
+                agent_handle="qwen-3.6-plus",
+                season_id="season_0",
+            )
+            _write_run(
+                runs_dir / "run-b",
+                run_id="run-b",
+                agent_handle="mimo-v2.5-pro",
+                season_id="season_0",
+            )
+            summary_path = runs_dir / "run-b" / "run_summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary["replacement"] = {
+                "status": "replaced",
+                "reason": "model_runtime",
+                "layer": "model_runtime",
+            }
+            summary_path.write_text(
+                json.dumps(summary, indent=2, ensure_ascii=True) + "\n",
+                encoding="utf-8",
+            )
+
+            model = SurfaceReadModel(root / "read.sqlite")
+            model.refresh_from_artifacts(runs_dir)
+
+            self.assertEqual(1, model.stats("season_0")["runs"])
+            runs = model.runs(season_id="season_0")
+            excluded = next(run for run in runs if run["run_id"] == "run-b")
+            self.assertTrue(excluded["ranking_excluded"])
+            self.assertEqual("replacement_replaced", excluded["ranking_exclusion_reason"])
+
     def test_builtin_agent_name_is_normalized_from_participant_for_read_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

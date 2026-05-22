@@ -914,7 +914,7 @@ def _participant_ranking_state(
 ) -> str:
     if replacement.get("status") in {"due", "running", "replaced", "failed", "exhausted"}:
         return f"excluded:replacement_{replacement.get('status')}"
-    if judgement_retry.get("status") in {"due", "running", "failed"}:
+    if judgement_retry.get("status") in {"due", "running"}:
         return f"excluded:judgement_retry_{judgement_retry.get('status')}"
     if status in {"RUNNING", "DUE", "WAITING"}:
         return "none"

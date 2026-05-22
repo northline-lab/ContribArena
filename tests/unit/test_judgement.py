@@ -490,6 +490,55 @@ class JudgementScoringTests(unittest.TestCase):
             self.assertEqual("skipped", updated["judgement_retry"]["status"])
             self.assertEqual("not_judged", updated["judgement"]["status"])
 
+    def test_due_judgement_refresh_skips_terminal_state_transient_without_replacement_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run-a"
+            run_dir.mkdir()
+            summary = {
+                "run_id": "run-a",
+                "season": {"id": "season_0"},
+                "started_at": "2026-05-22T00:00:00+00:00",
+                "run_status": "failed",
+                "terminal_reason": "model_runtime",
+                "terminal_layer": "model_runtime",
+                "judgement": {"status": "deferred", "judge_score": None, "arena_score": None},
+            }
+            (run_dir / "run_summary.json").write_text(
+                json.dumps(summary, indent=2, ensure_ascii=True) + "\n",
+                encoding="utf-8",
+            )
+            (run_dir / "terminal_state.json").write_text(
+                json.dumps(
+                    {
+                        "status": "failed",
+                        "reason": "model_runtime",
+                        "layer": "model_runtime",
+                        "message": "APIConnectionError: Connection error.",
+                    },
+                    indent=2,
+                    ensure_ascii=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (run_dir / "judgement_retry_state.json").write_text(
+                json.dumps({"status": "due", "attempts": 1}, ensure_ascii=True) + "\n",
+                encoding="utf-8",
+            )
+
+            result = refresh_due_judgements(
+                config=_config(Path(tmp)),
+                input_dir=Path(tmp),
+                season_id="season_0",
+            )
+
+            self.assertEqual(0, result.runs_judged)
+            retry = json.loads((run_dir / "judgement_retry_state.json").read_text(encoding="utf-8"))
+            updated = json.loads((run_dir / "run_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual("skipped", retry["status"])
+            self.assertEqual("transient_replacement_pending", retry["reason"])
+            self.assertEqual("not_judged", updated["judgement"]["status"])
+
 
 def _config(output_root: Path, *, explicit_judges: bool = True) -> RunConfig:
     config = RunConfig(

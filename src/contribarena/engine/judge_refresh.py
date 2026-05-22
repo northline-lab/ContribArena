@@ -228,7 +228,7 @@ def _run_has_transient_replacement(run_dir: Path, summary: dict[str, object]) ->
 def _transient_replacement_payload(replacement: object) -> bool:
     if not isinstance(replacement, dict):
         return False
-    if str(replacement.get("status") or "") not in {"due", "running", "failed", "exhausted"}:
+    if str(replacement.get("status") or "") not in {"due", "running", "replaced", "failed", "exhausted"}:
         return False
     if str(replacement.get("layer") or "") == "model_runtime":
         return True

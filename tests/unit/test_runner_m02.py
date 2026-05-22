@@ -32,7 +32,12 @@ from contribarena.config.schema import (
 from contribarena.agent import AgentInvocationResult
 from contribarena.agent.contributor import build_agent_instructions
 from contribarena.engine.goals import GoalService, goal_state_path
-from contribarena.engine.runner import Runner, _build_assistant_update, _owned_live_push_command
+from contribarena.engine.runner import (
+    Runner,
+    _build_assistant_update,
+    _owned_live_push_command,
+    _transient_runtime_message,
+)
 from contribarena.engine.seasons import derive_participant_id, normalize_model_identity
 from contribarena.engine.middleware.governance import load_governance_state, save_governance_state
 from contribarena.errors import AgentError
@@ -1849,6 +1854,14 @@ class RunnerM02Test(unittest.TestCase):
             manifest_names = {entry["name"] for entry in manifest["artifacts"]}
             self.assertIn("replacement_state.json", manifest_names)
             self.assertNotIn("judgement.json", manifest_names)
+
+    def test_transient_runtime_message_markers_are_conservative(self) -> None:
+        self.assertTrue(_transient_runtime_message("APIConnectionError: Connection error."))
+        self.assertTrue(_transient_runtime_message("Gateway timeout from provider"))
+        self.assertTrue(_transient_runtime_message("HTTP 503 service unavailable"))
+        self.assertFalse(_transient_runtime_message("HTTP 400 bad request"))
+        self.assertFalse(_transient_runtime_message("context_length_exceeded"))
+        self.assertFalse(_transient_runtime_message("unsupported tool format"))
 
     def test_provider_error_message_reaches_terminal_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
