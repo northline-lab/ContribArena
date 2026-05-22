@@ -244,7 +244,7 @@ class SurfaceIndexerTests(unittest.TestCase):
             self.assertEqual("", artifacts["missing.md"]["url"])
             self.assertIn("missing public artifact 'missing.md'", result.skipped[0])
 
-    def test_replacement_due_runs_do_not_count_in_leaderboard_or_stats(self) -> None:
+    def test_replacement_runs_do_not_count_in_leaderboard_or_stats(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             input_dir = root / "runs"
@@ -275,11 +275,7 @@ class SurfaceIndexerTests(unittest.TestCase):
             )
             summary_path = input_dir / "run-b" / "run_summary.json"
             payload = _read_json(summary_path)
-            payload["replacement"] = {
-                "status": "due",
-                "reason": "model_runtime",
-                "layer": "model_runtime",
-            }
+            payload["replacement"] = {"status": "exhausted", "reason": "model_runtime", "layer": "model_runtime"}
             summary_path.write_text(
                 json.dumps(payload, indent=2, ensure_ascii=True) + "\n",
                 encoding="utf-8",

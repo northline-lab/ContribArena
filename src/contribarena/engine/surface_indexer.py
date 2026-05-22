@@ -688,7 +688,7 @@ def _replacement_excluded(run: dict[str, Any]) -> bool:
     replacement = run.get("replacement")
     if not isinstance(replacement, dict):
         return False
-    return str(replacement.get("status") or "") in {"due", "replaced"}
+    return str(replacement.get("status") or "") in {"due", "running", "replaced", "failed", "exhausted"}
 
 
 def _judgement_retry_excluded(run: dict[str, Any]) -> bool:

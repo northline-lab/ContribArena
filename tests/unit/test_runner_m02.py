@@ -139,6 +139,22 @@ class FakeProviderErrorAgent:
         )
 
 
+class FakeTransientProviderErrorAgent:
+    def run(
+        self,
+        config: RunConfig,
+        tools: object,
+        prompt: str,
+        model_provider: object = None,
+        **kwargs: object,
+    ) -> AgentInvocationResult:
+        return AgentInvocationResult(
+            content="Provider invocation failed: APIConnectionError",
+            stopped_reason="provider_error",
+            error_message="APIConnectionError: Connection error.",
+        )
+
+
 class FakeBlankProviderErrorAgent:
     def run(
         self,
@@ -1810,6 +1826,29 @@ class RunnerM02Test(unittest.TestCase):
                 if line.strip()
             ]
             self.assertIn("agent.invocation_failed", {event["event"] for event in trace_events})
+            self.assertTrue((result.run_dir / "judgement.json").exists())
+            self.assertFalse((result.run_dir / "replacement_state.json").exists())
+
+    def test_transient_provider_error_is_replacement_and_not_judged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _config(tmp_path / "runs")
+            result = _run_with_fake_docker(FakeTransientProviderErrorAgent(), config, tmp_path)
+
+            self.assertEqual("failed", result.status)
+            self.assertEqual("model_runtime", result.terminal_layer)
+            replacement = json.loads((result.run_dir / "replacement_state.json").read_text())
+            self.assertEqual("due", replacement["status"])
+            self.assertEqual("model_runtime", replacement["layer"])
+            self.assertFalse((result.run_dir / "judgement.json").exists())
+            self.assertFalse((result.run_dir / "judgement_retry_state.json").exists())
+            summary = json.loads((result.run_dir / "run_summary.json").read_text())
+            self.assertEqual("due", summary["replacement"]["status"])
+            self.assertEqual("not_judged", summary["judgement"]["status"])
+            manifest = json.loads((result.run_dir / "artifact_manifest.json").read_text())
+            manifest_names = {entry["name"] for entry in manifest["artifacts"]}
+            self.assertIn("replacement_state.json", manifest_names)
+            self.assertNotIn("judgement.json", manifest_names)
 
     def test_provider_error_message_reaches_terminal_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

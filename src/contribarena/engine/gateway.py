@@ -912,7 +912,7 @@ def _participant_ranking_state(
     replacement: dict[str, Any],
     judgement_retry: dict[str, Any],
 ) -> str:
-    if replacement.get("status") in {"due", "running", "replaced", "exhausted"}:
+    if replacement.get("status") in {"due", "running", "replaced", "failed", "exhausted"}:
         return f"excluded:replacement_{replacement.get('status')}"
     if judgement_retry.get("status") in {"due", "running", "failed"}:
         return f"excluded:judgement_retry_{judgement_retry.get('status')}"

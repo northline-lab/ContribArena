@@ -485,7 +485,14 @@ class Runner:
                 _finalize_workspace(workspace, trace, terminal, config.workspace.cleanup_policy)
                 workspace_finalized = True
             _write_run_summary_artifact(artifacts, config, run_id, repo_slug, terminal)
-            _write_judgement_artifacts(artifacts, config, run_id, trace=trace, operator=operator)
+            _write_judgement_artifacts(
+                artifacts,
+                config,
+                run_id,
+                terminal=terminal,
+                trace=trace,
+                operator=operator,
+            )
             _write_run_summary_artifact(artifacts, config, run_id, repo_slug, terminal)
             trace.write(
                 RunState.ARTIFACTS_WRITTEN,
@@ -558,7 +565,14 @@ class Runner:
                 _finalize_workspace(workspace, trace, terminal, config.workspace.cleanup_policy)
                 workspace_finalized = True
             _write_run_summary_artifact(artifacts, config, run_id, repo_slug, terminal)
-            _write_judgement_artifacts(artifacts, config, run_id, trace=trace, operator=operator)
+            _write_judgement_artifacts(
+                artifacts,
+                config,
+                run_id,
+                terminal=terminal,
+                trace=trace,
+                operator=operator,
+            )
             _write_run_summary_artifact(artifacts, config, run_id, repo_slug, terminal)
             artifacts.finalize_manifest()
             mark_participant_run_finished(
@@ -1161,10 +1175,13 @@ def _write_judgement_artifacts(
     config: RunConfig,
     run_id: str,
     *,
+    terminal: TerminalState,
     trace: TraceWriter | None = None,
     operator: OperatorProgressWriter | None = None,
 ) -> None:
     if not config.judgement.enabled:
+        return
+    if not _judgement_eligible_terminal(terminal):
         return
     packet = build_judge_packet(config=config, run_id=run_id, run_dir=artifacts.run_dir)
     artifacts.write_json("judge_packet.json", packet.model_dump(mode="json"), required=False)
@@ -1184,6 +1201,14 @@ def _write_judgement_artifacts(
     from contribarena.engine.judge_refresh import mark_transient_judgement_retry_due
 
     mark_transient_judgement_retry_due(artifacts.run_dir)
+
+
+def _judgement_eligible_terminal(terminal: TerminalState) -> bool:
+    if terminal.layer in {"workspace", "budget"}:
+        return False
+    if _replacement_due_terminal(terminal):
+        return False
+    return terminal.status == "completed" or terminal.layer in {"agent", "quality", "pr", "model_runtime"}
 
 
 def _record_replacement_if_due(

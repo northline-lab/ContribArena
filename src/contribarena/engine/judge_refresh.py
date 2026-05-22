@@ -162,6 +162,25 @@ def refresh_due_judgements(
     skipped: list[str] = []
     for run_dir in due:
         state = _read_json(run_dir / "judgement_retry_state.json")
+        summary = _read_json(run_dir / "run_summary.json")
+        if _run_has_transient_replacement(run_dir, summary):
+            state["status"] = "skipped"
+            state["reason"] = "transient_replacement_pending"
+            state["source"] = "judgement_refresh"
+            _write_json(run_dir / "judgement_retry_state.json", state)
+            summary["judgement_retry"] = state
+            judgement = summary.get("judgement", {}) if isinstance(summary.get("judgement"), dict) else {}
+            if judgement:
+                judgement["status"] = "not_judged"
+                judgement["judge_score"] = None
+                judgement["arena_score"] = None
+                summary["judgement"] = judgement
+                judgement_path = run_dir / "judgement.json"
+                if judgement_path.exists():
+                    _write_json(judgement_path, judgement)
+            _write_json(run_dir / "run_summary.json", summary)
+            skipped.append(f"{run_dir}: skipped judgement for transient replacement")
+            continue
         state["status"] = "running"
         _write_json(run_dir / "judgement_retry_state.json", state)
         try:
@@ -187,6 +206,33 @@ def refresh_due_judgements(
         judged += result.runs_judged
         skipped.extend(result.skipped)
     return JudgeRefreshResult(runs_judged=judged, skipped=skipped)
+
+
+def _run_has_transient_replacement(run_dir: Path, summary: dict[str, object]) -> bool:
+    replacement_path = run_dir / "replacement_state.json"
+    if replacement_path.exists():
+        replacement = _read_json(replacement_path)
+        if isinstance(replacement, dict) and _transient_replacement_payload(replacement):
+            return True
+    if _transient_replacement_payload(summary.get("replacement")):
+        return True
+    terminal_path = run_dir / "terminal_state.json"
+    terminal = _read_json(terminal_path) if terminal_path.exists() else {}
+    if not isinstance(terminal, dict):
+        return False
+    return str(terminal.get("layer") or "") == "model_runtime" and _transient_text(
+        str(terminal.get("message") or "")
+    )
+
+
+def _transient_replacement_payload(replacement: object) -> bool:
+    if not isinstance(replacement, dict):
+        return False
+    if str(replacement.get("status") or "") not in {"due", "running", "failed", "exhausted"}:
+        return False
+    if str(replacement.get("layer") or "") == "model_runtime":
+        return True
+    return _transient_text(str(replacement.get("message") or ""))
 
 
 def _due_judgement_run_dirs(input_dir: Path, *, season_id: str | None) -> list[Path]:
