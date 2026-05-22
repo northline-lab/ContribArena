@@ -314,6 +314,45 @@ class GithubToolsTest(unittest.TestCase):
         self.assertEqual("2026-05-03T00:00:00Z", merged_prs[0].merged_at)
         self.assertEqual(2, len(searched))
 
+    def test_repo_pr_rest_fallback_parses_labels(self) -> None:
+        class FakeClient:
+            def gh_json(self, args: list[str]) -> GitHubResponse:
+                return GitHubResponse(ok=False, source="gh", error="gh not available")
+
+            def rest_json(
+                self,
+                method: str,
+                path: str,
+                params: dict | None = None,
+                json_body: dict | None = None,
+                token_env: str | None = None,
+            ) -> GitHubResponse:
+                return GitHubResponse(
+                    ok=True,
+                    source="httpx",
+                    data=[
+                        {
+                            "number": 42,
+                            "title": "Test PR",
+                            "html_url": "https://github.com/owner/project/pull/42",
+                            "state": "open",
+                            "user": {"login": "contributor"},
+                            "body": "Body text",
+                            "labels": [{"name": "bug"}, {"name": "good first issue"}],
+                            "created_at": "2026-05-01T00:00:00Z",
+                            "updated_at": "2026-05-02T00:00:00Z",
+                            "merged_at": None,
+                            "draft": False,
+                        }
+                    ],
+                )
+
+        with patch("contribarena.tools.repo_prs.GitHubClient", FakeClient):
+            open_prs = repo_get_open_prs(_candidate())
+
+        self.assertEqual(42, open_prs[0].number)
+        self.assertEqual(["bug", "good first issue"], open_prs[0].labels)
+
     def test_repo_issue_linkage_uses_issue_and_pr_signals(self) -> None:
         class FakeClient:
             def gh_json(self, args: list[str]) -> GitHubResponse:

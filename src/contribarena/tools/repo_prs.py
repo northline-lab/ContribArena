@@ -137,7 +137,7 @@ def _from_rest(item: dict[str, Any]) -> PullRequestCandidate:
         state=str(item.get("state") or ""),
         author=str(user.get("login") if isinstance(user, dict) else ""),
         body=str(item.get("body") or ""),
-        labels=[],
+        labels=_labels(item.get("labels")),
         created_at=_optional_str(item.get("created_at")),
         updated_at=_optional_str(item.get("updated_at")),
         merged_at=_optional_str(item.get("merged_at")),
