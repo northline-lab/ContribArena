@@ -54,12 +54,19 @@ def check_season_provider_connectivity(
     model_provider: ModelProvider | None = None,
 ) -> ProviderPreflightResult:
     provider = model_provider or ContribArenaModelProvider(config.models)
+    return asyncio.run(_check_models_and_close(provider, season_provider_models(config, season_id)))
+
+
+async def _check_models_and_close(
+    model_provider: ModelProvider,
+    models: list[str],
+) -> ProviderPreflightResult:
     try:
-        return asyncio.run(_check_models(provider, season_provider_models(config, season_id)))
+        return await _check_models(model_provider, models)
     finally:
-        close = getattr(provider, "aclose", None)
+        close = getattr(model_provider, "aclose", None)
         if close is not None:
-            asyncio.run(close())
+            await close()
 
 
 async def _check_models(

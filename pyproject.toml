@@ -17,6 +17,7 @@ dependencies = [
     "openai-agents>=0.17,<0.18",
     "httpx>=0.27",
     "fastapi>=0.115",
+    "rich>=13.0",
     "uvicorn>=0.30",
     "watchfiles>=0.22",
     "json-repair>=0.59",

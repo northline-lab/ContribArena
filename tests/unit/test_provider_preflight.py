@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
 from pathlib import Path
 from typing import Any
@@ -93,6 +94,19 @@ class ProviderPreflightTests(unittest.TestCase):
         with self.assertRaisesRegex(ContribArenaError, "season provider preflight failed"):
             raise_for_provider_preflight(result)
 
+    def test_closes_provider_in_same_event_loop_as_probe(self) -> None:
+        config = _config(
+            participants=[SeasonParticipantConfig(model="compatible/qwen")],
+            judges=[],
+        )
+        model = LoopBoundFakeModel()
+        provider = LoopBoundFakeProvider({"compatible/qwen": model})
+
+        result = check_season_provider_connectivity(config, model_provider=provider)
+
+        self.assertIn(("compatible/qwen", "ok"), [(check.model, check.status) for check in result.checks])
+        self.assertTrue(provider.closed)
+
 
 class FakeProvider(ModelProvider):
     def __init__(self, models: dict[str, Model]) -> None:
@@ -107,6 +121,16 @@ class FakeProvider(ModelProvider):
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+class LoopBoundFakeProvider(FakeProvider):
+    async def aclose(self) -> None:
+        close_loop = asyncio.get_running_loop()
+        for model in self.models.values():
+            if isinstance(model, LoopBoundFakeModel):
+                if model.loop is not close_loop:
+                    raise RuntimeError("closed in a different event loop")
+        await super().aclose()
 
 
 class FakeModel(Model):
@@ -138,6 +162,40 @@ class FakeModel(Model):
 
     def stream_response(self, *args: object, **kwargs: object) -> Any:
         raise NotImplementedError
+
+
+class LoopBoundFakeModel(FakeModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.loop: asyncio.AbstractEventLoop | None = None
+
+    async def get_response(
+        self,
+        system_instructions: str | None,
+        input: str | list[TResponseInputItem],
+        model_settings: ModelSettings,
+        tools: list[Tool],
+        output_schema: AgentOutputSchemaBase | None,
+        handoffs: list[Handoff],
+        tracing: Any,
+        *,
+        previous_response_id: str | None,
+        conversation_id: str | None,
+        prompt: Any,
+    ) -> ModelResponse:
+        self.loop = asyncio.get_running_loop()
+        return await super().get_response(
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            output_schema,
+            handoffs,
+            tracing,
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+            prompt=prompt,
+        )
 
 
 def _config(

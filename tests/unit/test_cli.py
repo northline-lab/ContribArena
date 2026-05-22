@@ -10,6 +10,7 @@ from unittest.mock import patch
 from typer.testing import CliRunner
 
 from contribarena.cli import app
+from contribarena.engine.gateway import DoctorCheck
 from contribarena.engine.runner import RunResult
 from contribarena.errors import ContribArenaError
 
@@ -633,11 +634,93 @@ class CliTest(unittest.TestCase):
                 runner.invoke(app, ["init", "--output", str(config_path)]).exit_code,
             )
 
-            result = runner.invoke(app, ["status", "--config", str(config_path)])
+            result = runner.invoke(app, ["backend-status", "--config", str(config_path)])
 
             self.assertEqual(0, result.exit_code, result.output)
             self.assertIn("Benchmark status:", result.output)
             self.assertIn("Runs:        0", result.output)
+
+    def test_gateway_status_reports_console_panel(self) -> None:
+        runner = CliRunner()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.yaml"
+            self.assertEqual(
+                0,
+                runner.invoke(app, ["init", "--output", str(config_path)]).exit_code,
+            )
+            text = config_path.read_text(encoding="utf-8")
+            config_path.write_text(
+                text
+                + f"\nartifacts:\n  output_root: {root / 'runs'}\n"
+                + f"\nbackend:\n  read_model_path: {root / 'read.sqlite'}\n"
+                + "\nseason:\n"
+                + "  id: season_0\n"
+                + "  name: Season 0\n"
+                + f"  state_root: {root / 'seasons'}\n"
+                + "  participants:\n"
+                + "    - model: local-stub\n",
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(app, ["status", "--config", str(config_path)])
+
+            self.assertEqual(0, result.exit_code, result.output)
+            self.assertIn("ContribArena", result.output)
+            self.assertIn("Participants", result.output)
+            self.assertIn("local-stub", result.output)
+            self.assertIn("queue:", result.output)
+            self.assertIn("due_wakes=", result.output)
+
+            season_ps = runner.invoke(app, ["season", "ps", "--config", str(config_path)])
+            self.assertEqual(0, season_ps.exit_code, season_ps.output)
+            self.assertIn("Participants", season_ps.output)
+            self.assertIn("local-stub", season_ps.output)
+
+            pr_ps = runner.invoke(app, ["pr", "ps", "--config", str(config_path)])
+            self.assertEqual(0, pr_ps.exit_code, pr_ps.output)
+            self.assertIn("PR Lifecycle", pr_ps.output)
+
+    def test_doctor_reports_skipped_provider_preflight(self) -> None:
+        runner = CliRunner()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.yaml"
+            self.assertEqual(
+                0,
+                runner.invoke(app, ["init", "--output", str(config_path)]).exit_code,
+            )
+            text = config_path.read_text(encoding="utf-8")
+            config_path.write_text(
+                text
+                + f"\nartifacts:\n  output_root: {root / 'runs'}\n"
+                + f"\nbackend:\n  read_model_path: {root / 'read.sqlite'}\n"
+                + "\nseason:\n"
+                + "  id: season_0\n"
+                + "  name: Season 0\n"
+                + f"  state_root: {root / 'seasons'}\n"
+                + "  participants:\n"
+                + "    - model: local-stub\n",
+                encoding="utf-8",
+            )
+
+            with patch("contribarena.engine.gateway._doctor_command") as doctor_command:
+                doctor_command.side_effect = lambda checks, name, command: checks.append(
+                    DoctorCheck(name, "ok", "mocked")
+                )
+                with patch("contribarena.engine.gateway._doctor_workspace_image") as image_check:
+                    image_check.side_effect = lambda checks, image: checks.append(
+                        DoctorCheck("workspace_image", "ok", image)
+                    )
+                    result = runner.invoke(
+                        app,
+                        ["doctor", "--config", str(config_path), "--skip-provider-preflight", "--repair"],
+                    )
+
+            self.assertEqual(0, result.exit_code, result.output)
+            self.assertIn("Doctor", result.output)
+            self.assertIn("providers", result.output)
+            self.assertIn("workspace_image", result.output)
 
     def test_runs_and_show_read_indexed_backend_state(self) -> None:
         runner = CliRunner()
@@ -654,7 +737,7 @@ class CliTest(unittest.TestCase):
             status = runner.invoke(
                 app,
                 [
-                    "status",
+                    "backend-status",
                     "--config",
                     str(config_path),
                     "--input-dir",
@@ -668,17 +751,20 @@ class CliTest(unittest.TestCase):
 
             runs = runner.invoke(
                 app,
-                ["runs", "--config", str(config_path), "--input-dir", str(runs_dir)],
+                ["runs", "ls", "--config", str(config_path), "--input-dir", str(runs_dir)],
             )
             self.assertEqual(0, runs.exit_code, runs.output)
             self.assertIn("run-a", runs.output)
             self.assertIn("agent-a", runs.output)
             self.assertIn("example/repo", runs.output)
+            self.assertIn("Ranking", runs.output)
+            self.assertIn("counted", runs.output)
 
             queried_runs = runner.invoke(
                 app,
                 [
                     "runs",
+                    "ls",
                     "--config",
                     str(config_path),
                     "--input-dir",
@@ -694,6 +780,7 @@ class CliTest(unittest.TestCase):
                 app,
                 [
                     "runs",
+                    "ls",
                     "--config",
                     str(config_path),
                     "--input-dir",

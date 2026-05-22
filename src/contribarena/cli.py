@@ -5,16 +5,32 @@ import sys
 import shutil
 import importlib.metadata
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
 import typer
+from rich.console import Console
+from rich.live import Live
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
 
 from contribarena import __version__
 from contribarena.config import load_run_config, write_starter_config
 from contribarena.config.schema import DEFAULT_READ_MODEL_RELATIVE
 from contribarena.engine import LocalController, Runner
-from contribarena.engine.api import create_app
+from contribarena.engine.gateway import (
+    DoctorResult,
+    build_status,
+    restart_gateway,
+    resolve_gateway_paths,
+    run_doctor,
+    run_gateway_loop,
+    start_gateway,
+    stop_gateway,
+    tail_log,
+)
 from contribarena.engine.judge_refresh import refresh_judgement
 from contribarena.engine.provider_preflight import (
     check_season_provider_connectivity,
@@ -36,6 +52,9 @@ app = typer.Typer(help="ContribArena control plane commands.")
 surface_app = typer.Typer(help="Build public read-only surface data.")
 season_app = typer.Typer(help="Manage season state and participant admission.")
 season_workspace_app = typer.Typer(help="Manage persistent season workspaces.")
+pr_app = typer.Typer(help="Inspect and refresh tracked PR lifecycle state.")
+runs_app = typer.Typer(help="Inspect run summaries and run logs.")
+console = Console()
 
 
 @app.command()
@@ -58,6 +77,278 @@ def validate(config: Path = typer.Option(..., "--config", "-c")) -> None:
         typer.echo(str(exc), err=True)
         raise typer.Exit(exc.exit_code) from exc
     typer.echo(f"Config valid: {config}")
+
+
+@app.command()
+def up(
+    config: Path = typer.Option(..., "--config", "-c"),
+    season_id: str | None = typer.Option(None, "--season-id"),
+    heartbeat_interval: str | None = typer.Option(None, "--heartbeat-interval"),
+    skip_doctor: bool = typer.Option(False, "--skip-doctor"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Start or resume the local ContribArena gateway in the background."""
+    try:
+        result = start_gateway(
+            config_path=config,
+            season_id=season_id,
+            heartbeat_interval=heartbeat_interval,
+            skip_doctor=skip_doctor,
+            verbose=verbose,
+        )
+    except ContribArenaError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(exc.exit_code) from exc
+    console.print(_gateway_command_panel(result.message, result.status, result.state))
+    _print_status_snapshot(config, season_id=season_id)
+
+
+@app.command()
+def down(
+    config: Path = typer.Option(..., "--config", "-c"),
+    timeout_seconds: int = typer.Option(30, "--timeout-seconds", min=1),
+) -> None:
+    """Stop the local ContribArena gateway gracefully."""
+    try:
+        result = stop_gateway(config_path=config, timeout_seconds=timeout_seconds)
+    except ContribArenaError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(exc.exit_code) from exc
+    console.print(_gateway_command_panel(result.message, result.status, result.state))
+    _print_status_snapshot(config)
+
+
+@app.command()
+def restart(
+    config: Path = typer.Option(..., "--config", "-c"),
+    season_id: str | None = typer.Option(None, "--season-id"),
+    heartbeat_interval: str | None = typer.Option(None, "--heartbeat-interval"),
+    skip_doctor: bool = typer.Option(False, "--skip-doctor"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Restart the gateway and rehydrate season state before new dispatch."""
+    try:
+        result = restart_gateway(
+            config_path=config,
+            season_id=season_id,
+            heartbeat_interval=heartbeat_interval,
+            skip_doctor=skip_doctor,
+            verbose=verbose,
+        )
+    except ContribArenaError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(exc.exit_code) from exc
+    console.print(_gateway_command_panel(result.message, result.status, result.state))
+    _print_status_snapshot(config, season_id=season_id)
+
+
+@app.command()
+def status(
+    config: Path = typer.Option(..., "--config", "-c"),
+    season_id: str | None = typer.Option(None, "--season-id"),
+    refresh: bool = typer.Option(False, "--refresh"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Show the gateway, season, participant, run, PR, and health status panel."""
+    try:
+        snapshot = build_status(config, season_id=season_id, refresh=refresh)
+    except ContribArenaError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(exc.exit_code) from exc
+    if json_output:
+        typer.echo(json.dumps(snapshot, indent=2, sort_keys=True))
+        return
+    if not console.is_terminal:
+        typer.echo(_plain_status(snapshot))
+        return
+    console.print(_status_panel(snapshot))
+
+
+@app.command()
+def dashboard(
+    config: Path = typer.Option(..., "--config", "-c"),
+    season_id: str | None = typer.Option(None, "--season-id"),
+    refresh_seconds: float = typer.Option(5.0, "--refresh-seconds", min=1.0),
+) -> None:
+    """Open a live terminal dashboard over the gateway status schema."""
+    try:
+        initial = build_status(config, season_id=season_id)
+    except ContribArenaError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(exc.exit_code) from exc
+    if not sys.stdout.isatty():
+        typer.echo(_plain_status(initial), nl=False)
+        return
+    try:
+        with Live(_status_panel(initial), console=console, refresh_per_second=2, screen=False) as live:
+            while True:
+                time.sleep(refresh_seconds)
+                live.update(_status_panel(build_status(config, season_id=season_id)))
+    except KeyboardInterrupt:
+        return
+
+
+@app.command()
+def logs(
+    config: Path = typer.Option(..., "--config", "-c"),
+    target: str = typer.Option("all", "--target"),
+    run_id: str | None = typer.Option(None, "--run"),
+    latest_run: bool = typer.Option(False, "--latest-run"),
+    lines: int = typer.Option(80, "--lines", min=1, max=1000),
+    follow: bool = typer.Option(False, "--follow", "-f"),
+) -> None:
+    """Tail gateway, season, API, or run logs without remembering file paths."""
+    try:
+        run_config = load_run_config(config)
+        paths = resolve_gateway_paths(config, run_config)
+        selected_run = run_id
+        if latest_run or run_id == "latest":
+            recent = build_status(config).get("runs", {}).get("recent", [])
+            if recent:
+                selected_run = str(recent[0].get("run_id") or "")
+    except ContribArenaError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(exc.exit_code) from exc
+    try:
+        while True:
+            console.clear() if follow and console.is_terminal else None
+            typer.echo(tail_log(paths, target=target, run_id=selected_run, lines=lines), nl=False)
+            if not follow:
+                break
+            time.sleep(2)
+    except KeyboardInterrupt:
+        return
+
+
+@app.command()
+def doctor(
+    config: Path = typer.Option(..., "--config", "-c"),
+    season_id: str | None = typer.Option(None, "--season-id"),
+    repair: bool = typer.Option(False, "--repair"),
+    skip_provider_preflight: bool = typer.Option(False, "--skip-provider-preflight"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Run gateway preflight checks and explain actionable failures."""
+    result = run_doctor(
+        config_path=config,
+        season_id=season_id,
+        repair=repair,
+        skip_provider_preflight=skip_provider_preflight,
+    )
+    if json_output:
+        typer.echo(
+            json.dumps(
+                {"checks": [check.__dict__ for check in result.checks]},
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        console.print(_doctor_panel(result))
+    if result.failed:
+        raise typer.Exit(1)
+
+
+@app.command("gateway-run", hidden=True)
+def gateway_run(
+    config: Path = typer.Option(..., "--config", "-c"),
+    season_id: str | None = typer.Option(None, "--season-id"),
+    heartbeat_interval: str | None = typer.Option(None, "--heartbeat-interval"),
+    skip_doctor: bool = typer.Option(False, "--skip-doctor"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Internal gateway loop entrypoint used by `contribarena up`."""
+    raise typer.Exit(
+        run_gateway_loop(
+            config_path=config,
+            season_id=season_id,
+            heartbeat_interval=heartbeat_interval,
+            skip_doctor=skip_doctor,
+            verbose=verbose,
+        )
+    )
+
+
+@pr_app.command("ps")
+def pr_ps(config: Path = typer.Option(..., "--config", "-c"), season_id: str | None = None) -> None:
+    """Show tracked PR lifecycle state for the selected season."""
+    try:
+        snapshot = build_status(config, season_id=season_id)
+    except ContribArenaError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(exc.exit_code) from exc
+    console.print(_pr_table(snapshot))
+
+
+@pr_app.command("refresh")
+def pr_refresh(config: Path = typer.Option(..., "--config", "-c")) -> None:
+    """Observe tracked PR lifecycle without scheduling new agent work."""
+    try:
+        run_config = load_run_config(config)
+        tick = LocalController()._run_external_lifecycle_tick(run_config)
+        artifact_root = _config_relative(config, run_config.artifacts.output_root)
+        read_model_path = _read_model_path(config, run_config, artifact_root)
+        SurfaceReadModel(read_model_path).refresh_from_artifacts(artifact_root)
+    except ContribArenaError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(exc.exit_code) from exc
+    status_text = tick.status if tick is not None else "no_lifecycle_work"
+    console.print(Panel(f"PR lifecycle refresh: {_label(status_text)}", title="PR Refresh"))
+
+
+@runs_app.command("ls")
+def runs_ls(
+    config: Path = typer.Option(..., "--config", "-c"),
+    input_dir: Path | None = typer.Option(None, "--input-dir"),
+    season_id: str | None = typer.Option(None, "--season-id"),
+    status_filter: str | None = typer.Option(None, "--status"),
+    agent: str | None = typer.Option(None, "--agent"),
+    query: str | None = typer.Option(None, "--query", "-q"),
+    limit: int = typer.Option(20, "--limit", min=1, max=500),
+    offset: int = typer.Option(0, "--offset", min=0),
+    refresh: bool = typer.Option(False, "--refresh"),
+) -> None:
+    """List runs with ranking inclusion and exclusion state."""
+    _runs_list_impl(
+        config=config,
+        input_dir=input_dir,
+        season_id=season_id,
+        status_filter=status_filter,
+        agent=agent,
+        query=query,
+        limit=limit,
+        offset=offset,
+        refresh=refresh,
+    )
+
+
+@runs_app.command("show")
+def runs_show(
+    run_id: str = typer.Argument(...),
+    config: Path = typer.Option(..., "--config", "-c"),
+    input_dir: Path | None = typer.Option(None, "--input-dir"),
+    artifact: str | None = typer.Option(None, "--artifact"),
+    refresh: bool = typer.Option(False, "--refresh"),
+) -> None:
+    """Show one run summary or artifact."""
+    _show_run_impl(
+        run_id=run_id,
+        config=config,
+        input_dir=input_dir,
+        artifact=artifact,
+        refresh=refresh,
+    )
+
+
+@runs_app.command("tail")
+def runs_tail(
+    run_id: str = typer.Argument(...),
+    config: Path = typer.Option(..., "--config", "-c"),
+    lines: int = typer.Option(80, "--lines", min=1, max=1000),
+    follow: bool = typer.Option(False, "--follow", "-f"),
+) -> None:
+    """Tail one run's operator events."""
+    logs(config=config, run_id=run_id, lines=lines, follow=follow)
 
 
 @app.command()
@@ -243,6 +534,69 @@ def season_status(config: Path = typer.Option(..., "--config", "-c"), season_id:
     typer.echo(f"Discovery:   {season.discovery_profile.scope}")
 
 
+@season_app.command("ps")
+def season_ps(config: Path = typer.Option(..., "--config", "-c"), season_id: str | None = None) -> None:
+    """Show participant due, retry, replacement, and score eligibility state."""
+    try:
+        snapshot = build_status(config, season_id=season_id)
+    except ContribArenaError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(exc.exit_code) from exc
+    console.print(_participants_table(snapshot))
+
+
+@season_app.command("events")
+def season_events(
+    config: Path = typer.Option(..., "--config", "-c"),
+    season_id: str | None = None,
+    limit: int = typer.Option(50, "--limit", min=1, max=500),
+) -> None:
+    """Show recent season heartbeat and scheduler events."""
+    try:
+        snapshot = build_status(config, season_id=season_id)
+    except ContribArenaError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(exc.exit_code) from exc
+    events = snapshot.get("events", []) if isinstance(snapshot.get("events"), list) else []
+    for event in events[-limit:]:
+        if not isinstance(event, dict):
+            continue
+        typer.echo(
+            f"{event.get('ts') or ''} "
+            f"{event.get('source') or event.get('event') or '-'} "
+            f"{event.get('status') or event.get('heartbeat_status') or '-'} "
+            f"{event.get('message') or event.get('detail') or event.get('error') or ''}"
+        )
+
+
+@season_app.command("logs")
+def season_logs(
+    config: Path = typer.Option(..., "--config", "-c"),
+    lines: int = typer.Option(80, "--lines", min=1, max=1000),
+    follow: bool = typer.Option(False, "--follow", "-f"),
+) -> None:
+    """Tail season runtime logs."""
+    logs(config=config, target="season", lines=lines, follow=follow)
+
+
+@season_app.command("restart")
+def season_restart(
+    config: Path = typer.Option(..., "--config", "-c"),
+    season_id: str | None = typer.Option(None, "--season-id"),
+    heartbeat_interval: str | None = typer.Option(None, "--heartbeat-interval"),
+    skip_doctor: bool = typer.Option(False, "--skip-doctor"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Restart the gateway-backed season worker."""
+    restart(
+        config=config,
+        season_id=season_id,
+        heartbeat_interval=heartbeat_interval,
+        skip_doctor=skip_doctor,
+        verbose=verbose,
+    )
+
+
 @season_app.command("inspect")
 def season_inspect(config: Path = typer.Option(..., "--config", "-c"), season_id: str | None = None) -> None:
     """Show detailed season runtime state."""
@@ -361,8 +715,8 @@ def controller(
             typer.echo(f"    Status: {tick.run_result.status}")
 
 
-@app.command()
-def status(
+@app.command("backend-status")
+def backend_status(
     config: Path = typer.Option(..., "--config", "-c"),
     input_dir: Path | None = typer.Option(None, "--input-dir"),
     refresh: bool = typer.Option(False, "--refresh"),
@@ -392,8 +746,7 @@ def status(
     typer.echo(f"  Skipped:     {summary.skipped}")
 
 
-@app.command("runs")
-def runs_list(
+def _runs_list_impl(
     config: Path = typer.Option(..., "--config", "-c"),
     input_dir: Path | None = typer.Option(None, "--input-dir"),
     season_id: str | None = typer.Option(None, "--season-id"),
@@ -404,7 +757,6 @@ def runs_list(
     offset: int = typer.Option(0, "--offset", min=0),
     refresh: bool = typer.Option(False, "--refresh"),
 ) -> None:
-    """List indexed benchmark runs."""
     try:
         run_config = load_run_config(config)
         artifact_root = input_dir or _config_relative(config, run_config.artifacts.output_root)
@@ -426,18 +778,24 @@ def runs_list(
     if not rows:
         typer.echo("No runs found.")
         return
-    typer.echo(f"{'Run ID':<28} {'Status':<11} {'Agent':<16} {'Repo':<26} {'Score':>5}")
+    typer.echo(f"{'Run ID':<28} {'Status':<11} {'Agent':<16} {'Repo':<26} {'Score':>5} {'Ranking':<24}")
     for row in rows:
         agent_info = row.get("agent", {}) if isinstance(row.get("agent"), dict) else {}
         repo = row.get("repository", {}) if isinstance(row.get("repository"), dict) else {}
         judgement = row.get("judgement", {}) if isinstance(row.get("judgement"), dict) else {}
         score = judgement.get("arena_score")
+        ranking = (
+            f"excluded:{row.get('ranking_exclusion_reason')}"
+            if row.get("ranking_excluded")
+            else "counted"
+        )
         typer.echo(
             f"{_clip(str(row.get('run_id') or ''), 28):<28} "
             f"{_clip(str(row.get('run_status') or 'unknown'), 11):<11} "
             f"{_clip(str(agent_info.get('handle') or agent_info.get('name') or ''), 16):<16} "
             f"{_clip(str(repo.get('full_name') or ''), 26):<26} "
-            f"{_score_text(score):>5}"
+            f"{_score_text(score):>5} "
+            f"{_clip(ranking, 24):<24}"
         )
 
 
@@ -450,6 +808,23 @@ def show_run(
     refresh: bool = typer.Option(False, "--refresh"),
 ) -> None:
     """Show one run summary or one artifact from the run directory."""
+    _show_run_impl(
+        run_id=run_id,
+        config=config,
+        input_dir=input_dir,
+        artifact=artifact,
+        refresh=refresh,
+    )
+
+
+def _show_run_impl(
+    *,
+    run_id: str,
+    config: Path,
+    input_dir: Path | None = None,
+    artifact: str | None = None,
+    refresh: bool = False,
+) -> None:
     try:
         run_config = load_run_config(config)
         artifact_root = input_dir or _config_relative(config, run_config.artifacts.output_root)
@@ -561,6 +936,8 @@ def serve(
         run_config = load_run_config(config)
         artifact_root = input_dir or _config_relative(config, run_config.artifacts.output_root)
         read_model_path = _read_model_path(config, run_config, artifact_root)
+        from contribarena.engine.api import create_app
+
         app_obj = create_app(
             run_config,
             input_dir=artifact_root,
@@ -615,6 +992,432 @@ def _package_version(name: str) -> str:
         return importlib.metadata.version(name)
     except importlib.metadata.PackageNotFoundError:
         return "missing"
+
+
+def _gateway_command_panel(message: str, status: str, state: dict[str, Any]) -> Panel:
+    text = Text()
+    text.append(f"{message}\n", style=_state_style(status))
+    if state:
+        for key in ("status", "pid", "season_id", "next_tick_at", "last_error"):
+            value = state.get(key)
+            if value not in {"", None}:
+                text.append(f"{key}: {value}\n")
+    return Panel(text, title="ContribArena Gateway", border_style=_state_style(status))
+
+
+def _doctor_panel(result: DoctorResult) -> Panel:
+    table = Table(show_header=True, header_style="bold", box=None)
+    table.add_column("Check", style="bold")
+    table.add_column("State", width=10)
+    table.add_column("Detail")
+    table.add_column("Hint")
+    for check in result.checks:
+        label = _label(check.status)
+        table.add_row(check.name, label, check.detail or "-", check.hint or "-")
+    title = "Doctor"
+    border = "red" if result.failed else "green"
+    return Panel(table, title=title, border_style=border)
+
+
+def _print_status_snapshot(config: Path, *, season_id: str | None = None) -> None:
+    try:
+        snapshot = build_status(config, season_id=season_id)
+    except ContribArenaError as exc:
+        console.print(Panel(str(exc), title="Status unavailable", border_style="red"))
+        return
+    console.print(_status_panel(snapshot))
+
+
+def _status_panel(snapshot: dict[str, Any]) -> Panel:
+    grid = Table.grid(expand=True)
+    grid.add_row(_header_table(snapshot))
+    grid.add_row(_health_table(snapshot))
+    grid.add_row(_season_table(snapshot))
+    grid.add_row(_participants_table(snapshot))
+    grid.add_row(_work_queue_table(snapshot))
+    grid.add_row(_runs_table(snapshot))
+    grid.add_row(_events_table(snapshot))
+    grid.add_row(_next_actions(snapshot))
+    gateway = snapshot.get("gateway", {}) if isinstance(snapshot.get("gateway"), dict) else {}
+    border = "green" if gateway.get("status") == "running" else "yellow"
+    return Panel(grid, title="ContribArena", border_style=border)
+
+
+def _header_table(snapshot: dict[str, Any]) -> Table:
+    paths = snapshot.get("paths", {}) if isinstance(snapshot.get("paths"), dict) else {}
+    gateway = snapshot.get("gateway", {}) if isinstance(snapshot.get("gateway"), dict) else {}
+    table = Table.grid(expand=True)
+    table.add_column(ratio=1)
+    table.add_column(ratio=1)
+    table.add_row(
+        f"config={paths.get('config') or '-'}",
+        f"generated={snapshot.get('generated_at') or '-'}",
+    )
+    table.add_row(
+        (
+            f"gateway={_label(str(gateway.get('status') or 'unknown'))} "
+            f"pid={gateway.get('pid') or '-'} uptime={_duration_text(gateway.get('uptime_seconds'))}"
+        ),
+        (
+            f"api={_label(str(gateway.get('api_status') or 'unknown'))} "
+            f"pid={gateway.get('api_pid') or '-'} log={paths.get('gateway_log') or '-'}"
+        ),
+    )
+    return table
+
+
+def _health_table(snapshot: dict[str, Any]) -> Panel:
+    health = snapshot.get("health", {}) if isinstance(snapshot.get("health"), dict) else {}
+    table = Table(show_header=True, header_style="bold", box=None)
+    table.add_column("Health")
+    table.add_column("State")
+    for key in ("gateway", "api", "read_model", "providers", "github", "docker", "paths"):
+        table.add_row(key, _label(str(health.get(key) or "unknown")))
+    return Panel(table, title="Health", border_style="blue")
+
+
+def _season_table(snapshot: dict[str, Any]) -> Panel:
+    gateway = snapshot.get("gateway", {}) if isinstance(snapshot.get("gateway"), dict) else {}
+    season = snapshot.get("season", {}) if isinstance(snapshot.get("season"), dict) else {}
+    heartbeat = season.get("heartbeat", {}) if isinstance(season.get("heartbeat"), dict) else {}
+    runs = snapshot.get("runs", {}) if isinstance(snapshot.get("runs"), dict) else {}
+    prs = snapshot.get("prs", {}) if isinstance(snapshot.get("prs"), dict) else {}
+    table = Table.grid(expand=True)
+    table.add_column(ratio=1)
+    table.add_column(ratio=1)
+    table.add_row(f"season={season.get('id') or '-'}", f"status={_label(str(season.get('status') or '-'))}")
+    table.add_row(
+        f"runtime={_label(str(season.get('runtime_status') or 'unknown'))}",
+        f"paused={str(bool(season.get('paused'))).lower()}",
+    )
+    table.add_row(
+        f"heartbeat={heartbeat.get('count') or 0} last={heartbeat.get('last_status') or '-'}",
+        f"next_tick={gateway.get('next_tick_at') or season.get('next_tick_at') or '-'}",
+    )
+    table.add_row(
+        f"runs counted={runs.get('counted', 0)} excluded={runs.get('excluded', 0)} total={runs.get('total', 0)}",
+        f"active_runs={season.get('active_runs', 0)} prs open={prs.get('open', 0)}",
+    )
+    return Panel(table, title=f"Season {season.get('id') or ''}", border_style="cyan")
+
+
+def _participants_table(snapshot: dict[str, Any]) -> Panel:
+    season = snapshot.get("season", {}) if isinstance(snapshot.get("season"), dict) else {}
+    participants = season.get("participants", []) if isinstance(season.get("participants"), list) else []
+    table = Table(show_header=True, header_style="bold", box=None)
+    table.add_column("Model", no_wrap=True)
+    table.add_column("State", no_wrap=True)
+    table.add_column("Next", no_wrap=True)
+    table.add_column("Last Run", no_wrap=True)
+    table.add_column("Retry / Replacement")
+    table.add_column("Score State")
+    if not participants:
+        table.add_row("-", _label("NONE"), "-", "-", "-", "-")
+    for participant in participants:
+        if not isinstance(participant, dict):
+            continue
+        replacement = participant.get("replacement", {}) if isinstance(participant.get("replacement"), dict) else {}
+        retry = participant.get("judgement_retry", {}) if isinstance(participant.get("judgement_retry"), dict) else {}
+        detail = "-"
+        if replacement:
+            detail = (
+                f"replacement={replacement.get('status')} "
+                f"{replacement.get('attempts')}/{replacement.get('max_attempts')}"
+            )
+        if retry:
+            detail = (
+                f"judge_retry={retry.get('status')} "
+                f"{retry.get('attempts')}/{retry.get('max_attempts')}"
+            )
+        table.add_row(
+            str(participant.get("display_name") or participant.get("model") or "-"),
+            _label(str(participant.get("state") or "unknown")),
+            str(participant.get("next_action") or "-"),
+            _clip(str(participant.get("last_run_id") or "-"), 14),
+            detail,
+            str(participant.get("ranking_state") or "none"),
+        )
+    return Panel(table, title="Participants", border_style="cyan")
+
+
+def _work_queue_table(snapshot: dict[str, Any]) -> Panel:
+    queue = snapshot.get("work_queue", {}) if isinstance(snapshot.get("work_queue"), dict) else {}
+    counts = queue.get("counts", {}) if isinstance(queue.get("counts"), dict) else {}
+    table = Table(show_header=True, header_style="bold", box=None)
+    table.add_column("Queue", no_wrap=True)
+    table.add_column("Count", justify="right")
+    table.add_column("Next Items")
+    rows = [
+        ("due_wakes", queue.get("due_wakes", [])),
+        ("running_runs", queue.get("running_runs", [])),
+        ("replacement", queue.get("replacement", [])),
+        ("judgement_retries", queue.get("judgement_retries", [])),
+        ("pr_polls", queue.get("pr_polls", [])),
+        ("ranking_excluded", queue.get("ranking_excluded", [])),
+        ("blocked", queue.get("blocked", [])),
+    ]
+    for name, raw_items in rows:
+        items = raw_items if isinstance(raw_items, list) else []
+        table.add_row(name, str(counts.get(name, len(items))), _queue_items_text(items))
+    return Panel(table, title="Work Queue", border_style="yellow")
+
+
+def _runs_table(snapshot: dict[str, Any]) -> Panel:
+    runs = snapshot.get("runs", {}) if isinstance(snapshot.get("runs"), dict) else {}
+    recent = runs.get("recent", []) if isinstance(runs.get("recent"), list) else []
+    table = Table(show_header=True, header_style="bold", box=None)
+    table.add_column("Run", no_wrap=True)
+    table.add_column("Agent", no_wrap=True)
+    table.add_column("Status", no_wrap=True)
+    table.add_column("Reason")
+    table.add_column("Judge")
+    table.add_column("PR")
+    table.add_column("Ranking")
+    if not recent:
+        table.add_row("-", "-", _label("NONE"), "-", "-", "-", "-")
+    for run in recent[:6]:
+        if not isinstance(run, dict):
+            continue
+        terminal = run.get("terminal", {}) if isinstance(run.get("terminal"), dict) else {}
+        judgement = run.get("judgement", {}) if isinstance(run.get("judgement"), dict) else {}
+        pr = run.get("pull_request", {}) if isinstance(run.get("pull_request"), dict) else {}
+        reason = (
+            run.get("terminal_reason")
+            or terminal.get("reason")
+            or run.get("reason")
+            or "-"
+        )
+        ranking = (
+            f"excluded:{run.get('ranking_exclusion_reason')}"
+            if run.get("ranking_excluded")
+            else "counted"
+        )
+        table.add_row(
+            _clip(str(run.get("run_id") or "-"), 14),
+            _clip(_run_display_name(run), 18),
+            _label(str(run.get("run_status") or run.get("status") or "unknown")),
+            _clip(str(reason), 24),
+            _clip(str(judgement.get("status") or "-"), 14),
+            _clip(str(pr.get("state") or pr.get("number") or "-"), 14),
+            ranking,
+        )
+    return Panel(table, title="Recent Runs", border_style="magenta")
+
+
+def _pr_table(snapshot: dict[str, Any]) -> Panel:
+    prs = snapshot.get("prs", {}) if isinstance(snapshot.get("prs"), dict) else {}
+    tracked = prs.get("tracked", []) if isinstance(prs.get("tracked"), list) else []
+    table = Table(show_header=True, header_style="bold", box=None)
+    table.add_column("Repository", no_wrap=True)
+    table.add_column("PR", no_wrap=True)
+    table.add_column("State", no_wrap=True)
+    table.add_column("Lifecycle", no_wrap=True)
+    table.add_column("CI", no_wrap=True)
+    table.add_column("Review", no_wrap=True)
+    table.add_column("Next Poll")
+    table.add_column("Run")
+    if not tracked:
+        table.add_row("-", "-", _label("NONE"), "-", "-", "-", "-", "-")
+    for record in tracked:
+        if not isinstance(record, dict):
+            continue
+        table.add_row(
+            str(record.get("repository") or "-"),
+            str(record.get("number") or "-"),
+            _label(str(record.get("state") or "unknown")),
+            str(record.get("lifecycle_status") or "-"),
+            str(record.get("ci_status") or "-"),
+            str(record.get("review_state") or record.get("review_cursor") or "-"),
+            str(record.get("next_poll_at") or "-"),
+            _clip(str(record.get("originating_run_dir") or "-"), 24),
+        )
+    return Panel(table, title="PR Lifecycle", border_style="cyan")
+
+
+def _events_table(snapshot: dict[str, Any]) -> Panel:
+    events = snapshot.get("events", []) if isinstance(snapshot.get("events"), list) else []
+    table = Table(show_header=True, header_style="bold", box=None)
+    table.add_column("Time", no_wrap=True)
+    table.add_column("Source", no_wrap=True)
+    table.add_column("Status", no_wrap=True)
+    table.add_column("Message")
+    if not events:
+        table.add_row("-", "-", _label("NONE"), "-")
+    for event in events[-6:]:
+        if not isinstance(event, dict):
+            continue
+        table.add_row(
+            _clip(str(event.get("ts") or ""), 19),
+            str(event.get("source") or event.get("event") or "-"),
+            _label(str(event.get("status") or event.get("heartbeat_status") or "-")),
+            _clip(str(event.get("message") or event.get("detail") or event.get("error") or "-"), 60),
+        )
+    return Panel(table, title="Latest Events", border_style="blue")
+
+
+def _plain_status(snapshot: dict[str, Any]) -> str:
+    paths = snapshot.get("paths", {}) if isinstance(snapshot.get("paths"), dict) else {}
+    gateway = snapshot.get("gateway", {}) if isinstance(snapshot.get("gateway"), dict) else {}
+    health = snapshot.get("health", {}) if isinstance(snapshot.get("health"), dict) else {}
+    season = snapshot.get("season", {}) if isinstance(snapshot.get("season"), dict) else {}
+    runs = snapshot.get("runs", {}) if isinstance(snapshot.get("runs"), dict) else {}
+    queue = snapshot.get("work_queue", {}) if isinstance(snapshot.get("work_queue"), dict) else {}
+    counts = queue.get("counts", {}) if isinstance(queue.get("counts"), dict) else {}
+    participants = season.get("participants", []) if isinstance(season.get("participants"), list) else []
+    recent = runs.get("recent", []) if isinstance(runs.get("recent"), list) else []
+    lines = [
+        "ContribArena Status",
+        f"generated: {snapshot.get('generated_at') or '-'}",
+        f"config: {paths.get('config') or '-'}",
+        f"gateway: {gateway.get('status') or 'unknown'} pid={gateway.get('pid') or '-'} state={gateway.get('state') or '-'}",
+        f"api: {gateway.get('api_status') or 'unknown'} pid={gateway.get('api_pid') or '-'} uptime={_duration_text(gateway.get('uptime_seconds'))}",
+        (
+            "health: "
+            + " ".join(
+                f"{key}={health.get(key) or 'unknown'}"
+                for key in ("api", "read_model", "providers", "github", "docker", "paths")
+            )
+        ),
+        (
+            f"season: {season.get('id') or '-'} status={season.get('status') or '-'} "
+            f"runtime={season.get('runtime_status') or '-'} paused={str(bool(season.get('paused'))).lower()} "
+            f"active_runs={season.get('active_runs', 0)} next_tick={gateway.get('next_tick_at') or season.get('next_tick_at') or '-'}"
+        ),
+        (
+            f"runs: total={runs.get('total', 0)} counted={runs.get('counted', 0)} "
+            f"excluded={runs.get('excluded', 0)} judged={runs.get('judged', 0)}"
+        ),
+        (
+            "queue: "
+            + " ".join(
+                f"{key}={counts.get(key, 0)}"
+                for key in (
+                    "due_wakes",
+                    "running_runs",
+                    "replacement",
+                    "judgement_retries",
+                    "pr_polls",
+                    "ranking_excluded",
+                    "blocked",
+                )
+            )
+        ),
+        "",
+        "Participants:",
+    ]
+    if not participants:
+        lines.append("  none")
+    for participant in participants[:12]:
+        if not isinstance(participant, dict):
+            continue
+        lines.append(
+            "  "
+            f"{participant.get('display_name') or participant.get('model') or '-'} "
+            f"state={participant.get('state') or '-'} "
+            f"next={participant.get('next_action') or '-'} "
+            f"last_run={participant.get('last_run_id') or '-'} "
+            f"ranking={participant.get('ranking_state') or 'none'}"
+        )
+    lines.extend(["", "Recent Runs:"])
+    if not recent:
+        lines.append("  none")
+    for run in recent[:8]:
+        if not isinstance(run, dict):
+            continue
+        ranking = (
+            f"excluded:{run.get('ranking_exclusion_reason')}"
+            if run.get("ranking_excluded")
+            else "counted"
+        )
+        lines.append(
+            "  "
+            f"{run.get('run_id') or '-'} "
+            f"{_run_display_name(run)} "
+            f"status={run.get('run_status') or run.get('status') or '-'} "
+            f"ranking={ranking}"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _next_actions(snapshot: dict[str, Any]) -> Panel:
+    paths = snapshot.get("paths", {}) if isinstance(snapshot.get("paths"), dict) else {}
+    config = paths.get("config") or "run_config.yaml"
+    runs = snapshot.get("runs", {}) if isinstance(snapshot.get("runs"), dict) else {}
+    recent = runs.get("recent", []) if isinstance(runs.get("recent"), list) else []
+    lines = [
+        f"contribarena logs --follow --config {config}",
+        f"contribarena doctor --config {config}",
+    ]
+    if recent and isinstance(recent[0], dict) and recent[0].get("run_id"):
+        lines.append(f"contribarena show {recent[0].get('run_id')} --config {config}")
+    return Panel("\n".join(lines), title="Next", border_style="green")
+
+
+def _queue_items_text(items: list[Any]) -> str:
+    labels: list[str] = []
+    for item in items[:3]:
+        if not isinstance(item, dict):
+            continue
+        label = (
+            item.get("display_name")
+            or item.get("participant_id")
+            or item.get("run_id")
+            or item.get("repository")
+            or item.get("repo")
+            or "-"
+        )
+        suffix = item.get("next_action") or item.get("reason") or item.get("lifecycle_status") or ""
+        labels.append(f"{label}:{suffix}" if suffix else str(label))
+    return ", ".join(labels) if labels else "-"
+
+
+def _run_display_name(run: dict[str, Any]) -> str:
+    agent = run.get("agent", {}) if isinstance(run.get("agent"), dict) else {}
+    model = str(run.get("model") or "")
+    raw = str(agent.get("handle") or agent.get("name") or model or "-")
+    if raw.startswith("season_") and ":" in raw:
+        raw = raw.rsplit(":", 1)[-1]
+    if raw == "builtin" and model:
+        raw = model
+    if "/" in raw:
+        raw = raw.rsplit("/", 1)[-1]
+    return raw
+
+
+def _label(value: str) -> str:
+    text = value.upper() if value else "UNKNOWN"
+    return f"[{_state_style(text)}]{text}[/{_state_style(text)}]"
+
+
+def _state_style(value: str) -> str:
+    text = value.lower()
+    if text in {"ok", "running", "due", "started", "active", "counted"}:
+        return "green"
+    if text in {"waiting", "sleeping", "stopped", "already_running", "starting"}:
+        return "blue"
+    if text in {"retry", "deferred", "replacement", "warning", "stopping", "sleeping_after_error"}:
+        return "yellow"
+    if text in {"blocked"}:
+        return "magenta"
+    if text in {"failed", "error", "exhausted"}:
+        return "red"
+    if text in {"skipped", "none", "missing"}:
+        return "dim"
+    return "white"
+
+
+def _duration_text(value: object) -> str:
+    try:
+        seconds = int(value) if value not in {"", None} else None
+    except (TypeError, ValueError):
+        seconds = None
+    if seconds is None:
+        return "-"
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m{seconds % 60:02d}s"
+    return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
 
 
 def _docker_status() -> str:
@@ -797,14 +1600,38 @@ def _print_run_summary(run: dict[str, Any]) -> None:
     season = run.get("season", {}) if isinstance(run.get("season"), dict) else {}
     judgement = run.get("judgement", {}) if isinstance(run.get("judgement"), dict) else {}
     pr = run.get("pull_request", {}) if isinstance(run.get("pull_request"), dict) else {}
+    terminal = run.get("terminal", {}) if isinstance(run.get("terminal"), dict) else {}
+    replacement = run.get("replacement", {}) if isinstance(run.get("replacement"), dict) else {}
+    retry = run.get("judgement_retry", {}) if isinstance(run.get("judgement_retry"), dict) else {}
+    ranking = (
+        f"excluded:{run.get('ranking_exclusion_reason')}"
+        if run.get("ranking_excluded")
+        else "counted"
+    )
     typer.echo(f"Run:         {run.get('run_id') or ''}")
     typer.echo(f"Status:      {run.get('run_status') or 'unknown'}")
-    typer.echo(f"Agent:       {agent.get('handle') or agent.get('name') or ''}")
+    typer.echo(f"Terminal:    {run.get('terminal_reason') or terminal.get('reason') or '-'}")
+    typer.echo(f"Layer:       {run.get('terminal_layer') or terminal.get('layer') or '-'}")
+    typer.echo(f"Agent:       {_run_display_name(run) or agent.get('handle') or agent.get('name') or ''}")
     typer.echo(f"Repository:  {repo.get('full_name') or ''}")
     typer.echo(f"Season:      {season.get('id') or ''}")
     typer.echo(f"Started:     {run.get('started_at') or ''}")
     typer.echo(f"Completed:   {run.get('completed_at') or ''}")
+    typer.echo(f"Judgement:   {judgement.get('status') or '-'}")
     typer.echo(f"Arena score: {_score_text(judgement.get('arena_score'))}")
+    typer.echo(f"Ranking:     {ranking}")
+    if replacement:
+        typer.echo(
+            "Replacement: "
+            f"{replacement.get('status') or '-'} "
+            f"attempt={replacement.get('attempts') or '-'}/{replacement.get('max_attempts') or '-'}"
+        )
+    if retry:
+        typer.echo(
+            "Judge retry: "
+            f"{retry.get('status') or '-'} "
+            f"attempt={retry.get('attempts') or '-'}/{retry.get('max_attempts') or '-'}"
+        )
     if pr.get("url"):
         typer.echo(f"PR:          {pr.get('url')}")
     artifacts = [item for item in run.get("artifacts", []) if isinstance(item, dict)]
@@ -839,5 +1666,7 @@ def _score_text(value: Any) -> str:
 
 
 app.add_typer(surface_app, name="surface")
+app.add_typer(runs_app, name="runs")
 season_app.add_typer(season_workspace_app, name="workspace")
 app.add_typer(season_app, name="season")
+app.add_typer(pr_app, name="pr")
