@@ -314,6 +314,38 @@ class GithubToolsTest(unittest.TestCase):
         self.assertEqual("2026-05-03T00:00:00Z", merged_prs[0].merged_at)
         self.assertEqual(2, len(searched))
 
+    def test_repo_pr_tools_falls_back_to_rest(self) -> None:
+        class FakeClient:
+            def gh_json(self, args: list[str]) -> GitHubResponse:
+                return GitHubResponse(ok=False, source="gh", error="missing gh")
+
+            def rest_json(self, *args: object, **kwargs: object) -> GitHubResponse:
+                return GitHubResponse(
+                    ok=True,
+                    source="httpx",
+                    data=[
+                        {
+                            "number": 14,
+                            "title": "REST PR fix",
+                            "html_url": "https://github.com/owner/project/pull/14",
+                            "state": "open",
+                            "user": {"login": "rest-contrib"},
+                            "body": "Fixes #11",
+                            "labels": [{"name": "enhancement"}],
+                            "created_at": "2026-05-10T00:00:00Z",
+                            "updated_at": "2026-05-12T00:00:00Z",
+                            "merged_at": None,
+                            "draft": False,
+                        }
+                    ],
+                )
+
+        with patch("contribarena.tools.repo_prs.GitHubClient", FakeClient):
+            open_prs = repo_get_open_prs(_candidate())
+
+        self.assertEqual(14, open_prs[0].number)
+        self.assertEqual("rest-contrib", open_prs[0].author)
+
     def test_repo_issue_linkage_uses_issue_and_pr_signals(self) -> None:
         class FakeClient:
             def gh_json(self, args: list[str]) -> GitHubResponse:
