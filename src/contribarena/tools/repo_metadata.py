@@ -13,7 +13,7 @@ def repo_get_metadata(candidate: RepoCandidate) -> RepoMetadata:
             "view",
             candidate.full_name,
             "--json",
-            "name,description,stargazerCount,forkCount,primaryLanguage,pushedAt,createdAt,defaultBranchRef,url",
+            "name,description,stargazerCount,forkCount,primaryLanguage,pushedAt,createdAt,openIssues,defaultBranchRef,url",
         ]
     )
     if gh_response.ok:
@@ -56,7 +56,7 @@ def _from_gh(candidate: RepoCandidate, data: dict[str, object]) -> RepoMetadata:
         language=language,
         last_push=_optional_str(data.get("pushedAt")),
         created_at=_optional_str(data.get("createdAt")),
-        open_issues=0,
+        open_issues=int(data.get("openIssues") or 0),
         default_branch=branch,
     )
 

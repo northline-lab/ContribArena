@@ -191,7 +191,7 @@ class GithubToolsTest(unittest.TestCase):
                         "primaryLanguage": {"name": "Python"},
                         "pushedAt": "2026-05-01T00:00:00Z",
                         "createdAt": "2025-01-01T00:00:00Z",
-                        "openIssuesCount": 3,
+                        "openIssues": 3,
                         "defaultBranchRef": {"name": "main"},
                         "url": "https://github.com/owner/project",
                     },
@@ -206,6 +206,7 @@ class GithubToolsTest(unittest.TestCase):
         self.assertEqual("owner/project", metadata.full_name)
         self.assertEqual("Python", metadata.language)
         self.assertEqual(10, metadata.stars)
+        self.assertEqual(3, metadata.open_issues)
 
     def test_repo_issues_normalizes_gh_payload(self) -> None:
         class FakeClient:
