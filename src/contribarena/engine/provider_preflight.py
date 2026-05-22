@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 
-from agents import ModelSettings
+from agents import ModelSettings, ModelTracing
 from agents.models.interface import ModelProvider
 
 from contribarena.config.schema import RunConfig
@@ -87,7 +87,7 @@ async def _check_models(
                 [],
                 None,
                 [],
-                None,
+                ModelTracing.DISABLED,
                 previous_response_id=None,
                 conversation_id=None,
                 prompt=None,

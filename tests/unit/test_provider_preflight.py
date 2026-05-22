@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from agents import ModelSettings
+from agents import ModelSettings, ModelTracing
 from agents.agent_output import AgentOutputSchemaBase
 from agents.handoffs import Handoff
 from agents.items import ModelResponse, TResponseInputItem
@@ -80,6 +80,7 @@ class ProviderPreflightTests(unittest.TestCase):
             [(check.model, check.status) for check in result.checks],
         )
         self.assertEqual(["compatible/qwen"], provider.requested)
+        self.assertEqual(ModelTracing.DISABLED, provider.models["compatible/qwen"].tracing)
 
     def test_failed_model_blocks_preflight(self) -> None:
         config = _config(
@@ -136,6 +137,7 @@ class LoopBoundFakeProvider(FakeProvider):
 class FakeModel(Model):
     def __init__(self, error: Exception | None = None) -> None:
         self.error = error
+        self.tracing: Any = None
 
     async def get_response(
         self,
@@ -151,6 +153,7 @@ class FakeModel(Model):
         conversation_id: str | None,
         prompt: Any,
     ) -> ModelResponse:
+        self.tracing = tracing
         if self.error is not None:
             raise self.error
         return ModelResponse(
