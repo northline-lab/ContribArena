@@ -305,12 +305,12 @@ class ContributorAgent:
             path: str = "repo",
             no_command_verification_rationale: str = "",
         ) -> str:
-            """Return the current workspace git diff as the shadow submission patch."""
+            """Submit the current workspace diff for Review; live runs still need finalize plus GitHub PR submission."""
             return _to_json(tools.aci_submit_patch(path, no_command_verification_rationale))
 
         @function_tool
         def aci_submit_patch_finalize(path: str = "repo") -> str:
-            """Finalize the latest draft patch after Review so the quality gate can run."""
+            """Finalize the reviewed patch. In live modes, this only completes patch review; continue with governed GitHub PR tools."""
             return _to_json(tools.aci_submit_patch_finalize(path))
 
         @function_tool
@@ -326,7 +326,7 @@ class ContributorAgent:
 
         @function_tool
         def github_prepare_fork(owner: str, repo: str) -> str:
-            """Prepare the configured fork or upstream submission target for a live PR."""
+            """Prepare the configured fork or upstream submission target for the live PR workflow."""
             return _to_json(tools.github_prepare_fork(owner, repo))
 
         @function_tool
@@ -337,12 +337,12 @@ class ContributorAgent:
             branch: str,
             path: str = "repo",
         ) -> str:
-            """Create/reset a local PR branch from the target base branch."""
+            """Create/reset the local PR branch from the target base while keeping the current reviewed patch workspace."""
             return _to_json(tools.github_prepare_branch(owner, repo, base, branch, path))
 
         @function_tool
         def github_commit(title: str, body: str = "", path: str = "repo") -> str:
-            """Commit the current workspace changes for live PR submission."""
+            """Commit the current reviewed workspace changes for live PR submission."""
             return _to_json(tools.github_commit(title, body, path))
 
         @function_tool
@@ -352,7 +352,7 @@ class ContributorAgent:
             branch: str,
             path: str = "repo",
         ) -> str:
-            """Push the prepared branch to the configured GitHub repository."""
+            """Push the prepared PR branch to the configured GitHub repository."""
             return _to_json(tools.github_push_branch(owner, repo, branch, path))
 
         @function_tool
@@ -364,7 +364,7 @@ class ContributorAgent:
             title: str,
             body: str,
         ) -> str:
-            """Open or reconcile a governed live pull request."""
+            """Open or reuse the governed live PR; live contribution completion requires opened or existing."""
             return _to_json(tools.github_open_pr(owner, repo, head, base, title, body))
 
         @function_tool
@@ -542,18 +542,21 @@ def _candidate_ref(config: RunConfig, owner: str, repo: str) -> RepoCandidate:
 def build_agent_instructions(config: RunConfig) -> str:
     if config.run.mode == "owned_live":
         boundary = (
-            "Owned-live mode gives you governed GitHub write tools in Review. Submit and finalize "
-            "a minimal verified patch, then use the GitHub tools to prepare, commit, push, and open "
-            "the PR yourself. aci_submit_patch_finalize is not the end of a live run; github_open_pr "
-            "must succeed or return an existing PR. "
+            "Owned-live mode gives you governed GitHub write tools in Review. Review has two "
+            "separate completions: patch review completes with aci_submit_patch_finalize; the "
+            "live contribution completes only when github_open_pr returns opened or existing. "
+            "After finalize, stay in the current workspace and use the GitHub tools to prepare, "
+            "commit, push, and open the PR yourself. "
         )
     elif config.run.mode == "external_live":
         boundary = (
             "External-live mode gives you governed fork-only GitHub write tools in Review. Freely "
             "discover an eligible external repository, choose a defensibly low-risk task, submit "
-            "and finalize a minimal verified patch, then prepare, commit, push, and open the PR "
-            "yourself through the GitHub tools. aci_submit_patch_finalize is not the end of a live "
-            "run; github_open_pr must succeed or return an existing PR. "
+            "and finalize a minimal verified patch. Review has two separate completions: patch "
+            "review completes with aci_submit_patch_finalize; the live contribution completes "
+            "only when github_open_pr returns opened or existing. After finalize, stay in the "
+            "current workspace and prepare, commit, push, and open the PR yourself through the "
+            "GitHub tools. "
         )
     else:
         boundary = "Shadow mode means no GitHub writes. "

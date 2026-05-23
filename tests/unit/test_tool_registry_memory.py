@@ -7,12 +7,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from contribarena.config.schema import (
-    BotIdentityConfig,
     DiscoveryConfig,
-    GovernanceConfig,
     MemoryConfig,
-    OwnedRepositoryPolicy,
-    PrSubmissionConfig,
     RepoCandidate,
     RunConfig,
     RunSection,
@@ -483,106 +479,6 @@ class ToolRegistryMemoryTest(unittest.TestCase):
                 any(row.get("action") == "dispute" for row in capture.phase_review_response_rows)
             )
 
-    def test_live_finalize_surfaces_required_pr_submission_tools(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            config = RunConfig(
-                run=RunSection(id="run-1", mode="owned_live"),
-                discovery=DiscoveryConfig(
-                    candidates=[
-                        RepoCandidate(
-                            owner="example",
-                            repo="repo",
-                            url="https://github.com/example/repo",
-                        )
-                    ]
-                ),
-                workspace=WorkspaceConfig(),
-                memory=MemoryConfig(root=root / "memory"),
-                governance=_test_live_governance(),
-            )
-            goals = GoalService(config, run_id="run-1")
-            goals.update(
-                objective="Implement a contribution.",
-                status="active",
-                scope="contribution",
-            )
-            capture = ArtifactCapture()
-            registry = ToolRegistry(
-                config=config,
-                workspace=object(),  # type: ignore[arg-type]
-                trace=TraceWriter(root / "trace.jsonl", "run-1"),
-                budget=BudgetTracker(config.run.budget),
-                capture=capture,
-                goals=goals,
-            )
-            capture.record_aci_result(
-                AciResult(tool="aci_apply_patch", success=True, files_modified=["repo/app.py"])
-            )
-            capture.record_aci_result(AciResult(tool="aci_verify", success=True))
-
-            patch_text = "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n"
-            with patch_registry_submit(patch_text):
-                draft = registry.aci_submit_patch()
-            finalize = registry.aci_submit_patch_finalize()
-            payload = _last_json_object(finalize.output)
-
-            self.assertTrue(draft.success)
-            self.assertTrue(finalize.success)
-            self.assertFalse(payload["run_complete"])
-            self.assertIn("github_open_pr", payload["next_required_tools"])
-            self.assertEqual(
-                "github_open_pr status opened or existing",
-                payload["completion_requires"],
-            )
-            self.assertIn("Live run is not complete yet", finalize.review_notes)
-
-    def test_live_goal_complete_without_pr_warns_submission_required(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            config = RunConfig(
-                run=RunSection(id="run-1", mode="owned_live"),
-                discovery=DiscoveryConfig(
-                    candidates=[
-                        RepoCandidate(
-                            owner="example",
-                            repo="repo",
-                            url="https://github.com/example/repo",
-                        )
-                    ]
-                ),
-                workspace=WorkspaceConfig(),
-                memory=MemoryConfig(root=root / "memory"),
-                governance=_test_live_governance(),
-            )
-            goals = GoalService(config, run_id="run-1")
-            goals.update(
-                objective="Implement a contribution.",
-                status="active",
-                scope="contribution",
-            )
-            registry = ToolRegistry(
-                config=config,
-                workspace=object(),  # type: ignore[arg-type]
-                trace=TraceWriter(root / "trace.jsonl", "run-1"),
-                budget=BudgetTracker(config.run.budget),
-                capture=ArtifactCapture(),
-                goals=goals,
-            )
-
-            result = registry.aci_goal_update(
-                status="complete",
-                evidence="Patch finalized but no governed PR has been opened.",
-                evidence_refs_json='["tool_call:aci_submit_patch_finalize"]',
-            )
-            payload = json.loads(result.output)
-            required = payload["live_submission_required"]
-
-            self.assertTrue(result.success)
-            self.assertFalse(required["run_complete"])
-            self.assertIn("github_open_pr", required["next_required_tools"])
-            self.assertIn("Live run is not complete yet", result.review_notes)
-
     def test_submit_patch_surfaces_maintainer_prereview_notes_to_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -773,31 +669,6 @@ def patch_registry_submit(patch_text: str):
                 )
             ],
         ),
-    )
-
-
-def _last_json_object(output: str) -> dict[str, object]:
-    start = output.rfind("{")
-    if start == -1:
-        raise AssertionError(f"output did not contain a JSON object: {output!r}")
-    payload = json.loads(output[start:])
-    if not isinstance(payload, dict):
-        raise AssertionError(f"output JSON was not an object: {output!r}")
-    return payload
-
-
-def _test_live_governance() -> GovernanceConfig:
-    return GovernanceConfig(
-        live_enabled=True,
-        owned_repositories=[
-            OwnedRepositoryPolicy(
-                owner="example",
-                repo="repo",
-                default_branch="main",
-                pr_submission=PrSubmissionConfig(strategy="fork", fork_owner="contribarena-bot"),
-            )
-        ],
-        bot_identity=BotIdentityConfig(kind="pat", actor="contribarena-bot"),
     )
 
 

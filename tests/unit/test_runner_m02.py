@@ -32,6 +32,8 @@ from contribarena.config.schema import (
 )
 from contribarena.agent import AgentInvocationResult
 from contribarena.agent.contributor import build_agent_instructions
+from contribarena.agent.prompts import build_goal_prompt
+from contribarena.engine.guidance import install_guidance_sidecar
 from contribarena.engine.goals import GoalService, goal_state_path
 from contribarena.engine.runner import (
     Runner,
@@ -55,6 +57,7 @@ from contribarena.errors import AgentError
 from contribarena.models import (
     AciResult,
     AgentFinalResult,
+    CommandResult,
     EligibilityResult,
     OpportunitySummary,
     GovernanceState,
@@ -810,8 +813,63 @@ class RunnerM02Test(unittest.TestCase):
         self.assertIn("Owned-live mode", instructions)
         self.assertIn("GitHub write tools", instructions)
         self.assertIn("open the PR yourself", instructions)
-        self.assertIn("aci_submit_patch_finalize is not the end", instructions)
+        self.assertIn("patch review completes with aci_submit_patch_finalize", instructions)
+        self.assertIn("live contribution completes only when github_open_pr returns opened or existing", instructions)
         self.assertIn("github_open_pr", instructions)
+
+    def test_live_goal_prompt_spells_out_post_finalize_pr_recipe(self) -> None:
+        prompt = build_goal_prompt(_owned_live_config(Path("runs"), live_enabled=True))
+
+        self.assertIn("patch review completion and live contribution completion are separate", prompt)
+        self.assertIn("After finalize, stay in the same workspace", prompt)
+        self.assertIn("github_prepare_fork", prompt)
+        self.assertIn("github_prepare_branch", prompt)
+        self.assertIn("github_commit", prompt)
+        self.assertIn("github_push_branch", prompt)
+        self.assertIn("github_open_pr", prompt)
+        self.assertIn("opened or existing", prompt)
+
+    def test_shadow_goal_prompt_does_not_include_live_pr_recipe(self) -> None:
+        prompt = build_goal_prompt(_config(Path("runs")))
+
+        self.assertIn("Shadow mode", prompt)
+        self.assertIn("do not open a live PR", prompt)
+        self.assertNotIn("github_prepare_fork", prompt)
+        self.assertNotIn("github_push_branch", prompt)
+        self.assertNotIn("opened or existing", prompt)
+
+    def test_guidance_sidecar_adds_live_pr_recipe_only_for_live_modes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            live_workspace = _GuidanceWorkspace(tmp_path / "live")
+            shadow_workspace = _GuidanceWorkspace(tmp_path / "shadow")
+
+            live = install_guidance_sidecar(
+                live_workspace,
+                _owned_live_config(tmp_path / "runs", live_enabled=True),
+                run_id="run-live",
+                repo_full_name="example/repo",
+            )
+            shadow = install_guidance_sidecar(
+                shadow_workspace,
+                _config(tmp_path / "shadow-runs"),
+                run_id="run-shadow",
+                repo_full_name="example/repo",
+            )
+
+            self.assertTrue(live.installed)
+            self.assertTrue(shadow.installed)
+            live_entry = (tmp_path / "live" / ".contribarena/guidance/guidance_entry.md").read_text()
+            shadow_entry = (
+                tmp_path / "shadow" / ".contribarena/guidance/guidance_entry.md"
+            ).read_text()
+            self.assertIn("Live PR submission recipe", live_entry)
+            self.assertIn("aci_submit_patch_finalize means the reviewed patch is ready", live_entry)
+            self.assertIn("github_prepare_fork", live_entry)
+            self.assertIn("github_open_pr returns", live_entry)
+            self.assertIn("opened or existing", live_entry)
+            self.assertNotIn("Live PR submission recipe", shadow_entry)
+            self.assertNotIn("github_prepare_fork", shadow_entry)
 
     def test_runner_captures_aci_trajectory_and_shadow_patch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2466,7 +2524,8 @@ class RunnerM02Test(unittest.TestCase):
 
             self.assertEqual("continue", review.decision)
             self.assertEqual("live_pr_required_after_patch", review.reason)
-            self.assertIn("github_open_pr", state.recovery_warning)
+            self.assertIn("governed PR opened/existing record", state.recovery_warning)
+            self.assertIn("live Review guidance", state.recovery_warning)
 
             before_pr = capture_cursor(capture, goals, None)
             capture.record_aci_result(
@@ -2513,7 +2572,7 @@ class RunnerM02Test(unittest.TestCase):
             self.assertIn("no governed live PR action has been recorded", prompt)
             self.assertIn("Continue from the current workspace", prompt)
             self.assertIn("do not restart Scout or Work", prompt)
-            self.assertIn("github_open_pr", prompt)
+            self.assertIn("live Review guidance", prompt)
 
     def test_m010_shadow_path_emits_phase_review_and_judgement_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3091,6 +3150,31 @@ def _external_live_config(output_root: Path, live_enabled: bool) -> RunConfig:
             ),
         ),
     )
+
+
+class _GuidanceWorkspace:
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def run(self, command: str) -> CommandResult:
+        import subprocess
+
+        completed = subprocess.run(
+            command,
+            cwd=self.root,
+            shell=True,
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        return CommandResult(
+            command=command,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            exit_code=completed.returncode,
+            duration_seconds=0.01,
+        )
 
 
 class FakePrClient:

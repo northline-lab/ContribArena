@@ -361,8 +361,8 @@ def review_invocation(
 
     if config.run.mode in {"owned_live", "external_live"} and _has_successful_submit(capture):
         state.recovery_warning = (
-            "Live mode still requires GitHub submission. Use github_prepare_fork, "
-            "github_prepare_branch, github_commit, github_push_branch, and github_open_pr."
+            "Live mode still requires a governed PR opened/existing record. Continue from "
+            "the current workspace and follow the live Review guidance."
         )
         return AgentLoopReview(
             decision="continue",
@@ -565,9 +565,8 @@ def render_continuation_context(
         prefix += (
             "Runtime fact: the patch is finalized or submitted, but no governed live PR "
             "action has been recorded. Continue from the current workspace; do not restart "
-            "Scout or Work. Use the GitHub submission tools now: github_prepare_fork, "
-            "github_prepare_branch, github_commit, github_push_branch, and github_open_pr. "
-            "The live run is complete only after github_open_pr returns opened or existing.\n"
+            "Scout or Work. Follow the live Review guidance and use the governed GitHub "
+            "submission tools available in this phase.\n"
         )
     return _render_sections_within_budget(prefix, sections, max_bytes=max_bytes)
 

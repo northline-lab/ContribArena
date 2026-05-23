@@ -765,24 +765,13 @@ class ToolRegistry:
                 and self.goals.abandoned_count >= self.config.goal.max_abandoned_goals_per_run
             ):
                 terminal_status = "goal_abandon_limit"
-            output = update.model_dump_json()
-            review_notes = ""
-            if (
-                update.success
-                and status == "complete"
-                and self.config.run.mode in {"owned_live", "external_live"}
-                and not _has_successful_live_pr(self.capture)
-            ):
-                review_notes = _live_submission_required_note()
-                output = _append_json_result_note(output, "live_submission_required", review_notes)
             return AciResult(
                 tool="aci_goal_update",
                 success=update.success,
-                output=output,
+                output=update.model_dump_json(),
                 error=update.error_message or None if not update.success else None,
                 recovery_kind=update.error_kind or None if not update.success else None,
                 terminal_status=terminal_status,
-                review_notes=review_notes,
             )
 
         return self._record_memory(
@@ -1305,13 +1294,6 @@ class ToolRegistry:
             self.capture,
             _annotate_aci_result(tool, execution.result),
         )
-        if (
-            tool == "aci_submit_patch_finalize"
-            and result.success
-            and self.config.run.mode in {"owned_live", "external_live"}
-            and not _has_successful_live_pr(self.capture)
-        ):
-            result = _attach_live_submission_next_step(result)
         self.capture.record_aci_result(result)
         self._record_phase_projection(tool, payload, result)
         if execution.undo_diff:
@@ -2362,72 +2344,3 @@ def _known_editor_paths(capture: ArtifactCapture) -> set[str]:
 
 def _normalize_patch_path(path: str) -> str:
     return path.removeprefix("a/").removeprefix("b/")
-
-
-_LIVE_NEXT_REQUIRED_TOOLS = [
-    "github_prepare_fork",
-    "github_prepare_branch",
-    "github_commit",
-    "github_push_branch",
-    "github_open_pr",
-]
-
-
-def _attach_live_submission_next_step(result: AciResult) -> AciResult:
-    note = _live_submission_required_note()
-    payload = {
-        "review_finalized": True,
-        "run_complete": False,
-        "next_required_tools": _LIVE_NEXT_REQUIRED_TOOLS,
-        "completion_requires": "github_open_pr status opened or existing",
-    }
-    output = (result.output.rstrip() + "\n\n" if result.output else "") + json.dumps(
-        payload,
-        ensure_ascii=True,
-    )
-    review_notes = result.review_notes
-    if review_notes:
-        review_notes += "\n\n"
-    review_notes += note
-    return result.model_copy(update={"output": output, "review_notes": review_notes})
-
-
-def _live_submission_required_note() -> str:
-    return (
-        "Live run is not complete yet: no governed github_open_pr opened/existing action "
-        "has been recorded. Continue from the current workspace and use "
-        + ", ".join(_LIVE_NEXT_REQUIRED_TOOLS)
-        + "."
-    )
-
-
-def _append_json_result_note(output: str, key: str, note: str) -> str:
-    try:
-        payload = json.loads(output)
-    except json.JSONDecodeError:
-        return (output.rstrip() + "\n\n" if output else "") + note
-    if isinstance(payload, dict):
-        payload[key] = {
-            "run_complete": False,
-            "message": note,
-            "next_required_tools": _LIVE_NEXT_REQUIRED_TOOLS,
-            "completion_requires": "github_open_pr status opened or existing",
-        }
-        return json.dumps(payload, ensure_ascii=True)
-    return (output.rstrip() + "\n\n" if output else "") + note
-
-
-def _has_successful_live_pr(capture: ArtifactCapture) -> bool:
-    for row in capture.live_action_rows:
-        if row.get("action") == "github.open_pr" and row.get("status") in {"opened", "existing"}:
-            return True
-    for item in capture.aci_results:
-        if item.tool != "github_open_pr" or not item.success or not item.output:
-            continue
-        try:
-            payload = json.loads(item.output)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict) and payload.get("number"):
-            return True
-    return False

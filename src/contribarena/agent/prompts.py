@@ -78,9 +78,10 @@ def build_goal_prompt(config: RunConfig) -> str:
             "repository from issues, docs, code, tests, TODOs, or project plans. "
         )
         live_boundary = (
-            "After aci_submit_patch and aci_submit_patch_finalize pass Review, you own the live "
-            "PR workflow through the GitHub tools: prepare fork, prepare branch, commit, push, "
-            "and open the PR. Do not use raw shell GitHub writes. "
+            "After aci_submit_patch and aci_submit_patch_finalize pass Review, do not restart "
+            "Scout or choose a new task unless the patch itself is invalid. Stay in the current "
+            "workspace and complete the live PR workflow through the GitHub tools: prepare fork, "
+            "prepare branch, commit, push, and open the PR. Do not use raw shell GitHub writes. "
         )
     elif config.run.mode == "external_live":
         run_label = "M0.5 external-live autonomous contributor run"
@@ -89,9 +90,11 @@ def build_goal_prompt(config: RunConfig) -> str:
             "README-only, typo-only, or prose-only follow-up for this run. "
         )
         live_boundary = (
-            "After aci_submit_patch and aci_submit_patch_finalize pass Review, you own the fork-only "
-            "live PR workflow through the GitHub tools: prepare fork, prepare branch, commit, push, "
-            "and open the PR. Do not use raw shell GitHub writes. "
+            "After aci_submit_patch and aci_submit_patch_finalize pass Review, do not restart "
+            "Scout or choose a new task unless the patch itself is invalid. Stay in the current "
+            "workspace and complete the fork-only live PR workflow through the GitHub tools: "
+            "prepare fork, prepare branch, commit, push, and open the PR. Do not use raw shell "
+            "GitHub writes. "
         )
     else:
         run_label = "M0.2.1 end-to-end shadow run"
@@ -106,7 +109,7 @@ def build_goal_prompt(config: RunConfig) -> str:
         "Move between phases only through aci_goal_update(scope=..., status=..., "
         "evidence_refs_json=..., next_objective=...).\n\n"
         f"{target}\n"
-        f"{_phase_runtime_contract()}\n"
+        f"{_phase_runtime_contract(config)}\n"
         f"{task_source}"
         f"{live_boundary}"
         "Prefer ACI tools over raw shell editing: aci_find_files for file discovery, aci_view for bounded reading, "
@@ -114,9 +117,7 @@ def build_goal_prompt(config: RunConfig) -> str:
         "with operations_json as a JSON list, "
         "aci_undo when an edit needs to be reverted, aci_suggest_verification when test commands are unclear, "
         "aci_verify for focused checks, aci_clean_generated for generated/cache cleanup, "
-        "and aci_submit_patch to enter Review. In live modes, finalize the reviewed patch, then "
-        "use github_prepare_fork, github_prepare_branch, github_commit, github_push_branch, and "
-        "github_open_pr to complete the contribution. "
+        f"and aci_submit_patch to enter Review. {_live_prompt_completion_rule(config)} "
         'Minimal aci_apply_patch example: operations_json=[{"type":"update_file","path":"repo/app.py","diff":"*** Begin Patch\\n*** Update File: repo/app.py\\n@@\\n old context\\n-old line\\n+new line\\n*** End Patch"}]. '
         "Do not edit files through workspace_run, shell redirection, sed, python scripts, or git commands; "
         "those edits lack unified-editor provenance and submit-time review will reject them. "
@@ -149,8 +150,29 @@ def _build_issue_solving_prompt(config: RunConfig) -> str:
         f"\nVerification hint: {issue.verification_hint}" if issue.verification_hint else ""
     )
     title = issue.title or "Configured problem statement"
+    if config.run.mode == "owned_live":
+        run_label = "M0.4 owned-live issue-solving run"
+        live_completion = (
+            " In owned-live mode, patch review completion and live contribution completion "
+            "are separate. After finalize, stay in the same workspace and use "
+            "github_prepare_fork, github_prepare_branch, github_commit, github_push_branch, "
+            "and github_open_pr. The live contribution is complete only when github_open_pr "
+            "returns opened or existing."
+        )
+    elif config.run.mode == "external_live":
+        run_label = "M0.5 external-live issue-solving run"
+        live_completion = (
+            " In external-live mode, patch review completion and live contribution completion "
+            "are separate. After finalize, stay in the same workspace and use the fork-only "
+            "GitHub path: github_prepare_fork, github_prepare_branch, github_commit, "
+            "github_push_branch, and github_open_pr. The live contribution is complete only "
+            "when github_open_pr returns opened or existing."
+        )
+    else:
+        run_label = "M0.2.2 issue-solving shadow run"
+        live_completion = " Shadow mode means no GitHub writes."
     return (
-        "Complete this M0.2.2 issue-solving shadow run through the Scout / Work / Review "
+        f"Complete this {run_label} through the Scout / Work / Review "
         "runtime. Your job is to address the "
         "explicit problem statement, not to self-select a typo, docs cleanup, or unrelated "
         "low-risk task.\n\n"
@@ -166,7 +188,7 @@ def _build_issue_solving_prompt(config: RunConfig) -> str:
         "- Move directly into Work with aci_goal_update(scope='contribution', status='active', evidence_refs_json='[\"tool_call:repo.metadata\"]', next_objective='resolve configured issue').\n"
         "- Clone the repo using this command:\n"
         f"   {clone_command}\n"
-        f"{_phase_runtime_contract()}\n"
+        f"{_phase_runtime_contract(config)}\n"
         "Restate the problem briefly in your own words, then inspect the smallest relevant files using ACI tools. "
         "Reproduce the failure when practical, or write explicit reproduction notes when the issue is directly inspectable. "
         "Make the smallest code or test/docs change that directly addresses the problem statement using aci_apply_patch as the primary edit tool. Do not make unrelated cleanup. "
@@ -178,7 +200,8 @@ def _build_issue_solving_prompt(config: RunConfig) -> str:
         "the problem statement and at least one local verification command succeeded. Otherwise "
         "return blocked or failed with explicit reasons. Call aci_runtime_get_context(scope='run') early; it returns guidance availability, goal context, memory hints, tracked PR summaries, and current phase/sub_phase. "
         "Treat the long-term goal as direction, not as permission to ignore this issue. Use aci_goal_update only for the single short-term goal; status complete/abandoned/superseded requires evidence_refs_json with resolvable citations. Mark it complete only after current evidence proves the objective is done. If aci_goal_update returns terminal_status=goal_abandon_limit, end this run with a final structured blocked result. "
-        "If guidance is available, read the returned path relative to the workspace root, not repo/. If tracked PRs or external-write memory hints are present, inspect them before opening duplicate or conflicting work. Then check and follow repository-local guidance such as AGENTS.md, CONTRIBUTING.md, or .github templates when present. Shadow mode means no GitHub writes."
+        "If guidance is available, read the returned path relative to the workspace root, not repo/. If tracked PRs or external-write memory hints are present, inspect them before opening duplicate or conflicting work. Then check and follow repository-local guidance such as AGENTS.md, CONTRIBUTING.md, or .github templates when present."
+        f"{live_completion}"
         "\n\nRecovery templates:\n"
         f"{_recovery_template_text()}"
     )
@@ -200,15 +223,44 @@ def _clone_command(clone_url: str) -> str:
     )
 
 
-def _phase_runtime_contract() -> str:
+def _phase_runtime_contract(config: RunConfig) -> str:
+    if config.run.mode in {"owned_live", "external_live"}:
+        review_contract = (
+            "- Review tools: aci_dispute_review(concern_id, rebuttal_text, evidence_refs_json='[...]'), "
+            "aci_apply_patch plus aci_submit_patch within max_review_rounds, and "
+            "aci_submit_patch_finalize(path='repo'). In live modes, aci_submit_patch_finalize "
+            "completes patch review only; keep the same workspace and finish the contribution "
+            "with github_prepare_fork, github_prepare_branch, github_commit, github_push_branch, "
+            "and github_open_pr. Only github_open_pr returning opened or existing completes "
+            "the live contribution.\n"
+        )
+    else:
+        review_contract = (
+            "- Review tools: aci_dispute_review(concern_id, rebuttal_text, evidence_refs_json='[...]'), "
+            "aci_apply_patch plus aci_submit_patch within max_review_rounds, and "
+            "aci_submit_patch_finalize(path='repo'). Shadow mode stops at a reviewed patch; "
+            "do not perform live GitHub writes.\n"
+        )
     return (
         "Current-phase contract:\n"
         "- Scout/project tools: repo_search, repo_check_eligibility, repo_get_metadata, repo_setup_probe, workspace_run for bounded clone/setup, aci_view, aci_find_files. Transition with aci_goal_update(scope='opportunity', status='active', evidence_refs_json='[\"tool_call:<tool>:<step>\"]', next_objective='...').\n"
         "- Scout/opportunity tools: repo_get_issues, repo_get_open_prs, repo_get_recent_merged_prs, repo_search_prs_by_title, repo_get_issue_linkage, repo_get_pr_review_history, aci_view, aci_search, aci_find_files. Transition with aci_goal_update(scope='contribution', status='active', evidence_refs_json='[\"tool_call:<tool>:<step>\"]', next_objective='...').\n"
         "- Work tools: ACI read/search/edit/verify/recovery tools. Submit a draft with aci_submit_patch(path='repo'); this enters Review. If the opportunity is bad, use aci_goal_update(scope='opportunity', status='abandoned', evidence_refs_json='[...]').\n"
-        "- Review tools: aci_dispute_review(concern_id, rebuttal_text, evidence_refs_json='[...]'), aci_apply_patch plus aci_submit_patch within max_review_rounds, and aci_submit_patch_finalize(path='repo'). In live modes, aci_submit_patch_finalize is not the end: continue with github_prepare_fork, github_prepare_branch, github_commit, github_push_branch, and github_open_pr.\n"
+        f"{review_contract}"
         "- evidence_refs_json grammar: tool_call:<id>, artifact:<path>#L<line>, workspace:<path>, or git:<sha>.\n"
     )
+
+
+def _live_prompt_completion_rule(config: RunConfig) -> str:
+    if config.run.mode in {"owned_live", "external_live"}:
+        return (
+            "In live modes, patch review completion and live contribution completion are "
+            "separate: after finalize, stay in the same workspace and use "
+            "github_prepare_fork, github_prepare_branch, github_commit, github_push_branch, "
+            "and github_open_pr. The live contribution is complete only when github_open_pr "
+            "returns opened or existing."
+        )
+    return "Shadow mode stops at a reviewed patch; do not open a live PR."
 
 
 def _recovery_template_text() -> str:
