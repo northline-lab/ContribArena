@@ -33,6 +33,7 @@ from contribarena.config.schema import (
 from contribarena.agent import AgentInvocationResult
 from contribarena.agent.contributor import build_agent_instructions
 from contribarena.engine.goals import GoalService, goal_state_path
+from contribarena.engine.guidance import install_guidance_sidecar
 from contribarena.engine.runner import (
     Runner,
     _build_assistant_update,
@@ -2372,6 +2373,27 @@ class RunnerM02Test(unittest.TestCase):
             self.assertIn("memory_write_report.json", manifest_names)
             self.assertIn("goal_context.json", manifest_names)
             self.assertIn("goal_events.jsonl", manifest_names)
+
+    def test_guidance_install_exception_is_fail_soft(self) -> None:
+        class RaisingWorkspace:
+            def run(self, command: str) -> object:
+                raise RuntimeError("workspace unavailable")
+
+        config = _issue_config(Path("runs"))
+
+        result = install_guidance_sidecar(
+            RaisingWorkspace(),
+            config,
+            run_id="run-guidance",
+            repo_full_name="example/repo",
+        )
+
+        self.assertFalse(result.installed)
+        self.assertIsNone(result.command)
+        self.assertTrue(result.enabled)
+        self.assertIn("workspace unavailable", result.error)
+        self.assertEqual("run-guidance", result.manifest["run_id"])
+        self.assertEqual("example/repo", result.manifest["repo_full_name"])
 
     def test_goal_continuation_two_runs_finishes_active_goal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
