@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 
+import httpx
 from agents import function_tool
 from agents.items import ModelResponse
 from agents.models.chatcmpl_converter import Converter
@@ -24,6 +25,7 @@ from contribarena.providers.action_guard import (
 from contribarena.providers.adapters import (
     _anthropic_response_to_chat_message,
     _gemini_response_to_chat_message,
+    _parse_gemini_payload,
     _repair_structured_output_message,
     _to_anthropic_tools,
     _to_gemini_contents,
@@ -114,6 +116,42 @@ class ProviderToolSchemaTest(unittest.TestCase):
             for part in contents[1]["parts"]
         ]
         self.assertEqual(["repo_search", "aci_runtime_get_context"], response_names)
+
+    def test_parse_gemini_sse_payload_merges_parts_and_metadata(self) -> None:
+        response = httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=(
+                'data: {"candidates":[{"content":{"parts":[{"text":"Hello"}]},'
+                '"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1}}\n\n'
+                'data: {"candidates":[{"content":{"parts":[{"text":" world"}]}}],'
+                '"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":2}}\n\n'
+                "data: [DONE]\n"
+            ),
+        )
+
+        payload = _parse_gemini_payload(response)
+
+        candidate = payload["candidates"][0]
+        self.assertEqual("STOP", candidate["finishReason"])
+        self.assertEqual(
+            [{"text": "Hello"}, {"text": " world"}],
+            candidate["content"]["parts"],
+        )
+        self.assertEqual(
+            {"promptTokenCount": 1, "candidatesTokenCount": 2},
+            payload["usageMetadata"],
+        )
+
+    def test_parse_gemini_sse_payload_rejects_empty_stream(self) -> None:
+        response = httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text="event: ping\ndata: [DONE]\n",
+        )
+
+        with self.assertRaisesRegex(ValueError, "empty Gemini SSE response"):
+            _parse_gemini_payload(response)
 
 
 class ProviderActionGuardTest(unittest.TestCase):
