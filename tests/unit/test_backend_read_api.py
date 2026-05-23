@@ -15,7 +15,14 @@ from contribarena.config.schema import (
     RunSection,
     WorkspaceConfig,
 )
-from contribarena.engine.api import _default_season_id, _surface_bundle_for_season, create_app
+from contribarena.engine.api import (
+    _find_run_dir,
+    _judgement_summary,
+    _operator_counts,
+    _surface_bundle_for_season,
+    _default_season_id,
+    create_app,
+)
 from contribarena.engine.read_model import SurfaceReadModel
 
 
@@ -120,6 +127,10 @@ class BackendReadApiTests(unittest.TestCase):
             self.assertIn("/api/runs/{run_id}/discovery", routes)
             self.assertIn("/api/runs/{run_id}/self-review", routes)
             self.assertIn("/api/runs/{run_id}/assistant-updates", routes)
+            self.assertIn("/api/operator/summary", routes)
+            self.assertIn("/api/operator/runs", routes)
+            self.assertIn("/api/operator/stuck", routes)
+            self.assertIn("/api/operator/run/{run_id}", routes)
             self.assertIn("/api/artifacts/{run_id}/{artifact_name}", routes)
 
             model = SurfaceReadModel(root / "read.sqlite")
@@ -131,6 +142,50 @@ class BackendReadApiTests(unittest.TestCase):
             self.assertEqual([], model.runs(query="missing-string"))
             self.assertIsNotNone(model.public_artifact_path("run-a", "patch.diff"))
             self.assertIsNone(model.public_artifact_path("run-a", "trace.jsonl"))
+
+    def test_operator_helpers_return_compact_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runs_dir = root / "runs"
+            _write_run(runs_dir / "run-a", run_id="run-a", agent_handle="agent-a")
+            summary_path = runs_dir / "run-a" / "run_summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary["replacement"] = {"status": "due", "reason": "model_runtime"}
+            summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+            (runs_dir / "run-a" / "judgement.json").write_text(
+                json.dumps(
+                    {
+                        "status": "judged",
+                        "judge_score": 70,
+                        "arena_score": 72,
+                        "real_world_adjustment": 2,
+                        "judges": [
+                            {
+                                "judge_id": "judge-a",
+                                "model": "local-stub",
+                                "judge_score": 70,
+                                "rubric": [
+                                    {"dimension": "execution_correctness", "score": 4, "source": "llm"}
+                                ],
+                            }
+                        ],
+                    },
+                    ensure_ascii=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            model = SurfaceReadModel(root / "read.sqlite")
+            model.refresh_from_artifacts(runs_dir)
+            rows = model.runs(season_id="season_0")
+
+            self.assertEqual(runs_dir / "run-a", _find_run_dir(runs_dir, "run-a"))
+            self.assertEqual({"due": 1}, _operator_counts(rows)["replacement"])
+            judgement = _judgement_summary(runs_dir / "run-a" / "judgement.json")
+            self.assertEqual("judged", judgement["status"])
+            self.assertEqual(72, judgement["arena_score"])
+            self.assertEqual("judge-a", judgement["judges"][0]["judge_id"])  # type: ignore[index]
 
     def test_default_api_scope_prefers_active_season_over_old_runs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
