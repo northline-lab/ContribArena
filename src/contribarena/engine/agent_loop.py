@@ -30,6 +30,7 @@ class AgentLoopProgress:
     edited: bool
     verified: bool
     patch_submitted: bool
+    live_pr_opened: bool
     goal_status: str
     lifecycle_gaps: list[str]
 
@@ -42,6 +43,7 @@ class InvocationProgressDelta:
     successful_edits: int = 0
     successful_verifications: int = 0
     successful_submissions: int = 0
+    successful_live_actions: int = 0
     goal_events: int = 0
     memory_events: int = 0
     recoveries: int = 0
@@ -55,6 +57,7 @@ class InvocationProgressDelta:
                 self.successful_edits,
                 self.successful_verifications,
                 self.successful_submissions,
+                self.successful_live_actions,
                 self.goal_events,
                 self.memory_events,
             ]
@@ -68,6 +71,7 @@ class InvocationProgressDelta:
             "successful_edits": self.successful_edits,
             "successful_verifications": self.successful_verifications,
             "successful_submissions": self.successful_submissions,
+            "successful_live_actions": self.successful_live_actions,
             "goal_events": self.goal_events,
             "memory_events": self.memory_events,
             "recoveries": self.recoveries,
@@ -196,6 +200,14 @@ def review_invocation(
                 agent_status="failed",
                 harness_status="failed",
             ),
+        )
+    if config.run.mode in {"owned_live", "external_live"} and _has_successful_live_pr(capture):
+        return AgentLoopReview(
+            decision="terminal",
+            reason="live_pr_opened",
+            outcome="opened_pr",
+            progress=progress,
+            delta=delta,
         )
     if terminal_recovery is not None and terminal_recovery.terminal_status == "goal_abandon_limit":
         return AgentLoopReview(
@@ -347,6 +359,18 @@ def review_invocation(
             ),
         )
 
+    if config.run.mode in {"owned_live", "external_live"} and _has_successful_submit(capture):
+        state.recovery_warning = (
+            "Live mode still requires GitHub submission. Use github_prepare_fork, "
+            "github_prepare_branch, github_commit, github_push_branch, and github_open_pr."
+        )
+        return AgentLoopReview(
+            decision="continue",
+            reason="live_pr_required_after_patch",
+            outcome="live_pr_required_after_patch",
+            progress=progress,
+            delta=delta,
+        )
     if _has_successful_submit(capture):
         return AgentLoopReview(
             decision="terminal",
@@ -422,6 +446,9 @@ def invocation_delta(
         successful_submissions=sum(
             1 for item in aci_slice if item.success and item.tool == "aci_submit_patch"
         ),
+        successful_live_actions=sum(
+            1 for item in aci_slice if item.success and item.tool.startswith("github_")
+        ),
         goal_events=goal_events,
         memory_events=memory_events,
         recoveries=sum(1 for item in aci_slice if item.tool == "aci_recover_invalid_action"),
@@ -461,6 +488,7 @@ def agent_loop_progress(capture: ArtifactCapture, goals: GoalService) -> AgentLo
     )
     verified = any(item.success and item.tool == "aci_verify" for item in capture.aci_results)
     patch_submitted = _has_successful_submit(capture)
+    live_pr_opened = _has_successful_live_pr(capture)
     goal_status = _goal_status(goals)
     gaps: list[str] = []
     if not repo_present:
@@ -473,12 +501,15 @@ def agent_loop_progress(capture: ArtifactCapture, goals: GoalService) -> AgentLo
         gaps.append("edit captured without successful verification")
     if edited and verified and not patch_submitted:
         gaps.append("verified edit without submitted patch")
+    if patch_submitted and not live_pr_opened:
+        gaps.append("submitted patch without live PR")
     return AgentLoopProgress(
         repo_present=repo_present,
         repo_inspected=repo_inspected,
         edited=edited,
         verified=verified,
         patch_submitted=patch_submitted,
+        live_pr_opened=live_pr_opened,
         goal_status=goal_status,
         lifecycle_gaps=gaps,
     )
@@ -660,6 +691,22 @@ def _has_successful_submit(capture: ArtifactCapture) -> bool:
     if _draft_submit_requires_review(capture):
         return False
     return any(item.tool == "aci_submit_patch" and item.success for item in capture.aci_results)
+
+
+def _has_successful_live_pr(capture: ArtifactCapture) -> bool:
+    for row in capture.live_action_rows:
+        if row.get("action") == "github.open_pr" and row.get("status") in {"opened", "existing"}:
+            return True
+    for item in capture.aci_results:
+        if item.tool != "github_open_pr" or not item.success or not item.output:
+            continue
+        try:
+            payload = json.loads(item.output)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and payload.get("number"):
+            return True
+    return False
 
 
 def _draft_submit_requires_review(capture: ArtifactCapture) -> bool:

@@ -206,7 +206,7 @@ def _phase_runtime_contract() -> str:
         "- Scout/project tools: repo_search, repo_check_eligibility, repo_get_metadata, repo_setup_probe, workspace_run for bounded clone/setup, aci_view, aci_find_files. Transition with aci_goal_update(scope='opportunity', status='active', evidence_refs_json='[\"tool_call:<tool>:<step>\"]', next_objective='...').\n"
         "- Scout/opportunity tools: repo_get_issues, repo_get_open_prs, repo_get_recent_merged_prs, repo_search_prs_by_title, repo_get_issue_linkage, repo_get_pr_review_history, aci_view, aci_search, aci_find_files. Transition with aci_goal_update(scope='contribution', status='active', evidence_refs_json='[\"tool_call:<tool>:<step>\"]', next_objective='...').\n"
         "- Work tools: ACI read/search/edit/verify/recovery tools. Submit a draft with aci_submit_patch(path='repo'); this enters Review. If the opportunity is bad, use aci_goal_update(scope='opportunity', status='abandoned', evidence_refs_json='[...]').\n"
-        "- Review tools: aci_dispute_review(concern_id, rebuttal_text, evidence_refs_json='[...]'), aci_apply_patch plus aci_submit_patch within max_review_rounds, and aci_submit_patch_finalize(path='repo') to finish.\n"
+        "- Review tools: aci_dispute_review(concern_id, rebuttal_text, evidence_refs_json='[...]'), aci_apply_patch plus aci_submit_patch within max_review_rounds, and aci_submit_patch_finalize(path='repo'). In live modes, aci_submit_patch_finalize is not the end: continue with github_prepare_fork, github_prepare_branch, github_commit, github_push_branch, and github_open_pr.\n"
         "- evidence_refs_json grammar: tool_call:<id>, artifact:<path>#L<line>, workspace:<path>, or git:<sha>.\n"
     )
 

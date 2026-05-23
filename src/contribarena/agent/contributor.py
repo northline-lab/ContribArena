@@ -544,14 +544,16 @@ def build_agent_instructions(config: RunConfig) -> str:
         boundary = (
             "Owned-live mode gives you governed GitHub write tools in Review. Submit and finalize "
             "a minimal verified patch, then use the GitHub tools to prepare, commit, push, and open "
-            "the PR yourself. "
+            "the PR yourself. aci_submit_patch_finalize is not the end of a live run; github_open_pr "
+            "must succeed or return an existing PR. "
         )
     elif config.run.mode == "external_live":
         boundary = (
             "External-live mode gives you governed fork-only GitHub write tools in Review. Freely "
             "discover an eligible external repository, choose a defensibly low-risk task, submit "
             "and finalize a minimal verified patch, then prepare, commit, push, and open the PR "
-            "yourself through the GitHub tools. "
+            "yourself through the GitHub tools. aci_submit_patch_finalize is not the end of a live "
+            "run; github_open_pr must succeed or return an existing PR. "
         )
     else:
         boundary = "Shadow mode means no GitHub writes. "

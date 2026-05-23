@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -103,9 +104,9 @@ class SeasonStore:
     def write_config(self, config: SeasonConfig) -> Path:
         path = self.config_path(config.id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
+        _atomic_write_text(
+            path,
             yaml.safe_dump(config.model_dump(mode="json"), sort_keys=False),
-            encoding="utf-8",
         )
         return path
 
@@ -141,7 +142,7 @@ class SeasonStore:
         }
         path = self.state_path(season_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        _atomic_write_text(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
         return state
 
     def state(self, season_id: str) -> dict[str, Any]:
@@ -844,3 +845,9 @@ def season_is_completed(config: RunConfig) -> bool:
     except ConfigError:
         return False
     return season.status == "completed"
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)

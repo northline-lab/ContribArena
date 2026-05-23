@@ -40,11 +40,18 @@ from contribarena.engine.runner import (
     _replacement_due_terminal,
     _transient_runtime_message,
 )
-from contribarena.engine.agent_loop import TerminalState
+from contribarena.engine.agent_loop import (
+    AgentLoopState,
+    TerminalState,
+    capture_cursor,
+    review_invocation,
+)
 from contribarena.engine.seasons import SeasonStore, derive_participant_id, normalize_model_identity
+from contribarena.engine.middleware.artifact import ArtifactCapture
 from contribarena.engine.middleware.governance import load_governance_state, save_governance_state
 from contribarena.errors import AgentError
 from contribarena.models import (
+    AciResult,
     AgentFinalResult,
     EligibilityResult,
     OpportunitySummary,
@@ -801,6 +808,8 @@ class RunnerM02Test(unittest.TestCase):
         self.assertIn("Owned-live mode", instructions)
         self.assertIn("GitHub write tools", instructions)
         self.assertIn("open the PR yourself", instructions)
+        self.assertIn("aci_submit_patch_finalize is not the end", instructions)
+        self.assertIn("github_open_pr", instructions)
 
     def test_runner_captures_aci_trajectory_and_shadow_patch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2427,6 +2436,56 @@ class RunnerM02Test(unittest.TestCase):
             ]
             self.assertEqual("continue", reviews[0]["decision"])
             self.assertEqual("patch_submitted", reviews[1]["outcome"])
+
+    def test_live_mode_continues_after_patch_until_pr_opened(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _owned_live_config(Path(tmp) / "runs", live_enabled=True)
+            goals = GoalService(config, run_id="run-live")
+            goals.update(
+                objective="Open a live PR.",
+                status="active",
+                scope="contribution",
+                evidence_refs=["tool_call:repo.metadata"],
+            )
+            capture = ArtifactCapture()
+            state = AgentLoopState()
+            before_finalize = capture_cursor(capture, goals, None)
+            capture.record_aci_result(AciResult(tool="aci_submit_patch_finalize", success=True))
+
+            review = review_invocation(
+                config=config,
+                capture=capture,
+                goals=goals,
+                memory=None,
+                before=before_finalize,
+                state=state,
+                invocation=AgentInvocationResult(content="Patch finalized."),
+            )
+
+            self.assertEqual("continue", review.decision)
+            self.assertEqual("live_pr_required_after_patch", review.reason)
+            self.assertIn("github_open_pr", state.recovery_warning)
+
+            before_pr = capture_cursor(capture, goals, None)
+            capture.record_aci_result(
+                AciResult(
+                    tool="github_open_pr",
+                    success=True,
+                    output=json.dumps({"number": 23, "url": "https://github.com/example/repo/pull/23"}),
+                )
+            )
+            opened = review_invocation(
+                config=config,
+                capture=capture,
+                goals=goals,
+                memory=None,
+                before=before_pr,
+                state=state,
+                invocation=AgentInvocationResult(content="PR opened."),
+            )
+
+            self.assertEqual("terminal", opened.decision)
+            self.assertEqual("opened_pr", opened.outcome)
 
     def test_m010_shadow_path_emits_phase_review_and_judgement_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
