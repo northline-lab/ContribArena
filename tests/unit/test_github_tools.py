@@ -314,6 +314,104 @@ class GithubToolsTest(unittest.TestCase):
         self.assertEqual("2026-05-03T00:00:00Z", merged_prs[0].merged_at)
         self.assertEqual(2, len(searched))
 
+    def test_repo_pr_tools_handle_missing_author_login(self) -> None:
+        """Author parsing must not produce the literal string 'None'.
+
+        Regression test: when the gh payload's ``author`` is ``None`` (e.g.
+        ghost user) or a dict without ``login``, and when the REST payload's
+        ``user`` is ``None`` or a dict without ``login``, the resulting
+        ``PullRequestCandidate.author`` should be an empty string.
+        """
+
+        class GhFakeClient:
+            def gh_json(self, args: list[str]) -> GitHubResponse:
+                return GitHubResponse(
+                    ok=True,
+                    source="gh",
+                    data=[
+                        {
+                            "number": 21,
+                            "title": "ghost author",
+                            "url": "https://github.com/owner/project/pull/21",
+                            "state": "open",
+                            "author": None,
+                            "body": "",
+                            "isDraft": False,
+                        },
+                        {
+                            "number": 22,
+                            "title": "empty author dict",
+                            "url": "https://github.com/owner/project/pull/22",
+                            "state": "open",
+                            "author": {},
+                            "body": "",
+                            "isDraft": False,
+                        },
+                        {
+                            "number": 23,
+                            "title": "null login",
+                            "url": "https://github.com/owner/project/pull/23",
+                            "state": "open",
+                            "author": {"login": None},
+                            "body": "",
+                            "isDraft": False,
+                        },
+                    ],
+                )
+
+            def rest_json(self, *args: object, **kwargs: object) -> GitHubResponse:
+                raise AssertionError("REST fallback should not be used")
+
+        with patch("contribarena.tools.repo_prs.GitHubClient", GhFakeClient):
+            gh_prs = repo_get_open_prs(_candidate())
+
+        self.assertEqual(["", "", ""], [pr.author for pr in gh_prs])
+        for pr in gh_prs:
+            self.assertNotEqual("None", pr.author)
+
+        class RestFakeClient:
+            def gh_json(self, args: list[str]) -> GitHubResponse:
+                return GitHubResponse(ok=False, source="gh", data=None)
+
+            def rest_json(self, *args: object, **kwargs: object) -> GitHubResponse:
+                return GitHubResponse(
+                    ok=True,
+                    source="httpx",
+                    data=[
+                        {
+                            "number": 31,
+                            "title": "rest ghost",
+                            "html_url": "https://github.com/owner/project/pull/31",
+                            "state": "open",
+                            "user": None,
+                            "body": "",
+                        },
+                        {
+                            "number": 32,
+                            "title": "rest empty user",
+                            "html_url": "https://github.com/owner/project/pull/32",
+                            "state": "open",
+                            "user": {},
+                            "body": "",
+                        },
+                        {
+                            "number": 33,
+                            "title": "rest null login",
+                            "html_url": "https://github.com/owner/project/pull/33",
+                            "state": "open",
+                            "user": {"login": None},
+                            "body": "",
+                        },
+                    ],
+                )
+
+        with patch("contribarena.tools.repo_prs.GitHubClient", RestFakeClient):
+            rest_prs = repo_get_open_prs(_candidate())
+
+        self.assertEqual(["", "", ""], [pr.author for pr in rest_prs])
+        for pr in rest_prs:
+            self.assertNotEqual("None", pr.author)
+
     def test_repo_issue_linkage_uses_issue_and_pr_signals(self) -> None:
         class FakeClient:
             def gh_json(self, args: list[str]) -> GitHubResponse:

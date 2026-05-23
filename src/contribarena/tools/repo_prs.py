@@ -117,7 +117,7 @@ def _from_gh(item: dict[str, Any]) -> PullRequestCandidate:
         title=str(item.get("title") or ""),
         url=str(item.get("url") or ""),
         state=str(item.get("state") or ""),
-        author=str(author.get("login") if isinstance(author, dict) else author or ""),
+        author=_author_login(author),
         body=str(item.get("body") or ""),
         labels=_labels(item.get("labels")),
         created_at=_optional_str(item.get("createdAt")),
@@ -135,7 +135,7 @@ def _from_rest(item: dict[str, Any]) -> PullRequestCandidate:
         title=str(item.get("title") or ""),
         url=str(item.get("html_url") or ""),
         state=str(item.get("state") or ""),
-        author=str(user.get("login") if isinstance(user, dict) else ""),
+        author=_author_login(user),
         body=str(item.get("body") or ""),
         labels=[],
         created_at=_optional_str(item.get("created_at")),
@@ -202,3 +202,18 @@ def _assignees(item: dict[str, Any]) -> list[str]:
 
 def _optional_str(value: object) -> str | None:
     return str(value) if value else None
+
+
+def _author_login(raw: object) -> str:
+    """Safely extract an author login string from gh/REST payloads.
+
+    Falls back to an empty string when ``raw`` is ``None``, a dict without a
+    ``login`` key, or a dict whose ``login`` value is ``None``. This avoids
+    accidentally producing the literal string ``"None"`` via ``str(None)``.
+    """
+    if isinstance(raw, dict):
+        login = raw.get("login")
+        return str(login) if login else ""
+    if raw is None:
+        return ""
+    return str(raw)
