@@ -162,6 +162,22 @@ class FakeTransientProviderErrorAgent:
         )
 
 
+class FakeProviderServerErrorAgent:
+    def run(
+        self,
+        config: RunConfig,
+        tools: object,
+        prompt: str,
+        model_provider: object = None,
+        **kwargs: object,
+    ) -> AgentInvocationResult:
+        return AgentInvocationResult(
+            content="Provider invocation failed: empty request.",
+            stopped_reason="provider_error",
+            error_message="Error code: 500 - {'code': 500, 'message': '请求参数不能为空', 'success': False}",
+        )
+
+
 class FakeBlankProviderErrorAgent:
     def run(
         self,
@@ -1880,11 +1896,28 @@ class RunnerM02Test(unittest.TestCase):
             self.assertIn("replacement_state.json", manifest_names)
             self.assertNotIn("judgement.json", manifest_names)
 
+    def test_provider_server_error_is_replacement_and_not_judged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _config(tmp_path / "runs")
+            result = _run_with_fake_docker(FakeProviderServerErrorAgent(), config, tmp_path)
+
+            self.assertEqual("failed", result.status)
+            self.assertEqual("model_runtime", result.terminal_layer)
+            replacement = json.loads((result.run_dir / "replacement_state.json").read_text())
+            self.assertEqual("due", replacement["status"])
+            self.assertEqual("model_runtime", replacement["layer"])
+            self.assertFalse((result.run_dir / "judgement.json").exists())
+            summary = json.loads((result.run_dir / "run_summary.json").read_text())
+            self.assertEqual("due", summary["replacement"]["status"])
+            self.assertEqual("not_judged", summary["judgement"]["status"])
+
     def test_transient_runtime_message_markers_are_conservative(self) -> None:
         self.assertTrue(_transient_runtime_message("APIConnectionError: Connection error."))
         self.assertTrue(_transient_runtime_message("Gateway timeout from provider"))
         self.assertTrue(_transient_runtime_message("HTTP 503 service unavailable"))
         self.assertTrue(_transient_runtime_message("HTTP 500 internal server error"))
+        self.assertTrue(_transient_runtime_message("Error code: 500 - {'message': '请求参数不能为空'}"))
         self.assertTrue(_transient_runtime_message("GnuTLS recv error (-110)"))
         self.assertFalse(_transient_runtime_message("HTTP 400 bad request"))
         self.assertFalse(_transient_runtime_message("context_length_exceeded"))

@@ -138,6 +138,7 @@ class BackendReadApiTests(unittest.TestCase):
             self.assertEqual(1, model.status(runs_dir).runs)
             self.assertEqual("run-a", model.surface_bundle()["runs"][0]["run_id"])
             self.assertEqual("agent-a", model.run("run-a")["agent"]["handle"])  # type: ignore[index]
+            self.assertEqual(runs_dir / "run-a", model.run_dir("run-a"))
             self.assertEqual("run-a", model.runs(query="example/repo")[0]["run_id"])
             self.assertEqual([], model.runs(query="missing-string"))
             self.assertIsNotNone(model.public_artifact_path("run-a", "patch.diff"))

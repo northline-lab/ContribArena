@@ -261,7 +261,7 @@ def create_app(
         item = model.run(run_id)
         if item is None:
             raise HTTPException(status_code=404, detail="run not found")
-        run_dir = _find_run_dir(artifact_root, run_id)
+        run_dir = model.run_dir(run_id) or _find_run_dir(artifact_root, run_id)
         detail: dict[str, object] = {
             "run": _compact_run(item),
             "summary": item,

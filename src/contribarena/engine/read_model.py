@@ -219,6 +219,14 @@ class SurfaceReadModel:
             row = db.execute("select payload_json from runs where run_id = ?", (run_id,)).fetchone()
         return _annotate_ranking_state(json.loads(row[0])) if row else None
 
+    def run_dir(self, run_id: str) -> Path | None:
+        with self._connect() as db:
+            row = db.execute("select run_dir from runs where run_id = ?", (run_id,)).fetchone()
+        if not row:
+            return None
+        path = Path(str(row[0]))
+        return path if path.exists() and path.is_dir() else None
+
     def participants(self, season_id: str | None = None) -> list[dict[str, Any]]:
         query = "select payload_json from participants"
         params: list[Any] = []
@@ -451,6 +459,7 @@ class SurfaceReadModel:
 def _api_run(run: dict[str, Any], run_dir: Path, skipped: list[str]) -> dict[str, Any]:
     payload = dict(run)
     run_id = str(payload.get("run_id") or "")
+    payload["run_dir"] = str(run_dir.resolve())
     artifacts: list[dict[str, Any]] = []
     for artifact in payload.get("artifacts", []):
         if not isinstance(artifact, dict):
@@ -488,6 +497,7 @@ def _create_schema(db: sqlite3.Connection) -> None:
             run_status text not null,
             wake_source text not null default '',
             repo_slug text not null default '',
+            run_dir text not null default '',
             started_at text not null,
             payload_json text not null
         );
@@ -582,6 +592,7 @@ def _create_schema(db: sqlite3.Connection) -> None:
     _ensure_column(db, "runs", "participant_id", "text not null default ''")
     _ensure_column(db, "runs", "wake_source", "text not null default ''")
     _ensure_column(db, "runs", "repo_slug", "text not null default ''")
+    _ensure_column(db, "runs", "run_dir", "text not null default ''")
     db.executescript(
         """
         create index if not exists idx_runs_season on runs(season_id);
@@ -634,8 +645,8 @@ def _replace_data(
         """
         insert into runs (
             run_id, season_id, participant_id, agent_handle, agent_name, run_status,
-            wake_source, repo_slug, started_at, payload_json
-        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            wake_source, repo_slug, run_dir, started_at, payload_json
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [_run_row(run) for run in runs],
     )
@@ -721,7 +732,7 @@ def _replace_data(
     )
 
 
-def _run_row(run: dict[str, Any]) -> tuple[str, str, str, str, str, str, str, str, str, str]:
+def _run_row(run: dict[str, Any]) -> tuple[str, str, str, str, str, str, str, str, str, str, str]:
     season = run.get("season", {}) if isinstance(run.get("season"), dict) else {}
     agent = run.get("agent", {}) if isinstance(run.get("agent"), dict) else {}
     repository = run.get("repository", {}) if isinstance(run.get("repository"), dict) else {}
@@ -735,6 +746,7 @@ def _run_row(run: dict[str, Any]) -> tuple[str, str, str, str, str, str, str, st
         str(run.get("run_status") or "unknown"),
         str(run.get("wake_source") or ""),
         str(repository.get("full_name") or ""),
+        str(run.get("run_dir") or ""),
         str(run.get("started_at") or ""),
         json.dumps(run, ensure_ascii=True),
     )
