@@ -643,6 +643,74 @@ class ToolRegistryMemoryTest(unittest.TestCase):
             self.assertEqual("request_changes", review.row["severity"])
             self.assertEqual(["verification is too weak"], review.row["concerns"])
 
+    def test_maintainer_prereview_redacts_provider_exception(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = RunConfig(
+                run=RunSection(id="run-1", mode="shadow", model="responses/test"),
+                discovery=DiscoveryConfig(
+                    candidates=[
+                        RepoCandidate(
+                            owner="example",
+                            repo="repo",
+                            url="https://github.com/example/repo",
+                        )
+                    ]
+                ),
+                workspace=WorkspaceConfig(),
+                memory=MemoryConfig(root=root / "memory"),
+            )
+
+            class FakeAgent:
+                def __init__(self, **kwargs):
+                    pass
+
+            class FakeModelSettings:
+                def __init__(self, **kwargs):
+                    pass
+
+            class FakeRunConfig:
+                def __init__(self, **kwargs):
+                    pass
+
+            class FakeRunner:
+                @staticmethod
+                def run_sync(*args, **kwargs):
+                    raise RuntimeError(
+                        "provider failed with token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234"
+                    )
+
+            with patch.dict(
+                "sys.modules",
+                {
+                    "agents": type(
+                        "AgentsModule",
+                        (),
+                        {
+                            "Agent": FakeAgent,
+                            "ModelSettings": FakeModelSettings,
+                            "RunConfig": FakeRunConfig,
+                            "Runner": FakeRunner,
+                        },
+                    )(),
+                },
+            ):
+                review = run_maintainer_prereview(
+                    config=config,
+                    model_provider=object(),  # type: ignore[arg-type]
+                    capture=ArtifactCapture(),
+                    patch="diff --git a/app.py b/app.py\n",
+                    round_number=1,
+                )
+
+            self.assertTrue(review.unavailable)
+            self.assertEqual("review_simulator_unavailable", review.row["status"])
+            self.assertIn("***", review.row["error"])
+            self.assertNotIn(
+                "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234", review.row["error"]
+            )
+            self.assertNotIn("ABCDEFGHIJKLMNOPQRSTUVWXYZ1234", review.row["error"])
+
 
 def _abandon_goal(registry: ToolRegistry, objective: str, scope: str = ""):
     registry.aci_goal_update(objective, "active", "", scope=scope)
