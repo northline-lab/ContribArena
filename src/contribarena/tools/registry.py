@@ -38,6 +38,15 @@ from contribarena.tools.aci import (
     aci_verify,
     aci_view,
 )
+from contribarena.tools.github_live import (
+    LiveGithubContext,
+    github_commit as live_github_commit,
+    github_observe_pr as live_github_observe_pr,
+    github_open_pr as live_github_open_pr,
+    github_prepare_branch as live_github_prepare_branch,
+    github_prepare_fork as live_github_prepare_fork,
+    github_push_branch as live_github_push_branch,
+)
 from contribarena.tools.repo_eligibility import repo_check_eligibility
 from contribarena.tools.repo_issues import repo_get_issues
 from contribarena.tools.repo_metadata import repo_get_metadata
@@ -89,6 +98,12 @@ ALLOWED_PHASES: dict[str, set[PhaseKey]] = {
     "aci_submit_patch": {("work", None), ("review", None)},
     "aci_submit_patch_finalize": {("review", None)},
     "aci_dispute_review": {("review", None)},
+    "github_prepare_fork": {("review", None)},
+    "github_prepare_branch": {("review", None)},
+    "github_commit": {("review", None)},
+    "github_push_branch": {("review", None)},
+    "github_open_pr": {("review", None)},
+    "github_observe_pr": {("scout", "opportunity"), ("review", None)},
 }
 
 ALWAYS_ALLOWED_TOOLS = {
@@ -131,6 +146,7 @@ class ToolRegistry:
     memory: MemoryService | None = None
     goals: GoalService | None = None
     model_provider: ModelProvider | None = None
+    pr_client: object | None = None
 
     def current_phase_key(self) -> PhaseKey:
         if self.goals is None:
@@ -910,6 +926,136 @@ class ToolRegistry:
             payload={"path": path},
         )
 
+    def github_prepare_fork(self, owner: str, repo: str) -> AciResult:
+        return self._record_github(
+            tool="github_prepare_fork",
+            payload={"owner": owner, "repo": repo},
+            fn=lambda: live_github_prepare_fork(
+                config=self.config,
+                capture=self.capture,
+                context=self._live_github_context(),
+                client=self.pr_client,
+                owner=owner,
+                repo=repo,
+            ),
+        )
+
+    def github_prepare_branch(
+        self,
+        owner: str,
+        repo: str,
+        base: str,
+        branch: str,
+        path: str = "repo",
+    ) -> AciResult:
+        return self._record_github(
+            tool="github_prepare_branch",
+            payload={"owner": owner, "repo": repo, "base": base, "branch": branch, "path": path},
+            fn=lambda: live_github_prepare_branch(
+                config=self.config,
+                workspace=self.workspace,
+                capture=self.capture,
+                context=self._live_github_context(),
+                owner=owner,
+                repo=repo,
+                base=base,
+                branch=branch,
+                path=path,
+            ),
+        )
+
+    def github_commit(self, title: str, body: str = "", path: str = "repo") -> AciResult:
+        return self._record_github(
+            tool="github_commit",
+            payload={"title": title, "body": truncate_for_operator(body, 240), "path": path},
+            fn=lambda: live_github_commit(
+                config=self.config,
+                workspace=self.workspace,
+                capture=self.capture,
+                context=self._live_github_context(),
+                title=title,
+                body=body,
+                path=path,
+            ),
+        )
+
+    def github_push_branch(
+        self,
+        owner: str,
+        repo: str,
+        branch: str,
+        path: str = "repo",
+    ) -> AciResult:
+        return self._record_github(
+            tool="github_push_branch",
+            payload={"owner": owner, "repo": repo, "branch": branch, "path": path},
+            fn=lambda: live_github_push_branch(
+                config=self.config,
+                workspace=self.workspace,
+                capture=self.capture,
+                context=self._live_github_context(),
+                owner=owner,
+                repo=repo,
+                branch=branch,
+                path=path,
+            ),
+        )
+
+    def github_open_pr(
+        self,
+        owner: str,
+        repo: str,
+        head: str,
+        base: str,
+        title: str,
+        body: str,
+    ) -> AciResult:
+        return self._record_github(
+            tool="github_open_pr",
+            payload={
+                "owner": owner,
+                "repo": repo,
+                "head": head,
+                "base": base,
+                "title": title,
+                "body": truncate_for_operator(body, 240),
+            },
+            fn=lambda: live_github_open_pr(
+                config=self.config,
+                capture=self.capture,
+                context=self._live_github_context(),
+                client=self.pr_client,
+                owner=owner,
+                repo=repo,
+                head=head,
+                base=base,
+                title=title,
+                body=body,
+            ),
+        )
+
+    def github_observe_pr(self, owner: str, repo: str, number: int) -> AciResult:
+        return self._record_github(
+            tool="github_observe_pr",
+            payload={"owner": owner, "repo": repo, "number": number},
+            fn=lambda: live_github_observe_pr(
+                config=self.config,
+                capture=self.capture,
+                context=self._live_github_context(),
+                client=self.pr_client,
+                owner=owner,
+                repo=repo,
+                number=number,
+            ),
+        )
+
+    def _live_github_context(self) -> LiveGithubContext:
+        return LiveGithubContext(
+            run_id=self.trace.run_id,
+            season_id=self.config.run.season_id or self.config.judgement.season_id,
+            participant_id=self.config.run.participant_id or "",
+        )
+
     def _undo_execution(self) -> AciExecution:
         if not self.capture.undo_stack:
             return AciExecution(
@@ -1245,6 +1391,71 @@ class ToolRegistry:
                 terminal_status=result.terminal_status,
                 retry_count=result.retry_count,
                 terminal_after_retries=result.terminal_after_retries,
+            )
+        )
+        return result
+
+    def _record_github(
+        self,
+        *,
+        tool: str,
+        payload: dict[str, Any],
+        fn: Callable[[], AciResult],
+    ) -> AciResult:
+        violation = self._phase_violation(tool, payload, phase="submission")
+        if violation is not None:
+            return violation
+        self.budget.record_step()
+        start = time.monotonic()
+        self.trace.write(RunState.AGENT_ACTING, f"{tool}.started", payload)
+        try:
+            result = fn()
+        except Exception as exc:
+            duration = time.monotonic() - start
+            self.trace.write(RunState.AGENT_ACTING, f"{tool}.failed", {"error": str(exc)})
+            self.capture.record_step(
+                AgentStep(
+                    step=len(self.capture.steps) + 1,
+                    phase="submission",
+                    tool=tool,
+                    input_summary=_summary(payload),
+                    result_summary="failed",
+                    state=str(RunState.AGENT_ACTING),
+                    duration_seconds=duration,
+                    error=str(exc),
+                )
+            )
+            raise
+        duration = time.monotonic() - start
+        result = _annotate_recovery_retry(self.capture, _annotate_aci_result(tool, result))
+        self.capture.record_aci_result(result)
+        self._record_phase_projection(tool, payload, result)
+        self.trace.write(
+            RunState.AGENT_ACTING,
+            f"{tool}.finished",
+            {"result": _safe_result(result)},
+        )
+        self._write_operator_event(
+            f"github.{tool.removeprefix('github_')}",
+            "finished",
+            result,
+            payload,
+            phase="submission",
+            tool=tool,
+        )
+        self.capture.record_step(
+            AgentStep(
+                step=len(self.capture.steps) + 1,
+                phase="submission",
+                tool=tool,
+                input_summary=_summary(payload),
+                result_summary=_result_summary(result),
+                state=str(RunState.AGENT_ACTING),
+                duration_seconds=duration,
+                error=result.error,
+                accepted=_step_accepted(result),
+                recovery_kind=result.recovery_kind,
+                terminal_status=result.terminal_status,
             )
         )
         return result

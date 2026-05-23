@@ -19,6 +19,7 @@ class ArtifactCapture:
         self.phase_review_response_rows: list[dict[str, object]] = []
         self.discovery_rows: list[dict[str, object]] = []
         self.assistant_updates: list[AssistantUpdate] = []
+        self.live_action_rows: list[dict[str, object]] = []
 
     def record_command(self, result: CommandResult) -> None:
         self.commands.append(result)
@@ -55,3 +56,6 @@ class ArtifactCapture:
 
     def record_assistant_update(self, update: AssistantUpdate) -> None:
         self.assistant_updates.append(update)
+
+    def record_live_action(self, payload: dict[str, object]) -> None:
+        self.live_action_rows.append(payload)

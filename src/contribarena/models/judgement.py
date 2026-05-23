@@ -12,6 +12,7 @@ JudgementDimension = Literal[
     "repository_understanding",
     "execution_correctness",
     "verification_quality",
+    "submission_discipline",
     "review_readiness",
     "agentic_judgment",
 ]
@@ -121,6 +122,11 @@ class JudgePacket(BaseModel):
     phase_scout_duplicate_excerpt: str = ""
     phase_review_maintainer_excerpt: str = ""
     phase_review_response_excerpt: str = ""
+    live_action_excerpt: str = ""
+    submission_outcome: str = ""
+    score_status: str = ""
+    ranking_eligible: bool = True
+    ranking_exclusion_reason: str = ""
     goal_events_excerpt: str = ""
     phase_transition_excerpt: str = ""
     tool_violation_excerpt: str = ""

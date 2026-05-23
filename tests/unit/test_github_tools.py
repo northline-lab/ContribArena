@@ -538,6 +538,8 @@ class GithubToolsTest(unittest.TestCase):
                         "full_name": "bot/project",
                         "html_url": "https://github.com/bot/project",
                         "owner": {"login": "bot"},
+                        "fork": True,
+                        "parent": {"full_name": "owner/project"},
                     },
                 )
 
@@ -552,6 +554,95 @@ class GithubToolsTest(unittest.TestCase):
         self.assertEqual("GET", fake.method)
         self.assertEqual("/repos/bot/project", fake.path)
         self.assertEqual("BOT_TOKEN", fake.token_env)
+
+    def test_github_pr_client_rejects_existing_non_fork(self) -> None:
+        class FakeClient:
+            def rest_json(
+                self,
+                method: str,
+                path: str,
+                params: dict | None = None,
+                json_body: dict | None = None,
+                token_env: str | None = None,
+            ) -> GitHubResponse:
+                return GitHubResponse(
+                    ok=True,
+                    source="fake",
+                    data={
+                        "name": "project",
+                        "full_name": "bot/project",
+                        "html_url": "https://github.com/bot/project",
+                        "owner": {"login": "bot"},
+                        "fork": False,
+                    },
+                )
+
+        client = GitHubPullRequestClient(client=FakeClient(), token_env="BOT_TOKEN")  # type: ignore[arg-type]
+
+        result = client.ensure_fork(owner="owner", repo="project", fork_owner="bot")
+
+        self.assertFalse(result.ok)
+        self.assertIn("is not a fork of owner/project", result.error)
+        self.assertIn("configure fork_owner", result.error)
+
+    def test_github_pr_client_rejects_existing_fork_of_wrong_parent(self) -> None:
+        class FakeClient:
+            def rest_json(
+                self,
+                method: str,
+                path: str,
+                params: dict | None = None,
+                json_body: dict | None = None,
+                token_env: str | None = None,
+            ) -> GitHubResponse:
+                return GitHubResponse(
+                    ok=True,
+                    source="fake",
+                    data={
+                        "name": "project",
+                        "full_name": "bot/project",
+                        "html_url": "https://github.com/bot/project",
+                        "owner": {"login": "bot"},
+                        "fork": True,
+                        "parent": {"full_name": "other/project"},
+                    },
+                )
+
+        client = GitHubPullRequestClient(client=FakeClient(), token_env="BOT_TOKEN")  # type: ignore[arg-type]
+
+        result = client.ensure_fork(owner="owner", repo="project", fork_owner="bot")
+
+        self.assertFalse(result.ok)
+        self.assertIn("is a fork of other/project, not owner/project", result.error)
+
+    def test_github_pr_client_allows_source_owner_submission_without_fork_metadata(self) -> None:
+        class FakeClient:
+            def rest_json(
+                self,
+                method: str,
+                path: str,
+                params: dict | None = None,
+                json_body: dict | None = None,
+                token_env: str | None = None,
+            ) -> GitHubResponse:
+                return GitHubResponse(
+                    ok=True,
+                    source="fake",
+                    data={
+                        "name": "project",
+                        "full_name": "owner/project",
+                        "html_url": "https://github.com/owner/project",
+                        "owner": {"login": "owner"},
+                        "fork": False,
+                    },
+                )
+
+        client = GitHubPullRequestClient(client=FakeClient(), token_env="BOT_TOKEN")  # type: ignore[arg-type]
+
+        result = client.ensure_fork(owner="owner", repo="project", fork_owner="owner")
+
+        self.assertTrue(result.ok)
+        self.assertEqual("owner/project", result.full_name)
 
     def test_github_pr_client_creates_missing_fork(self) -> None:
         class FakeClient:

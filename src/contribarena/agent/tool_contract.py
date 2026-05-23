@@ -112,3 +112,41 @@ class ContributorTools(Protocol):
     ) -> AciResult: ...
 
     def aci_submit_patch_finalize(self, path: str = "repo") -> AciResult: ...
+
+    def github_prepare_fork(self, owner: str, repo: str) -> AciResult: ...
+
+    def github_prepare_branch(
+        self,
+        owner: str,
+        repo: str,
+        base: str,
+        branch: str,
+        path: str = "repo",
+    ) -> AciResult: ...
+
+    def github_commit(
+        self,
+        title: str,
+        body: str = "",
+        path: str = "repo",
+    ) -> AciResult: ...
+
+    def github_push_branch(
+        self,
+        owner: str,
+        repo: str,
+        branch: str,
+        path: str = "repo",
+    ) -> AciResult: ...
+
+    def github_open_pr(
+        self,
+        owner: str,
+        repo: str,
+        head: str,
+        base: str,
+        title: str,
+        body: str,
+    ) -> AciResult: ...
+
+    def github_observe_pr(self, owner: str, repo: str, number: int) -> AciResult: ...

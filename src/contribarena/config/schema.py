@@ -193,8 +193,9 @@ def _default_judgement_dimension_weights() -> dict[str, float]:
         "repository_understanding": 0.08,
         "execution_correctness": 0.25,
         "verification_quality": 0.12,
-        "review_readiness": 0.13,
-        "agentic_judgment": 0.12,
+        "submission_discipline": 0.10,
+        "review_readiness": 0.10,
+        "agentic_judgment": 0.05,
     }
 
 

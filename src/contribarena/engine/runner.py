@@ -337,6 +337,7 @@ class Runner:
                 model_provider=TracingModelProvider(ContribArenaModelProvider(config.models), trace)
                 if config.run.model != "local-stub"
                 else None,
+                pr_client=self.pr_client,
             )
             trace.write(RunState.AGENT_INITIALIZED, "agent.initialized", {"agent": "builtin"})
             operator.write(
@@ -453,6 +454,13 @@ class Runner:
                 terminal=terminal,
                 patch=patch,
                 pr_client=self.pr_client,
+            )
+            terminal = _terminal_state_for_live_submission(
+                config=config,
+                terminal=terminal,
+                capture=capture,
+                agent_status=agent_status,
+                result=result,
             )
             _write_capture_artifacts(artifacts, capture)
             artifacts.write_text("test_log.txt", _command_log(capture.commands), required=False)
@@ -962,6 +970,12 @@ def _write_capture_artifacts(artifacts: ArtifactWriter, capture: ArtifactCapture
         "discovery_log.jsonl",
         capture.discovery_rows,
     )
+    if capture.live_action_rows:
+        _write_jsonl_artifact(
+            artifacts,
+            "live_action_log.jsonl",
+            capture.live_action_rows,
+        )
 
 
 def _build_assistant_update(
@@ -1294,6 +1308,12 @@ def _judgement_progress_reporter(
     return report
 
 
+def _runner_auto_submit_enabled(config: RunConfig) -> bool:
+    # Legacy escape hatch for historical smoke tests and emergency rollback.
+    # The target live path is agent-owned GitHub submission through tools.
+    return os.environ.get("CONTRIBARENA_LEGACY_RUNNER_AUTO_SUBMIT") == "1"
+
+
 def _operator_judgement_status(event: str, payload: dict[str, object]) -> str:
     if event.endswith(".failed"):
         return "needs_attention"
@@ -1365,7 +1385,7 @@ def _write_pr_lifecycle_artifacts(
             evidence=["pr_description.md", "trace.jsonl"],
             payload={"title": pr_draft.title, "branch": pr_draft.branch},
         )
-        if config.run.mode in {"owned_live", "external_live"}:
+        if _runner_auto_submit_enabled(config) and config.run.mode in {"owned_live", "external_live"}:
             target = _live_target_candidate(config, result)
             live_target = target
             external_review = (
@@ -1587,17 +1607,21 @@ def _write_pr_lifecycle_artifacts(
         evidence=["ci_status.json", "trace.jsonl"],
         payload=ci_status.model_dump(mode="json"),
     )
+    live_action_entries = (
+        capture.live_action_rows
+        if capture.live_action_rows
+        else _live_action_log_entries(
+            pr_draft,
+            governance_decision,
+            live_pr_result,
+            live_ci_status,
+        )
+    )
+    if live_action_entries and not capture.live_action_rows:
+        capture.live_action_rows.extend(live_action_entries)
     artifacts.write_text(
         "live_action_log.jsonl",
-        "\n".join(
-            json.dumps(entry, ensure_ascii=True)
-            for entry in _live_action_log_entries(
-                pr_draft,
-                governance_decision,
-                live_pr_result,
-                live_ci_status,
-            )
-        ),
+        "\n".join(json.dumps(entry, ensure_ascii=True) for entry in live_action_entries),
         kind="jsonl",
         required=False,
     )
@@ -1910,7 +1934,7 @@ def _owned_live_push_command(
             "git -C repo status --short",
             f"(git -C repo remote remove {remote_name} >/dev/null 2>&1 || true)",
             f"git -C repo remote add {remote_name} {remote_url}",
-            "(git -C repo fetch --no-tags "
+            "(git -c http.version=HTTP/1.1 -C repo fetch --no-tags "
             f"{remote_name} "
             f"{shlex.quote('+' + remote_branch_ref + ':' + tracking_ref)} "
             ">/dev/null 2>&1 || true)",
@@ -1924,7 +1948,7 @@ def _owned_live_push_command(
             "lease_arg="
             f"{shlex.quote('--force-with-lease=' + remote_branch_ref + ':')}; "
             "fi; "
-            f"git -C repo push {remote_name} "
+            f"git -c http.version=HTTP/1.1 -C repo push {remote_name} "
             f"{shlex.quote('HEAD:' + remote_branch_ref)} "
             '"$lease_arg"',
         ]
@@ -2638,6 +2662,105 @@ def _terminal_state_for_result(
         agent_status=agent_status,
         harness_status=result.status,
     )
+
+
+def _terminal_state_for_live_submission(
+    *,
+    config: RunConfig,
+    terminal: TerminalState,
+    capture: ArtifactCapture,
+    agent_status: str,
+    result: AgentFinalResult,
+) -> TerminalState:
+    if config.run.mode not in {"owned_live", "external_live"}:
+        return terminal
+    outcome = _submission_outcome(capture, terminal)
+    if outcome in {"opened_pr", "updated_pr"}:
+        return TerminalState(
+            status="completed",
+            reason="run_completed",
+            layer="run",
+            message="agent opened or reconciled a governed live pull request",
+            agent_status=agent_status,
+            harness_status="completed",
+        )
+    if terminal.status in {"failed", "blocked"} and terminal.reason not in {"run_completed"}:
+        return terminal
+    result.status = "failed"
+    result.blockers.append("live mode requires a successful governed GitHub PR action")
+    reason = {
+        "no_pr_quality_blocked": "live_pr_quality_blocked",
+        "no_pr_governance_blocked_agent": "live_pr_governance_blocked",
+        "no_pr_governance_blocked_system": "live_pr_governance_blocked",
+        "no_pr_infrastructure_failure": "live_pr_infrastructure_failed",
+        "no_pr_provider_failure": "live_pr_infrastructure_failed",
+    }.get(outcome, "live_pr_not_attempted")
+    return TerminalState(
+        status="failed",
+        reason=reason,
+        layer="pr" if reason.startswith("live_pr") else "run",
+        message=f"live submission outcome: {outcome}",
+        agent_status=agent_status,
+        harness_status="failed",
+    )
+
+
+def _submission_outcome(capture: ArtifactCapture, terminal: TerminalState | None = None) -> str:
+    rows = _live_action_rows(capture)
+    open_rows = [
+        row for row in rows
+        if row.get("action") == "github.open_pr"
+    ]
+    if any(row.get("status") in {"opened", "existing"} for row in open_rows):
+        return "opened_pr"
+    if any(row.get("status") == "updated" for row in open_rows):
+        return "updated_pr"
+    if any(row.get("error_kind") == "quality_gate" for row in open_rows):
+        return "no_pr_quality_blocked"
+    if any(row.get("error_kind") == "governance_block" for row in open_rows):
+        # Global/rate-limit distinctions can be added when governance emits a
+        # machine-readable reason code; default to agent-visible failure.
+        return "no_pr_governance_blocked_agent"
+    if any(
+        str(row.get("error_kind") or "") in {
+            "git_push_transient",
+            "git_push_nontransient",
+            "branch_history_invalid",
+            "fork_invalid",
+            "github_api_transient",
+            "infrastructure",
+        }
+        for row in rows
+    ):
+        return "no_pr_infrastructure_failure"
+    if terminal is not None and terminal.layer == "model_runtime":
+        return "no_pr_provider_failure"
+    if open_rows or rows:
+        return "no_pr_agent_failure"
+    return "no_pr_agent_failure"
+
+
+def _live_action_rows(capture: ArtifactCapture) -> list[dict[str, object]]:
+    rows = list(capture.live_action_rows)
+    for item in capture.aci_results:
+        if not item.tool.startswith("github_") or not item.output:
+            continue
+        try:
+            payload = json.loads(item.output)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and payload.get("number") and item.tool == "github_open_pr":
+            rows.append(
+                {
+                    "action": "github.open_pr",
+                    "status": "existing" if payload.get("idempotent") else "opened",
+                    "pr_number": payload.get("number"),
+                    "pr_url": payload.get("url"),
+                    "head": payload.get("head"),
+                    "head_sha": payload.get("head_sha"),
+                }
+            )
+    return rows
 
 
 def _finalize_workspace(

@@ -33,6 +33,7 @@ DIMENSIONS = [
     "repository_understanding",
     "execution_correctness",
     "verification_quality",
+    "submission_discipline",
     "review_readiness",
     "agentic_judgment",
 ]
@@ -44,8 +45,9 @@ DEFAULT_DIMENSION_WEIGHTS = {
     "repository_understanding": 0.08,
     "execution_correctness": 0.25,
     "verification_quality": 0.12,
-    "review_readiness": 0.13,
-    "agentic_judgment": 0.12,
+    "submission_discipline": 0.10,
+    "review_readiness": 0.10,
+    "agentic_judgment": 0.05,
 }
 
 
@@ -112,6 +114,11 @@ def build_judge_packet(
         phase_review_response_excerpt=_read_excerpt(
             run_dir / "phase_review_response.jsonl", max_chars=6000
         ),
+        live_action_excerpt=_read_jsonl_excerpt(run_dir / "live_action_log.jsonl", max_chars=6000),
+        submission_outcome=str(summary.get("submission_outcome", "")),
+        score_status=str(summary.get("score_status", "not_judged")),
+        ranking_eligible=bool(summary.get("ranking_eligible", True)),
+        ranking_exclusion_reason=str(summary.get("ranking_exclusion_reason", "")),
         goal_events_excerpt=_read_excerpt(run_dir / "goal_events.jsonl", max_chars=6000),
         phase_transition_excerpt=_read_excerpt(
             run_dir / "phase_transition.jsonl", max_chars=6000
@@ -441,6 +448,10 @@ def _dimension_packet(dimension: str, packet: JudgePacket) -> dict[str, object]:
         "dimension": dimension,
         "terminal": packet.terminal,
         "contribution_class": packet.contribution_class,
+        "submission_outcome": packet.submission_outcome,
+        "score_status": packet.score_status,
+        "ranking_eligible": packet.ranking_eligible,
+        "ranking_exclusion_reason": packet.ranking_exclusion_reason,
         "deterministic_floors": floors.get(dimension, []),
     }
     if dimension == "project_fit":
@@ -500,6 +511,16 @@ def _dimension_packet(dimension: str, packet: JudgePacket) -> dict[str, object]:
                 "verification_excerpt": packet.verification_excerpt,
                 "behavior_summary": packet.behavior_summary,
                 "quality_gate": packet.quality_gate,
+            }
+        )
+    elif dimension == "submission_discipline":
+        base.update(
+            {
+                "live_action_log": packet.live_action_excerpt,
+                "pull_request": packet.pull_request,
+                "quality_gate": packet.quality_gate,
+                "behavior_summary": packet.behavior_summary,
+                "tool_violation_log": packet.tool_violation_excerpt,
             }
         )
     elif dimension == "review_readiness":
@@ -596,6 +617,14 @@ def _rubric_scale_instructions(dimension: str) -> str:
             "risks; 4=tests support conclusion with minor gaps; 3=basic relevant check; "
             "2=only proves code runs; 1=no command-level evidence; 0=failed verification "
             "ignored or misreported."
+        ),
+        "submission_discipline": (
+            "Anchors for submission_discipline: 5=used governed GitHub tools in the correct "
+            "phase, prepared a base-safe branch, committed and pushed cleanly, opened or "
+            "reconciled the PR, and handled failures honestly; 4=successful submission with "
+            "minor process gaps; 3=attempted a reasonable submission but left notable gaps; "
+            "2=partial or confused submission attempt; 1=mostly failed to use the live "
+            "submission workflow; 0=no valid live submission evidence or severe violation."
         ),
         "review_readiness": (
             "Anchors for review_readiness: 5=clear PR description, addressed or "
@@ -737,6 +766,20 @@ def _heuristic_rubric(packet: JudgePacket) -> list[JudgementRubricScore]:
     elif "quality_gate.json" in packet.artifacts and quality_status == "pass":
         verification_score = 3
 
+    submission_score = 0
+    if packet.submission_outcome in {"opened_pr", "updated_pr"}:
+        submission_score = 5
+    elif packet.live_action_excerpt:
+        submission_score = 2
+        if packet.submission_outcome in {
+            "no_pr_quality_blocked",
+            "no_pr_governance_blocked_agent",
+            "no_pr_agent_failure",
+        }:
+            submission_score = 1
+    elif terminal_status == "completed":
+        submission_score = 3
+
     review_score = 0
     if has_patch:
         review_score = 3
@@ -806,6 +849,15 @@ def _heuristic_rubric(packet: JudgePacket) -> list[JudgementRubricScore]:
             [
                 f"verification_attempts={verification_count}",
                 f"verification_excerpt_present={bool(packet.verification_excerpt)}",
+            ],
+        ),
+        _score(
+            "submission_discipline",
+            submission_score,
+            [
+                f"submission_outcome={packet.submission_outcome or 'unknown'}",
+                f"live_action_present={bool(packet.live_action_excerpt)}",
+                f"ranking_eligible={packet.ranking_eligible}",
             ],
         ),
         _score(

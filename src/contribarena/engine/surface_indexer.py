@@ -242,6 +242,11 @@ def _normalize_run_summary(payload: dict[str, Any]) -> dict[str, Any]:
         {"status": "pending", "observed_at": "", "source": "none"},
     )
     normalized.setdefault("judgement", {"status": "not_judged"})
+    normalized.setdefault("submission_outcome", "")
+    normalized.setdefault("score_status", "not_judged")
+    normalized.setdefault("ranking_eligible", True)
+    normalized.setdefault("ranking_exclusion_reason", "")
+    normalized.setdefault("contribution_thread_id", "")
     normalized["pipeline"] = [
         _normalize_stage(stage)
         for stage in normalized.get("pipeline", [])
@@ -702,6 +707,8 @@ def _judgement_retry_excluded(run: dict[str, Any]) -> bool:
 
 
 def _ranking_excluded(run: dict[str, Any]) -> bool:
+    if run.get("ranking_eligible") is False:
+        return True
     return _replacement_excluded(run) or _judgement_retry_excluded(run)
 
 

@@ -324,6 +324,54 @@ class ContributorAgent:
                 tools.aci_dispute_review(concern_id, rebuttal_text, evidence_refs_json)
             )
 
+        @function_tool
+        def github_prepare_fork(owner: str, repo: str) -> str:
+            """Prepare the configured fork or upstream submission target for a live PR."""
+            return _to_json(tools.github_prepare_fork(owner, repo))
+
+        @function_tool
+        def github_prepare_branch(
+            owner: str,
+            repo: str,
+            base: str,
+            branch: str,
+            path: str = "repo",
+        ) -> str:
+            """Create/reset a local PR branch from the target base branch."""
+            return _to_json(tools.github_prepare_branch(owner, repo, base, branch, path))
+
+        @function_tool
+        def github_commit(title: str, body: str = "", path: str = "repo") -> str:
+            """Commit the current workspace changes for live PR submission."""
+            return _to_json(tools.github_commit(title, body, path))
+
+        @function_tool
+        def github_push_branch(
+            owner: str,
+            repo: str,
+            branch: str,
+            path: str = "repo",
+        ) -> str:
+            """Push the prepared branch to the configured GitHub repository."""
+            return _to_json(tools.github_push_branch(owner, repo, branch, path))
+
+        @function_tool
+        def github_open_pr(
+            owner: str,
+            repo: str,
+            head: str,
+            base: str,
+            title: str,
+            body: str,
+        ) -> str:
+            """Open or reconcile a governed live pull request."""
+            return _to_json(tools.github_open_pr(owner, repo, head, base, title, body))
+
+        @function_tool
+        def github_observe_pr(owner: str, repo: str, number: int) -> str:
+            """Observe a GitHub pull request state, checks, and review counters."""
+            return _to_json(tools.github_observe_pr(owner, repo, number))
+
         agent = Agent(
             name="contribarena-contributor",
             instructions=build_agent_instructions(config),
@@ -358,6 +406,12 @@ class ContributorAgent:
                 aci_submit_patch,
                 aci_dispute_review,
                 aci_submit_patch_finalize,
+                github_prepare_fork,
+                github_prepare_branch,
+                github_commit,
+                github_push_branch,
+                github_open_pr,
+                github_observe_pr,
             ],
             model=config.run.model,
             model_settings=ModelSettings(
@@ -488,15 +542,16 @@ def _candidate_ref(config: RunConfig, owner: str, repo: str) -> RepoCandidate:
 def build_agent_instructions(config: RunConfig) -> str:
     if config.run.mode == "owned_live":
         boundary = (
-            "Owned-live mode still does not give you direct GitHub write authority; submit a "
-            "minimal verified patch and the harness will handle governed branch push and PR creation. "
+            "Owned-live mode gives you governed GitHub write tools in Review. Submit and finalize "
+            "a minimal verified patch, then use the GitHub tools to prepare, commit, push, and open "
+            "the PR yourself. "
         )
     elif config.run.mode == "external_live":
         boundary = (
-            "External-live mode still does not give you direct GitHub write authority; freely "
-            "discover an eligible external repository, choose a defensibly low-risk task, and "
-            "submit a minimal verified patch. The harness will handle fork-only PR creation and "
-            "lifecycle governance. "
+            "External-live mode gives you governed fork-only GitHub write tools in Review. Freely "
+            "discover an eligible external repository, choose a defensibly low-risk task, submit "
+            "and finalize a minimal verified patch, then prepare, commit, push, and open the PR "
+            "yourself through the GitHub tools. "
         )
     else:
         boundary = "Shadow mode means no GitHub writes. "

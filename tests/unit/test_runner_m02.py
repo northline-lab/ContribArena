@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Literal
 from unittest.mock import patch
@@ -530,6 +531,63 @@ class FakeIssueAgent:
         )
 
 
+class FakeLiveSubmittingAgent(FakeIssueAgent):
+    def run(
+        self,
+        config: RunConfig,
+        tools: object,
+        prompt: str,
+        model_provider: object = None,
+        **kwargs: object,
+    ) -> AgentFinalResult:
+        result = super().run(config, tools, prompt, model_provider, **kwargs)
+        tools.aci_submit_patch_finalize()  # type: ignore[attr-defined]
+        fork = tools.github_prepare_fork("example", "repo")  # type: ignore[attr-defined]
+        push_owner = "contribarena-bot"
+        if fork.success:
+            payload = json.loads(fork.output or "{}")
+            push_owner = str(payload.get("push_owner") or push_owner)
+        else:
+            return result
+        branch = "contribarena/fix-configured-problem"
+        tools.github_prepare_branch("example", "repo", "main", branch)  # type: ignore[attr-defined]
+        tools.github_commit("Fix old marker", "Replace the old marker with the new marker.")  # type: ignore[attr-defined]
+        push = tools.github_push_branch(push_owner, "repo", branch)  # type: ignore[attr-defined]
+        if not push.success:
+            return result
+        tools.github_open_pr(  # type: ignore[attr-defined]
+            "example",
+            "repo",
+            f"{push_owner}:{branch}",
+            "main",
+            "Fix old marker",
+            "Replace the old marker with the new marker.",
+        )
+        return result
+
+
+class FakeLiveOpeningOnlyAgent(FakeIssueAgent):
+    def run(
+        self,
+        config: RunConfig,
+        tools: object,
+        prompt: str,
+        model_provider: object = None,
+        **kwargs: object,
+    ) -> AgentFinalResult:
+        result = super().run(config, tools, prompt, model_provider, **kwargs)
+        tools.aci_submit_patch_finalize()  # type: ignore[attr-defined]
+        tools.github_open_pr(  # type: ignore[attr-defined]
+            "example",
+            "repo",
+            "contribarena-bot:contribarena/fix-configured-problem",
+            "main",
+            "Fix old marker",
+            "Replace the old marker with the new marker.",
+        )
+        return result
+
+
 class FakePhasedExternalAgent(FakeIssueAgent):
     def run(
         self,
@@ -711,6 +769,19 @@ class FakePipeVerificationAgent:
         )
 
 
+@contextmanager
+def _legacy_runner_auto_submit():
+    previous = os.environ.get("CONTRIBARENA_LEGACY_RUNNER_AUTO_SUBMIT")
+    os.environ["CONTRIBARENA_LEGACY_RUNNER_AUTO_SUBMIT"] = "1"
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("CONTRIBARENA_LEGACY_RUNNER_AUTO_SUBMIT", None)
+        else:
+            os.environ["CONTRIBARENA_LEGACY_RUNNER_AUTO_SUBMIT"] = previous
+
+
 class RunnerM02Test(unittest.TestCase):
     def test_issue_solving_agent_instructions_disable_self_selected_tasks(self) -> None:
         instructions = build_agent_instructions(_issue_config(Path("runs")))
@@ -728,7 +799,8 @@ class RunnerM02Test(unittest.TestCase):
         instructions = build_agent_instructions(_owned_live_config(Path("runs"), live_enabled=True))
 
         self.assertIn("Owned-live mode", instructions)
-        self.assertIn("harness will handle governed branch push and PR creation", instructions)
+        self.assertIn("GitHub write tools", instructions)
+        self.assertIn("open the PR yourself", instructions)
 
     def test_runner_captures_aci_trajectory_and_shadow_patch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1227,24 +1299,22 @@ class RunnerM02Test(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             result = _run_with_fake_docker(
-                FakeIssueAgent(),
+                FakeLiveSubmittingAgent(),
                 _owned_live_config(tmp_path / "runs", live_enabled=False),
                 tmp_path,
+                pr_client=FakePrClient(actor="contribarena-bot"),
             )
 
-            self.assertEqual("blocked", result.status)
-            self.assertEqual("governance_blocked", result.terminal_reason)
-            self.assertEqual("governance", result.terminal_layer)
-            decision = json.loads((result.run_dir / "governance_decision.json").read_text())
-            self.assertEqual("block", decision["status"])
-            self.assertIn("governance live_enabled is false", decision["reasons"])
+            self.assertEqual("failed", result.status)
+            self.assertEqual("live_pr_governance_blocked", result.terminal_reason)
+            self.assertEqual("pr", result.terminal_layer)
             live_action_log = (result.run_dir / "live_action_log.jsonl").read_text()
-            self.assertIn('"mode": "owned_live"', live_action_log)
             self.assertIn('"status": "blocked"', live_action_log)
             self.assertIn('"external_write": false', live_action_log)
+            self.assertIn("governance live_enabled is false", live_action_log)
             terminal = json.loads((result.run_dir / "terminal_state.json").read_text())
             self.assertEqual("completed", terminal["agent_status"])
-            self.assertEqual("blocked", terminal["harness_status"])
+            self.assertEqual("failed", terminal["harness_status"])
 
     def test_owned_live_run_pushes_fork_branch_and_records_opened_pr(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1254,7 +1324,7 @@ class RunnerM02Test(unittest.TestCase):
             os.environ["GITHUB_TOKEN"] = "test-token"
             try:
                 result = _run_with_fake_docker(
-                    FakeIssueAgent(),
+                    FakeLiveSubmittingAgent(),
                     config,
                     tmp_path,
                     pr_client=pr_client,
@@ -1266,16 +1336,12 @@ class RunnerM02Test(unittest.TestCase):
             self.assertEqual(1, pr_client.calls)
             self.assertEqual(1, pr_client.ensure_fork_calls)
             self.assertEqual("Fix old marker", pr_client.last_title)
-            self.assertEqual(
-                ["contribarena-live", "issue-solving", "risk-low"],
-                pr_client.last_labels,
-            )
+            self.assertEqual([], pr_client.last_labels)
             self.assertEqual(
                 "contribarena-bot:contribarena/fix-configured-problem",
                 pr_client.last_head,
             )
-            self.assertIn("Live PR Notice", pr_client.last_body)
-            self.assertNotIn("Dry-Run Notice", pr_client.last_body)
+            self.assertIn("Replace the old marker", pr_client.last_body)
             pr_description = (result.run_dir / "pr_description.md").read_text()
             self.assertIn("contribarena-live", pr_description)
             self.assertIn("Live PR Notice", pr_description)
@@ -1287,35 +1353,28 @@ class RunnerM02Test(unittest.TestCase):
             self.assertEqual(
                 [
                     "github.ensure_fork",
+                    "github.prepare_branch",
+                    "github.commit",
                     "github.push_fork_branch",
                     "github.open_pr",
-                    "github.ensure_labels",
-                    "github.set_pr_labels",
-                    "github.observe_checks",
                 ],
                 [entry["action"] for entry in live_action_entries],
             )
             self.assertEqual("ready", live_action_entries[0]["status"])
-            self.assertEqual("pushed", live_action_entries[1]["status"])
-            self.assertEqual("opened", live_action_entries[2]["status"])
-            self.assertEqual("ready", live_action_entries[3]["status"])
-            self.assertEqual("set", live_action_entries[4]["status"])
-            self.assertEqual(
-                ["contribarena-live", "issue-solving", "risk-low"],
-                live_action_entries[4]["labels"],
-            )
-            self.assertEqual("success", live_action_entries[5]["status"])
-            self.assertEqual("github", live_action_entries[5]["ci_source"])
-            self.assertEqual(["fake check passed"], live_action_entries[5]["ci_details"])
+            self.assertEqual("prepared", live_action_entries[1]["status"])
+            self.assertIn("patch_restored", live_action_entries[1])
+            self.assertEqual("committed", live_action_entries[2]["status"])
+            self.assertEqual("pushed", live_action_entries[3]["status"])
+            self.assertEqual("opened", live_action_entries[4]["status"])
             self.assertEqual("contribarena-bot", live_action_entries[0]["requested_fork_owner"])
-            self.assertEqual("contribarena-bot/repo", live_action_entries[0]["fork_repo"])
+            self.assertEqual("contribarena-bot/repo", live_action_entries[0]["push_repository"])
             self.assertEqual(
                 "contribarena-bot:contribarena/fix-configured-problem",
-                live_action_entries[2]["head"],
+                live_action_entries[4]["head"],
             )
             self.assertIn('"status": "opened"', live_action_log)
             self.assertIn('"external_write": true', live_action_log)
-            self.assertIn('"pr_url": "https://github.com/example/repo/pull/42"', live_action_log)
+            self.assertIn('"url": "https://github.com/example/repo/pull/42"', live_action_log)
             self.assertNotIn("test-token", live_action_log)
             command_log = (result.run_dir / "test_log.txt").read_text()
             self.assertIn("${GITHUB_TOKEN}", command_log)
@@ -1329,7 +1388,7 @@ class RunnerM02Test(unittest.TestCase):
             )
             self.assertNotIn("test-token", command_log)
             ci_status = json.loads((result.run_dir / "ci_status.json").read_text())
-            self.assertEqual("github", ci_status["source"])
+            self.assertEqual("dry_run", ci_status["source"])
             self.assertEqual("success", ci_status["status"])
 
     def test_owned_live_upstream_branch_strategy_remains_explicit(self) -> None:
@@ -1344,7 +1403,7 @@ class RunnerM02Test(unittest.TestCase):
             os.environ["GITHUB_TOKEN"] = "test-token"
             try:
                 result = _run_with_fake_docker(
-                    FakeIssueAgent(),
+                    FakeLiveSubmittingAgent(),
                     config,
                     tmp_path,
                     pr_client=pr_client,
@@ -1354,7 +1413,7 @@ class RunnerM02Test(unittest.TestCase):
 
             self.assertEqual("completed", result.status)
             self.assertEqual(0, pr_client.ensure_fork_calls)
-            self.assertEqual("contribarena/fix-configured-problem", pr_client.last_head)
+            self.assertEqual("example:contribarena/fix-configured-problem", pr_client.last_head)
             live_action_entries = [
                 json.loads(line)
                 for line in (result.run_dir / "live_action_log.jsonl").read_text().splitlines()
@@ -1362,11 +1421,11 @@ class RunnerM02Test(unittest.TestCase):
             ]
             self.assertEqual(
                 [
+                    "github.prepare_upstream_branch",
+                    "github.prepare_branch",
+                    "github.commit",
                     "github.push_upstream_branch",
                     "github.open_pr",
-                    "github.ensure_labels",
-                    "github.set_pr_labels",
-                    "github.observe_checks",
                 ],
                 [entry["action"] for entry in live_action_entries],
             )
@@ -1382,16 +1441,17 @@ class RunnerM02Test(unittest.TestCase):
             config = _owned_live_config(tmp_path / "runs", live_enabled=True)
             os.environ["GITHUB_TOKEN"] = "test-token"
             try:
-                result = _run_with_fake_docker(
-                    FakeIssueAgent(),
-                    config,
-                    tmp_path,
-                    pr_client=FakePrClient(
-                        actor="contribarena-bot",
-                        label_error="The user is not allowed to label this issue.",
-                        label_status_code=404,
-                    ),
-                )
+                with _legacy_runner_auto_submit():
+                    result = _run_with_fake_docker(
+                        FakeIssueAgent(),
+                        config,
+                        tmp_path,
+                        pr_client=FakePrClient(
+                            actor="contribarena-bot",
+                            label_error="The user is not allowed to label this issue.",
+                            label_status_code=404,
+                        ),
+                    )
             finally:
                 os.environ.pop("GITHUB_TOKEN", None)
 
@@ -1428,15 +1488,16 @@ class RunnerM02Test(unittest.TestCase):
             config = _owned_live_config(tmp_path / "runs", live_enabled=True)
             os.environ["GITHUB_TOKEN"] = "test-token"
             try:
-                result = _run_with_fake_docker(
-                    FakeIssueAgent(),
-                    config,
-                    tmp_path,
-                    pr_client=FakePrClient(
-                        actor="contribarena-bot",
-                        label_error="malformed label response",
-                    ),
-                )
+                with _legacy_runner_auto_submit():
+                    result = _run_with_fake_docker(
+                        FakeIssueAgent(),
+                        config,
+                        tmp_path,
+                        pr_client=FakePrClient(
+                            actor="contribarena-bot",
+                            label_error="malformed label response",
+                        ),
+                    )
             finally:
                 os.environ.pop("GITHUB_TOKEN", None)
 
@@ -1470,7 +1531,8 @@ class RunnerM02Test(unittest.TestCase):
             "--force-with-lease=refs/heads/contribarena/example:",
             command,
         )
-        self.assertIn("git -C repo push contribarena-submit", command)
+        self.assertIn("git -c http.version=HTTP/1.1 -C repo fetch", command)
+        self.assertIn("git -c http.version=HTTP/1.1 -C repo push contribarena-submit", command)
 
     def test_owned_live_run_blocks_when_authenticated_actor_mismatches(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1479,7 +1541,7 @@ class RunnerM02Test(unittest.TestCase):
             os.environ["GITHUB_TOKEN"] = "test-token"
             try:
                 result = _run_with_fake_docker(
-                    FakeIssueAgent(),
+                    FakeLiveSubmittingAgent(),
                     config,
                     tmp_path,
                     pr_client=FakePrClient(actor="wrong-bot"),
@@ -1487,12 +1549,11 @@ class RunnerM02Test(unittest.TestCase):
             finally:
                 os.environ.pop("GITHUB_TOKEN", None)
 
-            self.assertEqual("blocked", result.status)
-            decision = json.loads((result.run_dir / "governance_decision.json").read_text())
-            self.assertEqual("block", decision["status"])
+            self.assertEqual("failed", result.status)
+            live_action_log = (result.run_dir / "live_action_log.jsonl").read_text()
             self.assertIn(
                 "authenticated actor wrong-bot does not match expected contribarena-bot",
-                decision["reasons"],
+                live_action_log,
             )
 
     def test_owned_live_fork_failure_records_requested_fork_owner(self) -> None:
@@ -1502,7 +1563,7 @@ class RunnerM02Test(unittest.TestCase):
             os.environ["GITHUB_TOKEN"] = "test-token"
             try:
                 result = _run_with_fake_docker(
-                    FakeIssueAgent(),
+                    FakeLiveSubmittingAgent(),
                     config,
                     tmp_path,
                     pr_client=FakePrClient(
@@ -1514,7 +1575,7 @@ class RunnerM02Test(unittest.TestCase):
                 os.environ.pop("GITHUB_TOKEN", None)
 
             self.assertEqual("failed", result.status)
-            self.assertEqual("pr_fork_prepare_failed", result.terminal_reason)
+            self.assertEqual("live_pr_infrastructure_failed", result.terminal_reason)
             live_action_entries = [
                 json.loads(line)
                 for line in (result.run_dir / "live_action_log.jsonl").read_text().splitlines()
@@ -1523,8 +1584,7 @@ class RunnerM02Test(unittest.TestCase):
             self.assertEqual("github.ensure_fork", live_action_entries[0]["action"])
             self.assertEqual("failed", live_action_entries[0]["status"])
             self.assertEqual("contribarena-bot", live_action_entries[0]["requested_fork_owner"])
-            self.assertEqual("", live_action_entries[0]["fork_owner"])
-            self.assertIn("authentication missing", live_action_entries[0]["fork_error"])
+            self.assertIn("authentication missing", live_action_entries[0]["error"])
 
     def test_external_live_run_uses_fork_only_and_records_lifecycle_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1534,6 +1594,7 @@ class RunnerM02Test(unittest.TestCase):
             os.environ["GITHUB_TOKEN"] = "test-token"
             try:
                 with (
+                    _legacy_runner_auto_submit(),
                     patch(
                         "contribarena.engine.runner.repo_check_eligibility",
                         return_value=EligibilityResult(
@@ -1611,7 +1672,7 @@ class RunnerM02Test(unittest.TestCase):
             pr_client = FakePrClient(actor="contribarena-bot")
             os.environ["GITHUB_TOKEN"] = "test-token"
             try:
-                with patch(
+                with _legacy_runner_auto_submit(), patch(
                     "contribarena.engine.runner.repo_check_eligibility",
                     return_value=EligibilityResult(
                         eligible=False,
@@ -1642,6 +1703,7 @@ class RunnerM02Test(unittest.TestCase):
             os.environ["GITHUB_TOKEN"] = "test-token"
             try:
                 with (
+                    _legacy_runner_auto_submit(),
                     patch(
                         "contribarena.engine.runner.repo_check_eligibility",
                         return_value=EligibilityResult(
@@ -1693,6 +1755,7 @@ class RunnerM02Test(unittest.TestCase):
             os.environ["GITHUB_TOKEN"] = "test-token"
             try:
                 with (
+                    _legacy_runner_auto_submit(),
                     patch(
                         "contribarena.engine.runner.repo_check_eligibility",
                         return_value=EligibilityResult(
@@ -1736,7 +1799,7 @@ class RunnerM02Test(unittest.TestCase):
             pr_client = FakePrClient(actor="contribarena-bot")
             os.environ["GITHUB_TOKEN"] = "test-token"
             try:
-                with patch(
+                with _legacy_runner_auto_submit(), patch(
                     "contribarena.engine.runner.repo_check_eligibility",
                     side_effect=RuntimeError("network unavailable"),
                 ):
@@ -1762,7 +1825,7 @@ class RunnerM02Test(unittest.TestCase):
             os.environ["GITHUB_TOKEN"] = token
             try:
                 result = _run_with_fake_docker(
-                    FakeIssueAgent(),
+                    FakeLiveSubmittingAgent(),
                     config,
                     tmp_path,
                     pr_client=FakePrClient(actor="contribarena-bot"),
@@ -1775,7 +1838,7 @@ class RunnerM02Test(unittest.TestCase):
                 os.environ.pop("GITHUB_TOKEN", None)
 
             self.assertEqual("failed", result.status)
-            self.assertEqual("pr_branch_push_failed", result.terminal_reason)
+            self.assertEqual("live_pr_infrastructure_failed", result.terminal_reason)
             test_log = (result.run_dir / "test_log.txt").read_text()
             workspace_command = (result.run_dir / "workspace_command.json").read_text()
             self.assertNotIn(token, test_log)
@@ -1790,7 +1853,7 @@ class RunnerM02Test(unittest.TestCase):
             os.environ["GITHUB_TOKEN"] = token
             try:
                 result = _run_with_fake_docker(
-                    FakeIssueAgent(),
+                    FakeLiveSubmittingAgent(),
                     config,
                     tmp_path,
                     pr_client=FakePrClient(actor="contribarena-bot"),
@@ -1812,7 +1875,7 @@ class RunnerM02Test(unittest.TestCase):
             tmp_path = Path(tmp)
             config = _owned_live_config(tmp_path / "runs", live_enabled=True)
             result = _run_with_fake_docker(
-                FakeIssueAgent(),
+                FakeLiveSubmittingAgent(),
                 config,
                 tmp_path,
                 pr_client=FakePrClient(actor="contribarena-bot"),
@@ -1825,7 +1888,8 @@ class RunnerM02Test(unittest.TestCase):
             push_commands = [
                 command
                 for command in workspace_command["commands"]
-                if "git -C repo push contribarena-submit" in command["command"]
+                if "git -c http.version=HTTP/1.1 -C repo push contribarena-submit"
+                in command["command"]
             ]
             self.assertEqual(3, len(push_commands))
             self.assertEqual([1, 1, 0], [command["exit_code"] for command in push_commands])
@@ -2057,7 +2121,11 @@ class RunnerM02Test(unittest.TestCase):
             self.assertEqual("judge_dimension_packets.json", judgement["judge_dimension_packets"])
             self.assertEqual("mean", judgement["judge_panel"]["aggregation"])
             self.assertEqual(["judge_a", "judge_b"], [j["judge_id"] for j in judgement["judges"]])
-            self.assertEqual(8, len(judgement["aggregate_rubric"]))
+            self.assertEqual(9, len(judgement["aggregate_rubric"]))
+            self.assertIn(
+                "submission_discipline",
+                {score["dimension"] for score in judgement["aggregate_rubric"]},
+            )
             self.assertAlmostEqual(
                 1.0,
                 sum(score["weight"] for score in judgement["aggregate_rubric"]),
@@ -2981,21 +3049,22 @@ def _run_with_fake_docker(
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     docker = bin_dir / "docker"
+    push_match = 'git -c http.version=HTTP/1.1 -C repo push contribarena-submit'
     push_failure_case = (
-        '    *"git -C repo push contribarena-submit"*) '
+        f'    *"{push_match}"*) '
         f'printf %s {json.dumps(push_failure_stderr)} >&2; exit 1 ;;\n'
         if push_failure_stderr
         else ""
     )
     push_success_case = (
-        '    *"git -C repo push contribarena-submit"*) '
+        f'    *"{push_match}"*) '
         f'printf %s {json.dumps(push_success_stdout)}; exit 0 ;;\n'
         if push_success_stdout
         else ""
     )
     transient_push_counter = tmp_path / "push_attempts"
     push_transient_case = (
-        '    *"git -C repo push contribarena-submit"*) '
+        f'    *"{push_match}"*) '
         f'count="$(cat {transient_push_counter} 2>/dev/null || printf 0)"; '
         'next=$((count + 1)); '
         f'printf "%s" "$next" > {transient_push_counter}; '

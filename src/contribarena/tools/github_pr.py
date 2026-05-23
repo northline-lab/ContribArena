@@ -31,6 +31,17 @@ class PullRequestCreateResult:
 
 
 @dataclass(frozen=True)
+class PullRequestLookupResult:
+    ok: bool
+    number: int | None = None
+    url: str = ""
+    head_sha: str = ""
+    state: str = ""
+    error: str = ""
+    source: str = ""
+
+
+@dataclass(frozen=True)
 class ForkEnsureResult:
     ok: bool
     owner: str = ""
@@ -113,6 +124,18 @@ class GitHubPullRequestClient:
             token_env=self.token_env,
         )
         if existing.ok:
+            error = _existing_fork_error(
+                existing.data,
+                owner=owner,
+                repo=repo,
+                fork_owner=fork_owner,
+            )
+            if error:
+                return ForkEnsureResult(
+                    ok=False,
+                    error=error,
+                    source=existing.source,
+                )
             return _fork_result(existing.data, created=False, source=existing.source)
         if "repo not found" not in existing.error:
             return ForkEnsureResult(ok=False, error=existing.error, source=existing.source)
@@ -172,6 +195,55 @@ class GitHubPullRequestClient:
             number=int(number) if isinstance(number, int) else None,
             url=str(url),
             head_sha=str(head_sha or ""),
+            source=response.source,
+        )
+
+    def find_open_pr_by_head(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        head: str,
+        base: str = "",
+    ) -> PullRequestLookupResult:
+        params: dict[str, object] = {"state": "open", "head": head, "per_page": 10}
+        if base:
+            params["base"] = base
+        response = self.client.rest_json(
+            "GET",
+            repo_api_path(owner, repo, "pulls"),
+            params=params,
+            token_env=self.token_env,
+        )
+        if not response.ok:
+            return PullRequestLookupResult(
+                ok=False,
+                error=response.error,
+                source=response.source,
+            )
+        if not isinstance(response.data, list):
+            return PullRequestLookupResult(
+                ok=False,
+                error="GitHub PR lookup response was not a JSON list",
+                source=response.source,
+            )
+        if not response.data:
+            return PullRequestLookupResult(ok=False, error="not_found", source=response.source)
+        item = response.data[0]
+        if not isinstance(item, dict):
+            return PullRequestLookupResult(
+                ok=False,
+                error="GitHub PR lookup item was not a JSON object",
+                source=response.source,
+            )
+        item_head = item.get("head")
+        number = item.get("number")
+        return PullRequestLookupResult(
+            ok=True,
+            number=number if isinstance(number, int) else None,
+            url=str(item.get("html_url") or item.get("url") or ""),
+            head_sha=str(item_head.get("sha") if isinstance(item_head, dict) else ""),
+            state=str(item.get("state") or ""),
             source=response.source,
         )
 
@@ -468,3 +540,52 @@ def _fork_result(data: object, *, created: bool, source: str) -> ForkEnsureResul
         created=created,
         source=source,
     )
+
+
+def _existing_fork_error(
+    data: object,
+    *,
+    owner: str,
+    repo: str,
+    fork_owner: str,
+) -> str:
+    if not isinstance(data, dict):
+        return "GitHub fork lookup response was not a JSON object"
+
+    target_full_name = f"{owner}/{repo}"
+    existing_full_name = str(data.get("full_name") or "")
+    expected_full_name = f"{fork_owner}/{repo}"
+    if existing_full_name and existing_full_name.lower() != expected_full_name.lower():
+        return (
+            f"existing repository {existing_full_name} does not match expected "
+            f"{expected_full_name}"
+        )
+
+    if fork_owner.lower() == owner.lower():
+        return ""
+
+    if data.get("fork") is not True:
+        return (
+            f"existing repository {expected_full_name} is not a fork of "
+            f"{target_full_name}; configure fork_owner to a valid fork or "
+            "recreate the fork"
+        )
+
+    related_full_names = {
+        _repo_full_name(data.get("parent")),
+        _repo_full_name(data.get("source")),
+    }
+    if target_full_name.lower() not in {name.lower() for name in related_full_names if name}:
+        related = ", ".join(sorted(name for name in related_full_names if name)) or "unknown"
+        return (
+            f"existing repository {expected_full_name} is a fork of {related}, "
+            f"not {target_full_name}; configure fork_owner to a valid fork or "
+            "recreate the fork"
+        )
+    return ""
+
+
+def _repo_full_name(data: object) -> str:
+    if not isinstance(data, dict):
+        return ""
+    return str(data.get("full_name") or "")

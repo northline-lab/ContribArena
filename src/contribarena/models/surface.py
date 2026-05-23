@@ -157,3 +157,10 @@ class RunSummary(BaseModel):
     workspace: dict[str, object] = Field(default_factory=dict)
     replacement: dict[str, object] = Field(default_factory=dict)
     judgement_retry: dict[str, object] = Field(default_factory=dict)
+    submission_outcome: str = ""
+    score_status: Literal["scored", "diagnostic_only", "not_judged", "deferred", "failed"] = (
+        "not_judged"
+    )
+    ranking_eligible: bool = True
+    ranking_exclusion_reason: str = ""
+    contribution_thread_id: str = ""

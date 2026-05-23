@@ -1173,10 +1173,14 @@ def _judgement_retry_excluded(run: dict[str, Any]) -> bool:
 
 
 def _ranking_excluded(run: dict[str, Any]) -> bool:
+    if run.get("ranking_eligible") is False:
+        return True
     return _replacement_excluded(run) or _judgement_retry_excluded(run)
 
 
 def _ranking_exclusion_reason(run: dict[str, Any]) -> str:
+    if run.get("ranking_eligible") is False:
+        return str(run.get("ranking_exclusion_reason") or "ranking_ineligible")
     replacement = run.get("replacement")
     if isinstance(replacement, dict) and str(replacement.get("status") or "") in {
         "due",

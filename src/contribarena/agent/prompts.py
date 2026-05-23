@@ -78,8 +78,9 @@ def build_goal_prompt(config: RunConfig) -> str:
             "repository from issues, docs, code, tests, TODOs, or project plans. "
         )
         live_boundary = (
-            "Do not directly open a PR, push branches, or write GitHub comments; the harness "
-            "will perform governed live writes after your submitted patch passes review. "
+            "After aci_submit_patch and aci_submit_patch_finalize pass Review, you own the live "
+            "PR workflow through the GitHub tools: prepare fork, prepare branch, commit, push, "
+            "and open the PR. Do not use raw shell GitHub writes. "
         )
     elif config.run.mode == "external_live":
         run_label = "M0.5 external-live autonomous contributor run"
@@ -88,8 +89,9 @@ def build_goal_prompt(config: RunConfig) -> str:
             "README-only, typo-only, or prose-only follow-up for this run. "
         )
         live_boundary = (
-            "Do not directly open a PR, push branches, or write GitHub comments; the harness "
-            "will perform fork-only governed live writes after your submitted patch passes review. "
+            "After aci_submit_patch and aci_submit_patch_finalize pass Review, you own the fork-only "
+            "live PR workflow through the GitHub tools: prepare fork, prepare branch, commit, push, "
+            "and open the PR. Do not use raw shell GitHub writes. "
         )
     else:
         run_label = "M0.2.1 end-to-end shadow run"
@@ -112,7 +114,9 @@ def build_goal_prompt(config: RunConfig) -> str:
         "with operations_json as a JSON list, "
         "aci_undo when an edit needs to be reverted, aci_suggest_verification when test commands are unclear, "
         "aci_verify for focused checks, aci_clean_generated for generated/cache cleanup, "
-        "and aci_submit_patch to finish without staging or committing. "
+        "and aci_submit_patch to enter Review. In live modes, finalize the reviewed patch, then "
+        "use github_prepare_fork, github_prepare_branch, github_commit, github_push_branch, and "
+        "github_open_pr to complete the contribution. "
         'Minimal aci_apply_patch example: operations_json=[{"type":"update_file","path":"repo/app.py","diff":"*** Begin Patch\\n*** Update File: repo/app.py\\n@@\\n old context\\n-old line\\n+new line\\n*** End Patch"}]. '
         "Do not edit files through workspace_run, shell redirection, sed, python scripts, or git commands; "
         "those edits lack unified-editor provenance and submit-time review will reject them. "

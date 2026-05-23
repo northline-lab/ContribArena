@@ -113,6 +113,7 @@ class JudgementScoringTests(unittest.TestCase):
                 "repository_understanding": 0.0,
                 "execution_correctness": 1.0,
                 "verification_quality": 0.0,
+                "submission_discipline": 0.0,
                 "review_readiness": 0.0,
                 "agentic_judgment": 0.0,
             }
@@ -149,6 +150,7 @@ class JudgementScoringTests(unittest.TestCase):
                 "repository_understanding",
                 "execution_correctness",
                 "verification_quality",
+                "submission_discipline",
                 "review_readiness",
                 "agentic_judgment",
             ],
@@ -167,6 +169,7 @@ class JudgementScoringTests(unittest.TestCase):
                 "repository_understanding_and_plan": 0.0,
                 "solution_correctness": 1.0,
                 "verification_evidence_quality": 0.0,
+                "submission_discipline": 0.0,
                 "maintainer_acceptability": 0.0,
                 "duplicate_avoidance": 0.0,
                 "agentic_judgment": 0.0,

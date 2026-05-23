@@ -66,6 +66,8 @@ def build_run_summary(
     patch = _read_text(run_dir / "patch.diff")
     pr = _pull_request(run_dir)
     maintainer = _maintainer_outcome(run_dir, pr)
+    submission_outcome = _submission_outcome(run_dir, terminal)
+    ranking_eligible, ranking_reason, score_status = _ranking_policy(submission_outcome)
     repository = _repository(config, repo_slug)
     judgement = _judgement(run_dir)
     return RunSummary(
@@ -100,6 +102,11 @@ def build_run_summary(
         },
         replacement=_replacement_payload(run_dir, terminal),
         judgement_retry=_judgement_retry_payload(run_dir),
+        submission_outcome=submission_outcome,
+        score_status=score_status,
+        ranking_eligible=ranking_eligible,
+        ranking_exclusion_reason=ranking_reason,
+        contribution_thread_id=_contribution_thread_id(repository.full_name, pr),
     )
 
 
@@ -212,16 +219,71 @@ def _quality_gate(path: Path) -> SurfaceQualityGate:
 
 def _pull_request(run_dir: Path) -> SurfacePullRequest:
     for entry in _read_jsonl(run_dir / "live_action_log.jsonl"):
-        if entry.get("action") == "github.open_pr" and entry.get("status") == "opened":
+        if entry.get("action") == "github.open_pr" and entry.get("status") in {"opened", "existing"}:
             number = entry.get("pr_number")
+            if number is None:
+                number = entry.get("number")
             return SurfacePullRequest(
-                url=str(entry.get("pr_url", "")),
+                url=str(entry.get("pr_url") or entry.get("url") or ""),
                 number=number if isinstance(number, int) else None,
                 state="open",
             )
     if (run_dir / "pr_description.md").exists():
         return SurfacePullRequest(state="none")
     return SurfacePullRequest()
+
+
+def _submission_outcome(run_dir: Path, terminal: TerminalState) -> str:
+    rows = _read_jsonl(run_dir / "live_action_log.jsonl")
+    open_rows = [row for row in rows if row.get("action") == "github.open_pr"]
+    if any(row.get("status") in {"opened", "existing"} for row in open_rows):
+        return "opened_pr"
+    if any(row.get("status") == "updated" for row in open_rows):
+        return "updated_pr"
+    if any(row.get("error_kind") == "quality_gate" for row in open_rows):
+        return "no_pr_quality_blocked"
+    if any(row.get("error_kind") == "governance_block" for row in open_rows):
+        return "no_pr_governance_blocked_agent"
+    if any(
+        str(row.get("error_kind") or "") in {
+            "git_push_transient",
+            "git_push_nontransient",
+            "branch_history_invalid",
+            "fork_invalid",
+            "github_api_transient",
+            "infrastructure",
+        }
+        for row in rows
+    ):
+        return "no_pr_infrastructure_failure"
+    if terminal.layer == "model_runtime":
+        return "no_pr_provider_failure"
+    if rows or terminal.reason.startswith("live_pr"):
+        return "no_pr_agent_failure"
+    if terminal.status == "completed":
+        return "opened_pr" if any(row.get("action") == "github.open_pr" for row in rows) else ""
+    return "no_pr_agent_failure" if terminal.status in {"failed", "blocked"} else ""
+
+
+def _ranking_policy(submission_outcome: str) -> tuple[bool, str, str]:
+    if not submission_outcome:
+        return True, "", "not_judged"
+    if submission_outcome in {
+        "opened_pr",
+        "updated_pr",
+        "no_pr_agent_failure",
+        "no_pr_quality_blocked",
+        "no_pr_governance_blocked_agent",
+    }:
+        return True, "", "scored"
+    reason = f"submission_{submission_outcome}"
+    return False, reason, "diagnostic_only"
+
+
+def _contribution_thread_id(repository: str, pr: SurfacePullRequest) -> str:
+    if not repository or pr.number is None:
+        return ""
+    return f"{repository}#{pr.number}"
 
 
 def _maintainer_outcome(
