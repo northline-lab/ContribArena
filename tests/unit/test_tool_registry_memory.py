@@ -643,6 +643,80 @@ class ToolRegistryMemoryTest(unittest.TestCase):
             self.assertEqual("request_changes", review.row["severity"])
             self.assertEqual(["verification is too weak"], review.row["concerns"])
 
+    def test_maintainer_prereview_normalizes_unexpected_provider_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = RunConfig(
+                run=RunSection(id="run-1", mode="shadow", model="responses/test"),
+                discovery=DiscoveryConfig(
+                    candidates=[
+                        RepoCandidate(
+                            owner="example",
+                            repo="repo",
+                            url="https://github.com/example/repo",
+                        )
+                    ]
+                ),
+                workspace=WorkspaceConfig(),
+                memory=MemoryConfig(root=root / "memory"),
+            )
+
+            class FakeAgent:
+                def __init__(self, **kwargs):
+                    pass
+
+            class FakeModelSettings:
+                def __init__(self, **kwargs):
+                    pass
+
+            class FakeRunConfig:
+                def __init__(self, **kwargs):
+                    pass
+
+            class FakeRunner:
+                @staticmethod
+                def run_sync(*args, **kwargs):
+                    class Result:
+                        final_output = json.dumps(
+                            {
+                                "severity": "BLOCK",
+                                "concerns": "verification is too weak",
+                                "suggested_changes": {"fix": "add tests"},
+                                "summary": "Fallback severity is safe.",
+                            }
+                        )
+
+                    return Result()
+
+            with patch.dict(
+                "sys.modules",
+                {
+                    "agents": type(
+                        "AgentsModule",
+                        (),
+                        {
+                            "Agent": FakeAgent,
+                            "ModelSettings": FakeModelSettings,
+                            "RunConfig": FakeRunConfig,
+                            "Runner": FakeRunner,
+                        },
+                    )(),
+                },
+            ):
+                review = run_maintainer_prereview(
+                    config=config,
+                    model_provider=object(),  # type: ignore[arg-type]
+                    capture=ArtifactCapture(),
+                    patch="diff --git a/app.py b/app.py\n",
+                    round_number=2,
+                )
+
+            self.assertFalse(review.unavailable)
+            self.assertEqual("comment", review.row["severity"])
+            self.assertEqual([], review.row["concerns"])
+            self.assertEqual([], review.row["suggested_changes"])
+            self.assertEqual("Fallback severity is safe.", review.row["summary"])
+
 
 def _abandon_goal(registry: ToolRegistry, objective: str, scope: str = ""):
     registry.aci_goal_update(objective, "active", "", scope=scope)
