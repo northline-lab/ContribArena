@@ -43,7 +43,9 @@ from contribarena.engine.runner import (
 from contribarena.engine.agent_loop import (
     AgentLoopState,
     TerminalState,
+    agent_loop_progress,
     capture_cursor,
+    render_continuation_context,
     review_invocation,
 )
 from contribarena.engine.seasons import SeasonStore, derive_participant_id, normalize_model_identity
@@ -2486,6 +2488,32 @@ class RunnerM02Test(unittest.TestCase):
 
             self.assertEqual("terminal", opened.decision)
             self.assertEqual("opened_pr", opened.outcome)
+
+    def test_live_continuation_prompt_directs_pr_submission_without_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _owned_live_config(Path(tmp) / "runs", live_enabled=True)
+            goals = GoalService(config, run_id="run-live")
+            goals.update(
+                objective="Open a live PR.",
+                status="active",
+                scope="contribution",
+                evidence_refs=["tool_call:repo.metadata"],
+            )
+            capture = ArtifactCapture()
+            capture.record_aci_result(AciResult(tool="aci_submit_patch_finalize", success=True))
+            state = AgentLoopState(recovery_warning="Previous invocation stopped after finalize.")
+
+            prompt = render_continuation_context(
+                config=config,
+                goals=goals,
+                state=state,
+                progress=agent_loop_progress(capture, goals),
+            )
+
+            self.assertIn("no governed live PR action has been recorded", prompt)
+            self.assertIn("Continue from the current workspace", prompt)
+            self.assertIn("do not restart Scout or Work", prompt)
+            self.assertIn("github_open_pr", prompt)
 
     def test_m010_shadow_path_emits_phase_review_and_judgement_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
