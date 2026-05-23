@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import unittest
 from unittest.mock import patch
 
@@ -16,7 +17,13 @@ from contribarena.config.schema import (
     WorkspaceConfig,
 )
 from contribarena.models import RepoMetadata
-from contribarena.tools.github_client import GitHubResponse
+from contribarena.tools.github_client import (
+    GitHubResponse,
+    classify_github_error,
+    classify_http_error,
+    github_token,
+    repo_api_path,
+)
 from contribarena.tools.github_pr import GitHubPullRequestClient
 from contribarena.tools.repo_eligibility import repo_check_eligibility
 from contribarena.tools.repo_issues import repo_get_issues
@@ -771,6 +778,107 @@ class GithubToolsTest(unittest.TestCase):
             ("POST", "/repos/owner/project/issues/42/comments", {"body": "CI failure fixed in the latest push."}),
             fake.calls[-1],
         )
+
+
+    # --- classify_github_error ---
+
+    def test_classify_github_error_auth(self) -> None:
+        result = classify_github_error(1, "auth failed")
+        self.assertIn("authentication missing", result)
+        self.assertIn("exit_code=1", result)
+
+    def test_classify_github_error_rate_limit(self) -> None:
+        result = classify_github_error(1, "rate limit exceeded")
+        self.assertIn("rate limit or abuse detection", result)
+
+    def test_classify_github_error_secondary_rate(self) -> None:
+        result = classify_github_error(1, "secondary rate limit hit")
+        self.assertIn("rate limit or abuse detection", result)
+
+    def test_classify_github_error_not_found(self) -> None:
+        result = classify_github_error(1, "could not resolve host")
+        self.assertIn("command failed or repo not found", result)
+
+    def test_classify_github_error_login(self) -> None:
+        result = classify_github_error(1, "login required")
+        self.assertIn("authentication missing", result)
+
+    def test_classify_github_error_other(self) -> None:
+        result = classify_github_error(128, "unknown error occurred")
+        self.assertIn("gh command failed", result)
+        self.assertIn("exit_code=128", result)
+
+    # --- classify_http_error ---
+
+    def test_classify_http_error_rate_limit_403(self) -> None:
+        result = classify_http_error(403, '{"message": "API rate limit exceeded"}')
+        self.assertIn("rate limit or abuse detection", result)
+        self.assertIn("status_code=403", result)
+
+    def test_classify_http_error_rate_limit_401(self) -> None:
+        result = classify_http_error(401, "abuse detection triggered")
+        self.assertIn("rate limit or abuse detection", result)
+        self.assertIn("status_code=401", result)
+
+    def test_classify_http_error_unauthorized(self) -> None:
+        result = classify_http_error(401, "Bad credentials")
+        self.assertIn("authentication missing or forbidden", result)
+
+    def test_classify_http_error_forbidden(self) -> None:
+        result = classify_http_error(403, "Forbidden")
+        self.assertIn("authentication missing or forbidden", result)
+
+    def test_classify_http_error_not_found(self) -> None:
+        result = classify_http_error(404, "Not Found")
+        self.assertIn("repo not found", result)
+        self.assertIn("status_code=404", result)
+
+    def test_classify_http_error_other(self) -> None:
+        result = classify_http_error(500, "Internal Server Error")
+        self.assertIn("http request failed", result)
+        self.assertIn("status_code=500", result)
+
+    def test_classify_http_error_truncates_long_body(self) -> None:
+        long_body = "x" * 1000
+        result = classify_http_error(500, long_body)
+        self.assertLess(len(result), len(long_body) + 50)
+
+    # --- github_token ---
+
+    def test_github_token_returns_gh_token(self) -> None:
+        with patch.dict(os.environ, {"GH_TOKEN": "gh-token-value"}, clear=True):
+            self.assertEqual("gh-token-value", github_token())
+
+    def test_github_token_falls_back_to_github_token(self) -> None:
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "github-token-value"}, clear=True):
+            self.assertEqual("github-token-value", github_token())
+
+    def test_github_token_prefers_gh_token(self) -> None:
+        with patch.dict(os.environ, {"GH_TOKEN": "gh-first", "GITHUB_TOKEN": "github-second"}, clear=True):
+            self.assertEqual("gh-first", github_token())
+
+    def test_github_token_returns_none(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(github_token())
+
+    # --- repo_api_path ---
+
+    def test_repo_api_path_basic(self) -> None:
+        self.assertEqual("/repos/owner/repo", repo_api_path("owner", "repo"))
+
+    def test_repo_api_path_with_suffix(self) -> None:
+        self.assertEqual(
+            "/repos/owner/repo/issues", repo_api_path("owner", "repo", suffix="issues")
+        )
+
+    def test_repo_api_path_with_leading_slash_suffix(self) -> None:
+        self.assertEqual(
+            "/repos/owner/repo/issues", repo_api_path("owner", "repo", suffix="/issues")
+        )
+
+    def test_repo_api_path_encodes_special_characters(self) -> None:
+        path = repo_api_path("owner", "repo name")
+        self.assertIn("repo%20name", path)
 
 
 def _candidate() -> RepoCandidate:
