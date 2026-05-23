@@ -123,7 +123,7 @@ class SurfaceReadModel:
                 discovery_calls=discovery_rows,
                 assistant_updates=assistant_update_rows,
                 scheduler_events=scheduler_rows,
-                pr_lifecycle=pr_rows,
+                pr_lifecycle=_dedupe_pr_lifecycle_rows(pr_rows),
                 season_workspaces=workspace_rows,
                 seasons=seasons,
                 participants=participants,
@@ -1013,6 +1013,40 @@ def _pr_lifecycle_rows(run: dict[str, Any], run_dir: Path) -> list[tuple[str, st
         }
         rows.append((season_id, participant_id, repository, number, str(item["state"]), json.dumps(item, ensure_ascii=True)))
     return rows
+
+
+def _dedupe_pr_lifecycle_rows(
+    rows: list[tuple[str, str, str, int, str, str]],
+) -> list[tuple[str, str, str, int, str, str]]:
+    by_key: dict[tuple[str, str, str, int], tuple[int, str, tuple[str, str, str, int, str, str]]] = {}
+    for index, row in enumerate(rows):
+        season_id, participant_id, repository, number, _state, payload_json = row
+        key = (season_id, participant_id, repository, number)
+        observed_at = _pr_lifecycle_observed_at(payload_json)
+        existing = by_key.get(key)
+        if existing is None or (observed_at, index) >= (existing[1], existing[0]):
+            by_key[key] = (index, observed_at, row)
+    return [
+        value[2]
+        for value in sorted(
+            by_key.values(),
+            key=lambda item: (item[2][0], item[2][1], item[2][2], item[2][3]),
+        )
+    ]
+
+
+def _pr_lifecycle_observed_at(payload_json: str) -> str:
+    try:
+        payload = json.loads(payload_json)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("observed_at", "updated_at", "closed_at", "merged_at", "created_at", "ts"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
 
 
 def _workspace_rows(run: dict[str, Any], run_dir: Path) -> list[tuple[str, str, str, str, str]]:

@@ -187,6 +187,46 @@ class BackendReadApiTests(unittest.TestCase):
             self.assertEqual(72, judgement["arena_score"])
             self.assertEqual("judge-a", judgement["judges"][0]["judge_id"])  # type: ignore[index]
 
+    def test_read_model_dedupes_pr_lifecycle_observations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runs_dir = root / "runs"
+            run_dir = runs_dir / "run-a"
+            _write_run(run_dir, run_id="run-a", agent_handle="agent-a")
+            (run_dir / "pr_review_log.jsonl").write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "repository": "example/repo",
+                                "number": 1,
+                                "state": "open",
+                                "observed_at": "2026-05-15T00:00:00Z",
+                            },
+                            ensure_ascii=True,
+                        ),
+                        json.dumps(
+                            {
+                                "repository": "example/repo",
+                                "number": 1,
+                                "state": "merged",
+                                "observed_at": "2026-05-15T00:02:00Z",
+                            },
+                            ensure_ascii=True,
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            model = SurfaceReadModel(root / "read.sqlite")
+            model.refresh_from_artifacts(runs_dir)
+
+            rows = model.pr_lifecycle(season_id="season_0")
+            self.assertEqual(1, len(rows))
+            self.assertEqual("merged", rows[0]["state"])
+
     def test_default_api_scope_prefers_active_season_over_old_runs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -793,7 +793,44 @@ def _pr_lifecycle(loaded_runs: list[_LoadedRun]) -> list[dict[str, Any]]:
                     "run_id": loaded.payload.get("run_id") or "",
                 }
             )
-    return rows
+    return _dedupe_pr_lifecycle(rows)
+
+
+def _dedupe_pr_lifecycle(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_key: dict[tuple[str, str, str, int], tuple[int, str, dict[str, Any]]] = {}
+    for index, row in enumerate(rows):
+        key = (
+            str(row.get("season_id") or ""),
+            str(row.get("participant_id") or ""),
+            str(row.get("repository") or ""),
+            _int(row.get("number")) or 0,
+        )
+        if not key[2] or not key[3]:
+            continue
+        observed_at = _pr_lifecycle_observed_at(row)
+        existing = by_key.get(key)
+        if existing is None or (observed_at, index) >= (existing[1], existing[0]):
+            by_key[key] = (index, observed_at, dict(row))
+    return [
+        value[2]
+        for value in sorted(
+            by_key.values(),
+            key=lambda item: (
+                str(item[2].get("season_id") or ""),
+                str(item[2].get("participant_id") or ""),
+                str(item[2].get("repository") or ""),
+                _int(item[2].get("number")) or 0,
+            ),
+        )
+    ]
+
+
+def _pr_lifecycle_observed_at(row: dict[str, Any]) -> str:
+    for key in ("observed_at", "updated_at", "closed_at", "merged_at", "created_at", "ts"):
+        value = row.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
 
 
 def _scheduler_events(loaded_runs: list[_LoadedRun]) -> list[dict[str, Any]]:
@@ -942,6 +979,13 @@ def _read_text_file(path: Path) -> str:
         return path.read_text(encoding="utf-8", errors="replace").strip()
     except OSError:
         return ""
+
+
+def _int(value: object) -> int | None:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
 
 
 def _append_float(values: list[float], value: object) -> None:
