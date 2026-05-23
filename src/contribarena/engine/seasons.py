@@ -64,10 +64,17 @@ class SeasonStore:
     def load(self, season_id: str, fallback: SeasonConfig | None = None) -> SeasonConfig:
         path = self.config_path(season_id)
         if path.exists():
-            raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-            if not isinstance(raw, dict):
+            raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+            if raw is None:
+                if fallback and fallback.id == season_id:
+                    self.write_config(fallback)
+                    config = fallback
+                else:
+                    raise ConfigError(f"empty_season_config: {path}")
+            elif not isinstance(raw, dict):
                 raise ConfigError(f"season config must be a mapping: {path}")
-            config = SeasonConfig.model_validate(raw)
+            else:
+                config = SeasonConfig.model_validate(raw)
         elif fallback and fallback.id == season_id:
             config = fallback
         else:
@@ -85,7 +92,9 @@ class SeasonStore:
             seasons[fallback.id] = self.load(fallback.id, fallback)
         if self.root.exists():
             for path in sorted(self.root.glob("*/season_config.yaml")):
-                raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+                raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+                if raw is None:
+                    continue
                 if isinstance(raw, dict):
                     config = SeasonConfig.model_validate(raw)
                     seasons[config.id] = self.load(config.id, config)

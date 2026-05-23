@@ -41,7 +41,7 @@ from contribarena.engine.runner import (
     _transient_runtime_message,
 )
 from contribarena.engine.agent_loop import TerminalState
-from contribarena.engine.seasons import derive_participant_id, normalize_model_identity
+from contribarena.engine.seasons import SeasonStore, derive_participant_id, normalize_model_identity
 from contribarena.engine.middleware.governance import load_governance_state, save_governance_state
 from contribarena.errors import AgentError
 from contribarena.models import (
@@ -2691,6 +2691,46 @@ class RunnerM02Test(unittest.TestCase):
             summary = json.loads((result.run_dir / "run_summary.json").read_text())
             self.assertEqual("season_0:gpt-5.5", summary["agent"]["participant_id"])
             self.assertEqual("responses/gpt55", summary["model"])
+
+    def test_manual_season_run_repairs_empty_persisted_season_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _config(tmp_path / "runs")
+            config.run.model = "compatible/qwen36plus"
+            config.run.season_id = "season_0"
+            config.run.participant_id = "season_0:gpt-5.5"
+            config.run.wake_source = "manual"
+            config.season = SeasonConfig(
+                id="season_0",
+                name="Season 0",
+                status="active",
+                state_root=tmp_path / "seasons",
+                participants=[
+                    SeasonParticipantConfig(
+                        id="season_0:gpt-5.5",
+                        model="responses/gpt55",
+                    ),
+                ],
+            )
+            persisted = tmp_path / "seasons" / "season_0" / "season_config.yaml"
+            persisted.parent.mkdir(parents=True)
+            persisted.write_text("", encoding="utf-8")
+
+            result = _run_with_fake_docker(FakeM02Agent(), config, tmp_path)
+
+            summary = json.loads((result.run_dir / "run_summary.json").read_text())
+            self.assertEqual("responses/gpt55", summary["model"])
+            self.assertIn("responses/gpt55", persisted.read_text(encoding="utf-8"))
+
+    def test_empty_persisted_season_config_without_fallback_is_actionable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SeasonStore(Path(tmp))
+            path = store.config_path("season_0")
+            path.parent.mkdir(parents=True)
+            path.write_text("", encoding="utf-8")
+
+            with self.assertRaisesRegex(Exception, "empty_season_config"):
+                store.load("season_0")
 
     def test_season_admission_backfills_default_participant_id_for_state_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
