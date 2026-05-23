@@ -1513,8 +1513,11 @@ def _with_season_run_override(
 ) -> Any:
     if wake_source not in {"manual", "auto", "unranked"}:
         raise ContribArenaError("wake_source must be manual, auto, or unranked")
+    resolved_season_id = season_id or run_config.run.season_id
+    if not resolved_season_id and participant_id and ":" in participant_id:
+        resolved_season_id = participant_id.split(":", 1)[0]
     updates = {
-        "season_id": season_id or run_config.run.season_id,
+        "season_id": resolved_season_id,
         "participant_id": participant_id or run_config.run.participant_id,
         "wake_source": wake_source,
     }

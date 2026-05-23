@@ -295,6 +295,44 @@ class CliTest(unittest.TestCase):
             self.assertEqual("season_0:local-stub", run.participant_id)
             self.assertEqual("manual", run.wake_source)
 
+    def test_run_infers_season_id_from_participant_id(self) -> None:
+        runner = CliRunner()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.yaml"
+            self.assertEqual(
+                0,
+                runner.invoke(app, ["init", "--output", str(config_path)]).exit_code,
+            )
+            captured = {}
+
+            def fake_run(self, config, output_dir=None, verbose=False):
+                captured["run"] = config.run
+                return RunResult(
+                    run_id="run-a",
+                    run_dir=root / "runs" / "run-a",
+                    status="completed",
+                    tool_calls=0,
+                )
+
+            with patch("contribarena.cli.Runner.run", fake_run):
+                result = runner.invoke(
+                    app,
+                    [
+                        "run",
+                        "--config",
+                        str(config_path),
+                        "--participant-id",
+                        "season_0:gpt-5.5",
+                    ],
+                )
+
+            self.assertEqual(0, result.exit_code, result.output)
+            run = captured["run"]
+            self.assertEqual("season_0", run.season_id)
+            self.assertEqual("season_0:gpt-5.5", run.participant_id)
+            self.assertEqual("manual", run.wake_source)
+
     def test_season_cli_transitions_configured_season(self) -> None:
         runner = CliRunner()
         with tempfile.TemporaryDirectory() as tmp:
