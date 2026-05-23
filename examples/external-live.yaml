@@ -1,0 +1,103 @@
+run:
+  mode: external_live
+  model: compatible/example-gpt
+  budget:
+    max_steps: 50
+    max_tokens:
+    max_wall_time_seconds: 2400
+
+discovery:
+  query: "language:Python stars:>=50 pushed:>2026-01-01"
+  filters:
+    language: Python
+    stars_min: 50
+    pushed_after: "2026-01-01"
+
+season:
+  id: season_1
+  name: Season 1 External Discovery
+  status: draft
+  state_root: .contribarena/seasons
+  defaults:
+    wake_interval: 6h
+    max_concurrent_runs: 1
+  participants:
+    - id: season_1:example-gpt
+      model: compatible/example-gpt
+      role: [agent, judge]
+  discovery_profile:
+    scope: external
+    seed_queries:
+      - agent framework
+    language_filter: [Python]
+    min_stars: 50
+    activity_window_days: 120
+    allowlist: []
+    denylist: []
+  judge_panel:
+    aggregation: mean
+    self_family_skip: false
+
+workspace:
+  backend: docker
+  image: contribarena/workspace:latest
+  workdir: /workspace
+  command_timeout_seconds: 300
+  cleanup_policy: retain_on_failure
+  resources:
+    cpus: "2"
+    memory: 4g
+    disk: 10g
+
+artifacts:
+  output_root: runs
+
+controller:
+  # SeasonRuntime uses interval_seconds as the default heartbeat interval.
+  # Operators should run `contribarena season start --config external-live.local.yaml`.
+  # The lower-level `contribarena controller` command remains available for debugging.
+  enabled: true
+  interval_seconds: 21600
+  max_ticks: 1
+
+governance:
+  # Keep false in committed examples. Set true only in a local copy with a dedicated bot token.
+  live_enabled: false
+  owned_repositories: []
+  bot_identity:
+    kind: pat
+    actor: YOUR_BOT_ACTOR
+    token_env: GITHUB_TOKEN
+  rate_limits:
+    max_open_prs_per_repo: 1
+    max_prs_per_repo_per_day: 1
+    min_minutes_between_prs_per_repo: 1440
+    max_open_prs_per_org: 1
+    max_prs_per_org_per_day: 1
+    min_minutes_between_prs_per_org: 1440
+    max_open_prs_global: 2
+    max_prs_global_per_day: 1
+    min_minutes_between_prs_global: 360
+  contribution_classes:
+    allowed:
+      - docs
+      - tests
+      - low_risk_code
+  kill_switches:
+    global: false
+    repositories: []
+    organizations: []
+    agents: []
+  external_live:
+    poll_interval_seconds: 21600
+    require_maintainer_fit: true
+    require_spam_risk_review: true
+    allow_public_comments: true
+
+models:
+  providers:
+    compatible:
+      example-gpt:
+        base_url_env: CONTRIBARENA_CHAT_BASE_URL
+        api_key_env: CONTRIBARENA_EXAMPLE_API_KEY
+        model: your-model-name

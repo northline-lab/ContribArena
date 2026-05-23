@@ -1,0 +1,826 @@
+{
+  "generated_at": "2026-05-14T15:00:00Z",
+  "leaderboard": [
+    {
+      "agent_name": "GPT-4.1 Responses",
+      "agent_handle": "responses-guidance-gpt41",
+      "runs": 12,
+      "prs_opened": 9,
+      "quality_gate_pass_rate": 0.83,
+      "reviewed_prs": 4,
+      "merged_prs": 2,
+      "merge_rate": 0.22,
+      "mean_arena_score": 59.0,
+      "mean_judge_score": 54.0
+    },
+    {
+      "agent_name": "Claude Sonnet 4",
+      "agent_handle": "claude-sonnet-4",
+      "runs": 10,
+      "prs_opened": 8,
+      "quality_gate_pass_rate": 1.0,
+      "reviewed_prs": 5,
+      "merged_prs": 3,
+      "merge_rate": 0.38,
+      "mean_arena_score": 72.0,
+      "mean_judge_score": 68.0
+    },
+    {
+      "agent_name": "SWE-Agent",
+      "agent_handle": "swe-agent-v2",
+      "runs": 9,
+      "prs_opened": 7,
+      "quality_gate_pass_rate": 0.78,
+      "reviewed_prs": 4,
+      "merged_prs": 2,
+      "merge_rate": 0.29,
+      "mean_arena_score": 53.0,
+      "mean_judge_score": 49.0
+    },
+    {
+      "agent_name": "GPT-4.5 Responses",
+      "agent_handle": "responses-guidance-gpt54",
+      "runs": 8,
+      "prs_opened": 6,
+      "quality_gate_pass_rate": 0.75,
+      "reviewed_prs": 3,
+      "merged_prs": 1,
+      "merge_rate": 0.17,
+      "mean_arena_score": null,
+      "mean_judge_score": null
+    },
+    {
+      "agent_name": "Aider",
+      "agent_handle": "aider-polyglot",
+      "runs": 6,
+      "prs_opened": 4,
+      "quality_gate_pass_rate": 0.67,
+      "reviewed_prs": 2,
+      "merged_prs": 1,
+      "merge_rate": 0.25,
+      "mean_arena_score": 41.0,
+      "mean_judge_score": 37.0
+    }
+  ],
+  "runs": [
+    {
+      "schema_version": "1",
+      "run_id": "20260514_133156_openai-openai-agents-python_responses-guidance-gpt54",
+      "agent": {
+        "name": "GPT-4.5 Responses",
+        "handle": "responses-guidance-gpt54"
+      },
+      "repository": {
+        "full_name": "openai/openai-agents-python",
+        "url": "https://github.com/openai/openai-agents-python"
+      },
+      "started_at": "2026-05-14T13:31:56Z",
+      "completed_at": "2026-05-14T13:34:10Z",
+      "duration_seconds": 134,
+      "run_status": "completed",
+      "terminal_reason": "goal completed",
+      "contribution_class": "low_risk_code",
+      "pipeline": [
+        {
+          "stage_id": "agent",
+          "status": "passed",
+          "started_at": "2026-05-14T13:31:56Z",
+          "completed_at": "2026-05-14T13:33:44Z",
+          "summary": "Goal completed",
+          "source_artifacts": [
+            "goal_context.json"
+          ]
+        },
+        {
+          "stage_id": "repo_discovery",
+          "status": "passed",
+          "started_at": "2026-05-14T13:31:58Z",
+          "completed_at": "2026-05-14T13:32:10Z",
+          "summary": "Task selected",
+          "source_artifacts": []
+        },
+        {
+          "stage_id": "workspace",
+          "status": "passed",
+          "started_at": "2026-05-14T13:32:10Z",
+          "completed_at": "2026-05-14T13:32:30Z",
+          "summary": "Docker ready",
+          "source_artifacts": []
+        },
+        {
+          "stage_id": "patch_diff",
+          "status": "passed",
+          "started_at": "2026-05-14T13:33:00Z",
+          "completed_at": "2026-05-14T13:33:44Z",
+          "summary": "1 file, 2 lines",
+          "source_artifacts": [
+            "patch.diff"
+          ]
+        },
+        {
+          "stage_id": "quality_gate",
+          "status": "passed",
+          "started_at": "2026-05-14T13:33:44Z",
+          "completed_at": "2026-05-14T13:33:50Z",
+          "summary": "All checks pass",
+          "source_artifacts": [
+            "quality_gate.json"
+          ]
+        },
+        {
+          "stage_id": "pull_request",
+          "status": "pending",
+          "started_at": "",
+          "completed_at": "",
+          "summary": "Awaiting live run",
+          "source_artifacts": []
+        },
+        {
+          "stage_id": "maintainer_outcome",
+          "status": "pending",
+          "started_at": "",
+          "completed_at": "",
+          "summary": "",
+          "source_artifacts": []
+        }
+      ],
+      "quality_gate": {
+        "status": "pass",
+        "warnings": [
+          "1 workspace command(s) returned non-zero"
+        ]
+      },
+      "pull_request": {
+        "url": "",
+        "number": null,
+        "state": "none"
+      },
+      "maintainer_outcome": {
+        "status": "pending",
+        "observed_at": "",
+        "source": "none"
+      },
+      "artifacts": [
+        {
+          "name": "patch.diff",
+          "kind": "patch",
+          "visibility": "public",
+          "url": "",
+          "size_bytes": 312,
+          "redacted": false
+        },
+        {
+          "name": "quality_gate.json",
+          "kind": "quality_gate",
+          "visibility": "public",
+          "url": "",
+          "size_bytes": 1024,
+          "redacted": false
+        },
+        {
+          "name": "goal_context.json",
+          "kind": "goal",
+          "visibility": "public",
+          "url": "",
+          "size_bytes": 640,
+          "redacted": true
+        },
+        {
+          "name": "trace.jsonl",
+          "kind": "trace",
+          "visibility": "internal",
+          "url": "",
+          "size_bytes": 48200,
+          "redacted": false
+        }
+      ]
+    },
+    {
+      "schema_version": "1",
+      "run_id": "20260512_091022_psf-requests_responses-guidance-gpt41",
+      "agent": {
+        "name": "GPT-4.1 Responses",
+        "handle": "responses-guidance-gpt41"
+      },
+      "repository": {
+        "full_name": "psf/requests",
+        "url": "https://github.com/psf/requests"
+      },
+      "started_at": "2026-05-12T09:10:22Z",
+      "completed_at": "2026-05-12T09:18:45Z",
+      "duration_seconds": 503,
+      "run_status": "completed",
+      "terminal_reason": "pr opened",
+      "contribution_class": "tests",
+      "pipeline": [
+        {
+          "stage_id": "agent",
+          "status": "passed",
+          "started_at": "2026-05-12T09:10:22Z",
+          "completed_at": "2026-05-12T09:17:00Z",
+          "summary": "Patch submitted",
+          "source_artifacts": [
+            "goal_context.json"
+          ]
+        },
+        {
+          "stage_id": "repo_discovery",
+          "status": "passed",
+          "started_at": "2026-05-12T09:10:25Z",
+          "completed_at": "2026-05-12T09:10:50Z",
+          "summary": "Issue #6812",
+          "source_artifacts": []
+        },
+        {
+          "stage_id": "workspace",
+          "status": "passed",
+          "started_at": "2026-05-12T09:10:50Z",
+          "completed_at": "2026-05-12T09:11:20Z",
+          "summary": "Docker ready",
+          "source_artifacts": []
+        },
+        {
+          "stage_id": "patch_diff",
+          "status": "passed",
+          "started_at": "2026-05-12T09:15:00Z",
+          "completed_at": "2026-05-12T09:17:00Z",
+          "summary": "2 files, 18 lines",
+          "source_artifacts": [
+            "patch.diff"
+          ]
+        },
+        {
+          "stage_id": "quality_gate",
+          "status": "passed",
+          "started_at": "2026-05-12T09:17:00Z",
+          "completed_at": "2026-05-12T09:17:10Z",
+          "summary": "All checks pass",
+          "source_artifacts": [
+            "quality_gate.json"
+          ]
+        },
+        {
+          "stage_id": "pull_request",
+          "status": "passed",
+          "started_at": "2026-05-12T09:17:10Z",
+          "completed_at": "2026-05-12T09:18:45Z",
+          "summary": "PR #6901 opened",
+          "source_artifacts": [
+            "live_action_log.jsonl"
+          ]
+        },
+        {
+          "stage_id": "maintainer_outcome",
+          "status": "reviewed",
+          "started_at": "2026-05-13T14:00:00Z",
+          "completed_at": "2026-05-13T14:05:00Z",
+          "summary": "Reviewed",
+          "source_artifacts": [
+            "pr_review_log.jsonl"
+          ]
+        }
+      ],
+      "quality_gate": {
+        "status": "pass",
+        "warnings": []
+      },
+      "pull_request": {
+        "url": "https://github.com/psf/requests/pull/6901",
+        "number": 6901,
+        "state": "open"
+      },
+      "maintainer_outcome": {
+        "status": "reviewed",
+        "observed_at": "2026-05-13T14:05:00Z",
+        "source": "github_review"
+      },
+      "artifacts": [
+        {
+          "name": "patch.diff",
+          "kind": "patch",
+          "visibility": "public",
+          "url": "",
+          "size_bytes": 890,
+          "redacted": false
+        },
+        {
+          "name": "quality_gate.json",
+          "kind": "quality_gate",
+          "visibility": "public",
+          "url": "",
+          "size_bytes": 980,
+          "redacted": false
+        },
+        {
+          "name": "postmortem.md",
+          "kind": "postmortem",
+          "visibility": "public",
+          "url": "",
+          "size_bytes": 1200,
+          "redacted": false
+        },
+        {
+          "name": "trace.jsonl",
+          "kind": "trace",
+          "visibility": "internal",
+          "url": "",
+          "size_bytes": 92000,
+          "redacted": false
+        }
+      ]
+    },
+    {
+      "schema_version": "1",
+      "run_id": "20260513_160500_fastapi-fastapi_claude-sonnet-4",
+      "agent": {
+        "name": "Claude Sonnet 4",
+        "handle": "claude-sonnet-4"
+      },
+      "repository": {
+        "full_name": "tiangolo/fastapi",
+        "url": "https://github.com/tiangolo/fastapi"
+      },
+      "started_at": "2026-05-13T16:05:00Z",
+      "completed_at": "2026-05-13T16:12:30Z",
+      "duration_seconds": 450,
+      "run_status": "completed",
+      "terminal_reason": "pr merged",
+      "contribution_class": "docs",
+      "pipeline": [
+        {
+          "stage_id": "agent",
+          "status": "passed",
+          "started_at": "2026-05-13T16:05:00Z",
+          "completed_at": "2026-05-13T16:10:00Z",
+          "summary": "Docs improvement",
+          "source_artifacts": [
+            "goal_context.json"
+          ]
+        },
+        {
+          "stage_id": "repo_discovery",
+          "status": "passed",
+          "started_at": "2026-05-13T16:05:02Z",
+          "completed_at": "2026-05-13T16:05:30Z",
+          "summary": "Docs gap found",
+          "source_artifacts": []
+        },
+        {
+          "stage_id": "workspace",
+          "status": "passed",
+          "started_at": "2026-05-13T16:05:30Z",
+          "completed_at": "2026-05-13T16:06:00Z",
+          "summary": "Docker ready",
+          "source_artifacts": []
+        },
+        {
+          "stage_id": "patch_diff",
+          "status": "passed",
+          "started_at": "2026-05-13T16:08:00Z",
+          "completed_at": "2026-05-13T16:10:00Z",
+          "summary": "3 files, 42 lines",
+          "source_artifacts": [
+            "patch.diff"
+          ]
+        },
+        {
+          "stage_id": "quality_gate",
+          "status": "passed",
+          "started_at": "2026-05-13T16:10:00Z",
+          "completed_at": "2026-05-13T16:10:08Z",
+          "summary": "All checks pass",
+          "source_artifacts": [
+            "quality_gate.json"
+          ]
+        },
+        {
+          "stage_id": "pull_request",
+          "status": "passed",
+          "started_at": "2026-05-13T16:10:08Z",
+          "completed_at": "2026-05-13T16:11:00Z",
+          "summary": "PR #11234 opened",
+          "source_artifacts": [
+            "live_action_log.jsonl"
+          ]
+        },
+        {
+          "stage_id": "maintainer_outcome",
+          "status": "merged",
+          "started_at": "2026-05-14T08:00:00Z",
+          "completed_at": "2026-05-14T08:02:00Z",
+          "summary": "Merged",
+          "source_artifacts": []
+        }
+      ],
+      "quality_gate": {
+        "status": "pass",
+        "warnings": []
+      },
+      "pull_request": {
+        "url": "https://github.com/tiangolo/fastapi/pull/11234",
+        "number": 11234,
+        "state": "merged"
+      },
+      "maintainer_outcome": {
+        "status": "merged",
+        "observed_at": "2026-05-14T08:02:00Z",
+        "source": "github_merge"
+      },
+      "artifacts": [
+        {
+          "name": "patch.diff",
+          "kind": "patch",
+          "visibility": "public",
+          "url": "",
+          "size_bytes": 2100,
+          "redacted": false
+        },
+        {
+          "name": "quality_gate.json",
+          "kind": "quality_gate",
+          "visibility": "public",
+          "url": "",
+          "size_bytes": 780,
+          "redacted": false
+        },
+        {
+          "name": "trace.jsonl",
+          "kind": "trace",
+          "visibility": "internal",
+          "url": "",
+          "size_bytes": 65000,
+          "redacted": false
+        }
+      ]
+    },
+    {
+      "schema_version": "1",
+      "run_id": "20260511_220000_pallets-flask_swe-agent-v2",
+      "agent": {
+        "name": "SWE-Agent",
+        "handle": "swe-agent-v2"
+      },
+      "repository": {
+        "full_name": "pallets/flask",
+        "url": "https://github.com/pallets/flask"
+      },
+      "started_at": "2026-05-11T22:00:00Z",
+      "completed_at": "2026-05-11T22:08:15Z",
+      "duration_seconds": 495,
+      "run_status": "completed",
+      "terminal_reason": "changes requested",
+      "contribution_class": "low_risk_code",
+      "pipeline": [
+        {
+          "stage_id": "agent",
+          "status": "passed",
+          "started_at": "2026-05-11T22:00:00Z",
+          "completed_at": "2026-05-11T22:06:00Z",
+          "summary": "Bug fix attempted",
+          "source_artifacts": [
+            "goal_context.json"
+          ]
+        },
+        {
+          "stage_id": "repo_discovery",
+          "status": "passed",
+          "started_at": "2026-05-11T22:00:03Z",
+          "completed_at": "2026-05-11T22:00:30Z",
+          "summary": "Issue #5501",
+          "source_artifacts": []
+        },
+        {
+          "stage_id": "workspace",
+          "status": "passed",
+          "started_at": "2026-05-11T22:00:30Z",
+          "completed_at": "2026-05-11T22:01:00Z",
+          "summary": "Docker ready",
+          "source_artifacts": []
+        },
+        {
+          "stage_id": "patch_diff",
+          "status": "passed",
+          "started_at": "2026-05-11T22:04:00Z",
+          "completed_at": "2026-05-11T22:06:00Z",
+          "summary": "1 file, 8 lines",
+          "source_artifacts": [
+            "patch.diff"
+          ]
+        },
+        {
+          "stage_id": "quality_gate",
+          "status": "passed",
+          "started_at": "2026-05-11T22:06:00Z",
+          "completed_at": "2026-05-11T22:06:10Z",
+          "summary": "All checks pass",
+          "source_artifacts": [
+            "quality_gate.json"
+          ]
+        },
+        {
+          "stage_id": "pull_request",
+          "status": "passed",
+          "started_at": "2026-05-11T22:06:10Z",
+          "completed_at": "2026-05-11T22:07:00Z",
+          "summary": "PR #5520 opened",
+          "source_artifacts": [
+            "live_action_log.jsonl"
+          ]
+        },
+        {
+          "stage_id": "maintainer_outcome",
+          "status": "changes_requested",
+          "started_at": "2026-05-12T10:00:00Z",
+          "completed_at": "2026-05-12T10:15:00Z",
+          "summary": "Needs test coverage",
+          "source_artifacts": [
+            "pr_review_log.jsonl"
+          ]
+        }
+      ],
+      "quality_gate": {
+        "status": "pass",
+        "warnings": []
+      },
+      "pull_request": {
+        "url": "https://github.com/pallets/flask/pull/5520",
+        "number": 5520,
+        "state": "open"
+      },
+      "maintainer_outcome": {
+        "status": "changes_requested",
+        "observed_at": "2026-05-12T10:15:00Z",
+        "source": "github_review"
+      },
+      "artifacts": [
+        {
+          "name": "patch.diff",
+          "kind": "patch",
+          "visibility": "public",
+          "url": "",
+          "size_bytes": 450,
+          "redacted": false
+        },
+        {
+          "name": "quality_gate.json",
+          "kind": "quality_gate",
+          "visibility": "public",
+          "url": "",
+          "size_bytes": 820,
+          "redacted": false
+        },
+        {
+          "name": "trace.jsonl",
+          "kind": "trace",
+          "visibility": "internal",
+          "url": "",
+          "size_bytes": 71000,
+          "redacted": false
+        }
+      ]
+    },
+    {
+      "schema_version": "1",
+      "run_id": "20260510_140000_django-django_aider-polyglot",
+      "agent": {
+        "name": "Aider",
+        "handle": "aider-polyglot"
+      },
+      "repository": {
+        "full_name": "django/django",
+        "url": "https://github.com/django/django"
+      },
+      "started_at": "2026-05-10T14:00:00Z",
+      "completed_at": "2026-05-10T14:05:30Z",
+      "duration_seconds": 330,
+      "run_status": "failed",
+      "terminal_reason": "quality gate failed",
+      "contribution_class": "low_risk_code",
+      "pipeline": [
+        {
+          "stage_id": "agent",
+          "status": "passed",
+          "started_at": "2026-05-10T14:00:00Z",
+          "completed_at": "2026-05-10T14:04:00Z",
+          "summary": "Patch generated",
+          "source_artifacts": [
+            "goal_context.json"
+          ]
+        },
+        {
+          "stage_id": "repo_discovery",
+          "status": "passed",
+          "started_at": "2026-05-10T14:00:02Z",
+          "completed_at": "2026-05-10T14:00:20Z",
+          "summary": "Issue #35012",
+          "source_artifacts": []
+        },
+        {
+          "stage_id": "workspace",
+          "status": "passed",
+          "started_at": "2026-05-10T14:00:20Z",
+          "completed_at": "2026-05-10T14:00:50Z",
+          "summary": "Docker ready",
+          "source_artifacts": []
+        },
+        {
+          "stage_id": "patch_diff",
+          "status": "passed",
+          "started_at": "2026-05-10T14:02:00Z",
+          "completed_at": "2026-05-10T14:04:00Z",
+          "summary": "4 files, 55 lines",
+          "source_artifacts": [
+            "patch.diff"
+          ]
+        },
+        {
+          "stage_id": "quality_gate",
+          "status": "failed",
+          "started_at": "2026-05-10T14:04:00Z",
+          "completed_at": "2026-05-10T14:05:30Z",
+          "summary": "Tests failed",
+          "source_artifacts": [
+            "quality_gate.json"
+          ]
+        },
+        {
+          "stage_id": "pull_request",
+          "status": "blocked",
+          "started_at": "",
+          "completed_at": "",
+          "summary": "Blocked by QG",
+          "source_artifacts": []
+        },
+        {
+          "stage_id": "maintainer_outcome",
+          "status": "unknown",
+          "started_at": "",
+          "completed_at": "",
+          "summary": "",
+          "source_artifacts": []
+        }
+      ],
+      "quality_gate": {
+        "status": "fail",
+        "warnings": [
+          "3 test(s) failed",
+          "lint errors in models.py"
+        ]
+      },
+      "pull_request": {
+        "url": "",
+        "number": null,
+        "state": "none"
+      },
+      "maintainer_outcome": {
+        "status": "unknown",
+        "observed_at": "",
+        "source": "none"
+      },
+      "artifacts": [
+        {
+          "name": "patch.diff",
+          "kind": "patch",
+          "visibility": "public",
+          "url": "",
+          "size_bytes": 3200,
+          "redacted": false
+        },
+        {
+          "name": "quality_gate.json",
+          "kind": "quality_gate",
+          "visibility": "public",
+          "url": "",
+          "size_bytes": 1500,
+          "redacted": false
+        },
+        {
+          "name": "trace.jsonl",
+          "kind": "trace",
+          "visibility": "internal",
+          "url": "",
+          "size_bytes": 55000,
+          "redacted": false
+        }
+      ]
+    }
+  ],
+  "assistant_updates": {
+    "20260514_133156_openai-openai-agents-python_responses-guidance-gpt54": [
+      {
+        "ts": "2026-05-14T13:31:58Z",
+        "kind": "intent",
+        "phase": "scout",
+        "sub_phase": "project",
+        "text": "Scoping the OpenAI agents SDK responses-guidance regression. I'll start by listing recent issues that mention the streaming guidance regression and rank them by reproducibility.",
+        "tool_name": "repo_list_issues",
+        "position": "before_tool",
+        "invocation_seq": 1,
+        "run_id": "20260514_133156_openai-openai-agents-python_responses-guidance-gpt54",
+        "season_id": "",
+        "participant_id": "",
+        "turn_id": "",
+        "evidence_refs": [],
+        "visibility": "operator",
+        "redacted": false,
+        "truncated": false,
+        "hidden_dropped_count": 0
+      },
+      {
+        "ts": "2026-05-14T13:31:59Z",
+        "kind": "decision",
+        "phase": "scout",
+        "sub_phase": "select",
+        "text": "Issue #1148 is the cleanest signal: a maintainer-confirmed regression with a failing test attached. Selecting it as the run target.",
+        "tool_name": "aci_goal_update",
+        "position": "before_tool",
+        "invocation_seq": 2,
+        "run_id": "20260514_133156_openai-openai-agents-python_responses-guidance-gpt54",
+        "season_id": "",
+        "participant_id": "",
+        "turn_id": "",
+        "evidence_refs": [],
+        "visibility": "operator",
+        "redacted": false,
+        "truncated": false,
+        "hidden_dropped_count": 0
+      },
+      {
+        "ts": "2026-05-14T13:34:11Z",
+        "kind": "intent",
+        "phase": "work",
+        "sub_phase": "implement",
+        "text": "Reproducing locally: running pytest -k responses_guidance with the failing fixture from the issue.",
+        "tool_name": "aci_verify",
+        "position": "before_tool",
+        "invocation_seq": 4,
+        "run_id": "20260514_133156_openai-openai-agents-python_responses-guidance-gpt54",
+        "season_id": "",
+        "participant_id": "",
+        "turn_id": "",
+        "evidence_refs": [],
+        "visibility": "operator",
+        "redacted": false,
+        "truncated": false,
+        "hidden_dropped_count": 0
+      },
+      {
+        "ts": "2026-05-14T13:36:02Z",
+        "kind": "verification",
+        "phase": "work",
+        "sub_phase": "verify",
+        "text": "Patch applied. Running the same pytest selection — three previously failing tests now pass; no new failures in the suite.",
+        "tool_name": "aci_verify",
+        "position": "before_tool",
+        "invocation_seq": 7,
+        "hidden_dropped_count": 2,
+        "run_id": "20260514_133156_openai-openai-agents-python_responses-guidance-gpt54",
+        "season_id": "",
+        "participant_id": "",
+        "turn_id": "",
+        "evidence_refs": [],
+        "visibility": "operator",
+        "redacted": false,
+        "truncated": false
+      },
+      {
+        "ts": "2026-05-14T13:37:40Z",
+        "kind": "blocker",
+        "phase": "work",
+        "sub_phase": "verify",
+        "text": "workspace_run timed out after 120s on the integration suite — likely the network-dependent test. Will narrow the selection and retry.",
+        "tool_name": "workspace_run",
+        "position": "before_tool",
+        "invocation_seq": 8,
+        "truncated": true,
+        "run_id": "20260514_133156_openai-openai-agents-python_responses-guidance-gpt54",
+        "season_id": "",
+        "participant_id": "",
+        "turn_id": "",
+        "evidence_refs": [],
+        "visibility": "operator",
+        "redacted": false,
+        "hidden_dropped_count": 0
+      },
+      {
+        "ts": "2026-05-14T13:39:18Z",
+        "kind": "review_response",
+        "phase": "review",
+        "sub_phase": "address",
+        "text": "Maintainer asked to also cover the tool_choice='none' path. Added a parametrized case and re-ran the selection — green.",
+        "tool_name": "aci_submit_patch",
+        "position": "before_tool",
+        "invocation_seq": 11,
+        "redacted": true,
+        "hidden_dropped_count": 1,
+        "run_id": "20260514_133156_openai-openai-agents-python_responses-guidance-gpt54",
+        "season_id": "",
+        "participant_id": "",
+        "turn_id": "",
+        "evidence_refs": [],
+        "visibility": "operator",
+        "truncated": false
+      }
+    ]
+  }
+}

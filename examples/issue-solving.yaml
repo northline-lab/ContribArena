@@ -1,0 +1,72 @@
+run:
+  mode: shadow
+  model: compatible/example-gpt
+  budget:
+    max_steps: 30
+    max_tokens:
+    max_wall_time_seconds: 3600
+
+discovery:
+  candidates:
+    - owner: openai
+      repo: openai-agents-python
+      url: https://github.com/openai/openai-agents-python
+      branch: main
+      notes: M0.2.2 issue-solving fixture.
+
+issue:
+  title: Fix grammar in research bot example instructions
+  clone_url: https://github.com/openai/openai-agents-python.git
+  problem_statement: |
+    In examples/research_bot/agents/search_agent.py, the instruction string says
+    "so its vital you capture the essence". This should use the contraction
+    "it's" because the sentence means "it is vital".
+
+    Make the smallest change that fixes this grammar issue and verify the
+    repository still passes a lightweight Python syntax/import-independent check.
+  reproduction_hint: Inspect examples/research_bot/agents/search_agent.py.
+  verification_hint: Run python3 -m compileall examples/research_bot/agents/search_agent.py from the cloned repository.
+
+workspace:
+  backend: docker
+  image: contribarena/workspace:latest
+  workdir: /workspace
+  command_timeout_seconds: 300
+  resources:
+    cpus: "2"
+    memory: 4g
+    disk: 10g
+
+artifacts:
+  output_root: runs
+
+models:
+  providers:
+    compatible:
+      example-gpt:
+        base_url_env: CONTRIBARENA_CHAT_BASE_URL
+        api_key_env: CONTRIBARENA_EXAMPLE_API_KEY
+        model: your-model-name
+
+      local-openai-compatible:
+        base_url_env: CONTRIBARENA_LOCAL_BASE_URL
+        api_key_env: CONTRIBARENA_LOCAL_API_KEY
+        model: local-model-name
+
+    responses:
+      example-responses:
+        base_url_env: CONTRIBARENA_RESPONSES_BASE_URL
+        api_key_env: CONTRIBARENA_EXAMPLE_RESPONSES_API_KEY
+        model: your-responses-model-name
+
+    anthropic:
+      example-claude:
+        base_url_env: CONTRIBARENA_ANTHROPIC_BASE_URL
+        api_key_env: CONTRIBARENA_EXAMPLE_ANTHROPIC_API_KEY
+        model: your-claude-model-name
+
+    gemini:
+      example-gemini:
+        endpoint_env: CONTRIBARENA_GEMINI_ENDPOINT
+        api_key_env: CONTRIBARENA_EXAMPLE_GEMINI_API_KEY
+        model: your-gemini-model-name

@@ -1,0 +1,41 @@
+run:
+  mode: shadow
+  model: local-stub
+  budget:
+    max_steps: 80
+    max_tokens:
+    max_wall_time_seconds: 3600
+    max_invocations: 5
+    max_consecutive_no_progress: 2
+    max_recoveries: 8
+
+discovery:
+  candidates:
+    - owner: openai
+      repo: openai-agents-python
+      url: https://github.com/openai/openai-agents-python
+      branch: main
+      notes: Example M0.0 candidate.
+
+workspace:
+  backend: docker
+  image: contribarena/workspace:latest
+  workdir: /workspace
+  command_timeout_seconds: 300
+  resources:
+    cpus: "2"
+    memory: 4g
+    disk: 10g
+
+artifacts:
+  output_root: runs
+
+backend:
+  read_model_path: .contribarena/read_model.sqlite
+  api_cors_origins: []
+  watch_enabled: true
+  refresh_debounce_seconds: 1.0
+
+models:
+  providers:
+    compatible: {}

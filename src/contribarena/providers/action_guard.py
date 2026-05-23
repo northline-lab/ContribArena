@@ -1,0 +1,421 @@
+from __future__ import annotations
+
+import json
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from typing import Any, Callable
+from uuid import uuid4
+
+from agents import ModelSettings
+from agents.agent_output import AgentOutputSchemaBase
+from agents.handoffs import Handoff
+from agents.items import ModelResponse, TResponseInputItem, TResponseStreamEvent
+from agents.models.interface import Model, ModelProvider
+from agents.tool import FunctionTool, Tool
+from openai.types.responses import ResponseFunctionToolCall
+
+from contribarena.models.assistant_updates import AssistantUpdate
+from contribarena.providers.redaction import redact_visible_text
+from contribarena.providers.turns import ProviderTurn, provider_turn_from_response
+
+RECOVERY_TOOL_NAME = "aci_recover_invalid_action"
+VISIBLE_UPDATE_LIMIT = 500
+
+AssistantUpdateBuilder = Callable[[ProviderTurn, ResponseFunctionToolCall | None], AssistantUpdate | None]
+AssistantUpdateSink = Callable[[AssistantUpdate], None]
+
+
+@dataclass(frozen=True)
+class ToolActionViolation:
+    recovery_kind: str
+    message: str
+    attempted_tool: str = ""
+
+
+class ActionGuardedModel(Model):
+    """Model wrapper that turns invalid tool actions into recoverable observations."""
+
+    def __init__(
+        self,
+        model: Model,
+        *,
+        update_builder: AssistantUpdateBuilder | None = None,
+        update_sink: AssistantUpdateSink | None = None,
+    ) -> None:
+        self._model = model
+        self._update_builder = update_builder
+        self._update_sink = update_sink
+
+    async def get_response(
+        self,
+        system_instructions: str | None,
+        input: str | list[TResponseInputItem],
+        model_settings: ModelSettings,
+        tools: list[Tool],
+        output_schema: AgentOutputSchemaBase | None,
+        handoffs: list[Handoff],
+        tracing: Any,
+        *,
+        previous_response_id: str | None,
+        conversation_id: str | None,
+        prompt: Any,
+    ) -> ModelResponse:
+        response = await self._model.get_response(
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            output_schema,
+            handoffs,
+            tracing,
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+            prompt=prompt,
+        )
+        return guard_structured_model_response(
+            response,
+            tools,
+            output_schema,
+            update_builder=self._update_builder,
+            update_sink=self._update_sink,
+        )
+
+    def stream_response(
+        self,
+        system_instructions: str | None,
+        input: str | list[TResponseInputItem],
+        model_settings: ModelSettings,
+        tools: list[Tool],
+        output_schema: AgentOutputSchemaBase | None,
+        handoffs: list[Handoff],
+        tracing: Any,
+        *,
+        previous_response_id: str | None,
+        conversation_id: str | None,
+        prompt: Any,
+    ) -> AsyncIterator[TResponseStreamEvent]:
+        return self._model.stream_response(
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            output_schema,
+            handoffs,
+            tracing,
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+            prompt=prompt,
+        )
+
+    async def close(self) -> None:
+        close = getattr(self._model, "close", None)
+        if close is not None:
+            await close()
+
+
+class ActionGuardingModelProvider(ModelProvider):
+    """ModelProvider wrapper that applies action guarding only inside contributor runs."""
+
+    def __init__(
+        self,
+        provider: ModelProvider,
+        *,
+        update_builder: AssistantUpdateBuilder | None = None,
+        update_sink: AssistantUpdateSink | None = None,
+    ) -> None:
+        self._provider = provider
+        self._cache: dict[str | None, Model] = {}
+        self._update_builder = update_builder
+        self._update_sink = update_sink
+
+    def get_model(self, model_name: str | None) -> Model:
+        if model_name not in self._cache:
+            self._cache[model_name] = ActionGuardedModel(
+                self._provider.get_model(model_name),
+                update_builder=self._update_builder,
+                update_sink=self._update_sink,
+            )
+        return self._cache[model_name]
+
+
+def guard_model_response(response: ModelResponse, tools: list[Tool]) -> ModelResponse:
+    return _guard_model_response(response, tools, output_schema=None)
+
+
+def guard_structured_model_response(
+    response: ModelResponse,
+    tools: list[Tool],
+    output_schema: AgentOutputSchemaBase | None,
+    *,
+    update_builder: AssistantUpdateBuilder | None = None,
+    update_sink: AssistantUpdateSink | None = None,
+) -> ModelResponse:
+    return _guard_model_response(
+        response,
+        tools,
+        output_schema=output_schema,
+        update_builder=update_builder,
+        update_sink=update_sink,
+    )
+
+
+def _guard_model_response(
+    response: ModelResponse,
+    tools: list[Tool],
+    output_schema: AgentOutputSchemaBase | None,
+    update_builder: AssistantUpdateBuilder | None = None,
+    update_sink: AssistantUpdateSink | None = None,
+) -> ModelResponse:
+    turn = provider_turn_from_response(response)
+    tool_calls = turn.tool_calls
+    if not tool_calls:
+        text_tool_call = _text_tool_call(response, tools)
+        if text_tool_call is not None:
+            return ModelResponse(
+                output=[text_tool_call],
+                usage=response.usage,
+                response_id=response.response_id,
+                request_id=response.request_id,
+            )
+        violation = _non_tool_text_violation(response, tools, output_schema)
+        if violation is not None:
+            return ModelResponse(
+                output=[_recovery_call(violation)],
+                usage=response.usage,
+                response_id=response.response_id,
+                request_id=response.request_id,
+            )
+        _capture_assistant_update(turn, None, update_builder, update_sink)
+        return response
+    violation = _tool_action_violation(tool_calls, tools)
+    if violation is None:
+        _capture_assistant_update(turn, tool_calls[0], update_builder, update_sink)
+        return response
+    return ModelResponse(
+        output=[_recovery_call(violation)],
+        usage=response.usage,
+        response_id=response.response_id,
+        request_id=response.request_id,
+    )
+
+
+def _non_tool_text_violation(
+    response: ModelResponse,
+    tools: list[Tool],
+    output_schema: AgentOutputSchemaBase | None,
+) -> ToolActionViolation | None:
+    if output_schema is None or output_schema.is_plain_text():
+        return None
+    if RECOVERY_TOOL_NAME not in {tool.name for tool in tools if isinstance(tool, FunctionTool)}:
+        return None
+    text = _response_text(response).strip()
+    if not text:
+        return None
+    if _looks_like_json(text):
+        return None
+    return ToolActionViolation(
+        recovery_kind="non_tool_text_response",
+        message=(
+            "Rejected plain assistant text while a structured final result or one tool call "
+            "was required. Use a tool call to continue, or return valid final JSON only when "
+            "the task is complete."
+        ),
+    )
+
+
+def _tool_action_violation(
+    tool_calls: list[ResponseFunctionToolCall],
+    tools: list[Tool],
+) -> ToolActionViolation | None:
+    tool_schemas = {
+        tool.name: tool.params_json_schema for tool in tools if isinstance(tool, FunctionTool)
+    }
+    if RECOVERY_TOOL_NAME not in tool_schemas:
+        return None
+    if len([call for call in tool_calls if call.name != RECOVERY_TOOL_NAME]) > 1:
+        return ToolActionViolation(
+            recovery_kind="multiple_tool_calls",
+            message="Rejected multiple tool calls in one assistant turn. Use exactly one tool call.",
+        )
+    for call in tool_calls:
+        if call.name == RECOVERY_TOOL_NAME:
+            continue
+        schema = tool_schemas.get(call.name)
+        if schema is None:
+            return ToolActionViolation(
+                recovery_kind="unknown_tool",
+                message=f"Rejected unknown tool call: {call.name}.",
+                attempted_tool=call.name,
+            )
+        try:
+            args = json.loads(call.arguments or "{}")
+        except json.JSONDecodeError as exc:
+            return ToolActionViolation(
+                recovery_kind="malformed_action",
+                message=f"Rejected malformed JSON arguments for {call.name}: {exc.msg}.",
+                attempted_tool=call.name,
+            )
+        if not isinstance(args, dict):
+            return ToolActionViolation(
+                recovery_kind="invalid_tool_arguments",
+                message=f"Rejected non-object arguments for {call.name}.",
+                attempted_tool=call.name,
+            )
+        violation = _schema_violation(call.name, args, schema)
+        if violation is not None:
+            return violation
+    return None
+
+
+def _capture_assistant_update(
+    turn: ProviderTurn,
+    tool_call: ResponseFunctionToolCall | None,
+    update_builder: AssistantUpdateBuilder | None,
+    update_sink: AssistantUpdateSink | None,
+) -> None:
+    if update_builder is None or update_sink is None:
+        return
+    if not turn.visible_segments and turn.hidden_dropped_count <= 0:
+        return
+    update = update_builder(turn, tool_call)
+    if update is not None:
+        update_sink(update)
+
+
+def _text_tool_call(response: ModelResponse, tools: list[Tool]) -> ResponseFunctionToolCall | None:
+    text = _response_text(response).strip()
+    if not text or not _looks_like_json(text):
+        return None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    tool_schemas = {
+        tool.name: tool.params_json_schema for tool in tools if isinstance(tool, FunctionTool)
+    }
+    tool_name, args = _extract_text_tool_intent(payload, set(tool_schemas))
+    if not tool_name or not isinstance(args, dict):
+        return None
+    violation = _schema_violation(tool_name, args, tool_schemas[tool_name])
+    if violation is not None:
+        return None
+    call_id = f"contribarena-text-tool-call-{uuid4().hex[:12]}"
+    return ResponseFunctionToolCall(
+        arguments=json.dumps(args, ensure_ascii=True),
+        call_id=call_id,
+        name=tool_name,
+        type="function_call",
+        id=call_id,
+    )
+
+
+def _extract_text_tool_intent(
+    payload: Any,
+    tool_names: set[str],
+) -> tuple[str | None, dict[str, Any] | None]:
+    if isinstance(payload, list):
+        if len(payload) == 1:
+            return _extract_text_tool_intent(payload[0], tool_names)
+        if len(payload) == 2 and isinstance(payload[0], str) and payload[0] in tool_names:
+            return payload[0], payload[1] if isinstance(payload[1], dict) else None
+        return None, None
+    if not isinstance(payload, dict):
+        return None, None
+    name = payload.get("name") or payload.get("tool") or payload.get("call")
+    if not isinstance(name, str) or name not in tool_names:
+        return None, None
+    args = payload.get("arguments")
+    if args is None:
+        args = payload.get("args")
+    if args is None:
+        args = payload.get("parameters")
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except json.JSONDecodeError:
+            return None, None
+    return name, args if isinstance(args, dict) else None
+
+
+def _schema_violation(
+    tool_name: str,
+    args: dict[str, Any],
+    schema: dict[str, Any],
+) -> ToolActionViolation | None:
+    properties = schema.get("properties") or {}
+    required = {
+        str(name)
+        for name in schema.get("required") or []
+        if "default" not in (properties.get(str(name)) or {})
+    }
+    missing = sorted(required - set(args))
+    if missing:
+        return ToolActionViolation(
+            recovery_kind="invalid_tool_arguments",
+            message=(
+                f"Rejected tool call {tool_name}: missing required argument(s) "
+                + ", ".join(missing)
+                + "."
+            ),
+            attempted_tool=tool_name,
+        )
+    if schema.get("additionalProperties") is False:
+        property_names = set(properties.keys())
+        unexpected = sorted(set(args) - property_names)
+        if unexpected:
+            return ToolActionViolation(
+                recovery_kind="invalid_tool_arguments",
+                message=(
+                    f"Rejected tool call {tool_name}: unexpected argument(s) "
+                    + ", ".join(unexpected)
+                    + "."
+                ),
+                attempted_tool=tool_name,
+            )
+    return None
+
+
+def _response_text(response: ModelResponse) -> str:
+    chunks: list[str] = []
+    for item in response.output:
+        for content in getattr(item, "content", []) or []:
+            text = getattr(content, "text", "")
+            if text:
+                chunks.append(str(text))
+    return "\n".join(chunks)
+
+
+def visible_text_from_turn(turn: ProviderTurn, *, max_chars: int = VISIBLE_UPDATE_LIMIT) -> tuple[str, bool, bool]:
+    text = "\n".join(segment.text for segment in turn.visible_segments if segment.text.strip()).strip()
+    redacted = redact_visible_text(text, max_chars=max_chars)
+    truncated = "truncated" in redacted.classes
+    return redacted.text, redacted.redacted, truncated
+
+
+def _looks_like_json(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped.startswith(("{", "[")):
+        return False
+    try:
+        json.loads(stripped)
+    except json.JSONDecodeError:
+        return False
+    return True
+
+
+def _recovery_call(violation: ToolActionViolation) -> ResponseFunctionToolCall:
+    recovery_id = f"contribarena-invalid-action-recovery-{uuid4().hex[:12]}"
+    return ResponseFunctionToolCall(
+        arguments=json.dumps(
+            {
+                "recovery_kind": violation.recovery_kind,
+                "message": violation.message,
+                "attempted_tool": violation.attempted_tool,
+            },
+            ensure_ascii=True,
+        ),
+        call_id=recovery_id,
+        name=RECOVERY_TOOL_NAME,
+        type="function_call",
+        id=recovery_id,
+    )

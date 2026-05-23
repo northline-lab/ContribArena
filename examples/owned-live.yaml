@@ -1,0 +1,70 @@
+run:
+  mode: owned_live
+  model: compatible/example-gpt
+  budget:
+    max_steps: 40
+    max_tokens:
+    max_wall_time_seconds: 1800
+
+discovery:
+  candidates:
+    - owner: YOUR_GITHUB_OWNER
+      repo: YOUR_OWNED_REPO
+      url: https://github.com/YOUR_GITHUB_OWNER/YOUR_OWNED_REPO
+      branch: main
+      notes: Owned-live M0.4 validation target. Replace before running.
+
+workspace:
+  backend: docker
+  image: contribarena/workspace:latest
+  workdir: /workspace
+  command_timeout_seconds: 300
+  cleanup_policy: retain_on_failure
+  resources:
+    cpus: "2"
+    memory: 4g
+    disk: 10g
+
+artifacts:
+  output_root: runs
+
+controller:
+  enabled: true
+  interval_seconds: 300
+  max_ticks: 1
+
+governance:
+  # Keep false in committed examples. Set true only in a local copy with a dedicated bot token.
+  live_enabled: false
+  owned_repositories:
+    - owner: YOUR_GITHUB_OWNER
+      repo: YOUR_OWNED_REPO
+      default_branch: main
+      pr_submission:
+        strategy: fork
+        fork_owner: YOUR_BOT_ACTOR
+  bot_identity:
+    kind: pat
+    actor: YOUR_BOT_ACTOR
+    token_env: GITHUB_TOKEN
+  rate_limits:
+    max_open_prs_per_repo: 1
+    max_prs_per_repo_per_day: 1
+    min_minutes_between_prs_per_repo: 60
+  contribution_classes:
+    allowed:
+      - docs
+      - tests
+      - low_risk_code
+  kill_switches:
+    global: false
+    repositories: []
+    agents: []
+
+models:
+  providers:
+    compatible:
+      example-gpt:
+        base_url_env: CONTRIBARENA_CHAT_BASE_URL
+        api_key_env: CONTRIBARENA_EXAMPLE_API_KEY
+        model: your-model-name
