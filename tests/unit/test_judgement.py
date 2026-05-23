@@ -269,11 +269,35 @@ class JudgementScoringTests(unittest.TestCase):
 
         self.assertIn("phase_scout_project_comparison", packets["project_fit"])
         self.assertIn("discovery_calls_summary", packets["project_fit"])
+        self.assertIn("selected_task_summary", packets["project_fit"])
         self.assertNotIn("patch_excerpt", packets["project_fit"])
+        self.assertIn("selected_task_summary", packets["opportunity_quality"])
+        self.assertIn("patch_excerpt", packets["opportunity_quality"])
+        self.assertIn("pr_description_excerpt", packets["opportunity_quality"])
+        self.assertIn("quality_gate", packets["opportunity_quality"])
+        self.assertIn("phase_scout_duplicate_check", packets["duplicate_avoidance"])
+        self.assertIn("selected_task_summary", packets["duplicate_avoidance"])
         self.assertIn("patch_excerpt", packets["execution_correctness"])
         self.assertNotIn("phase_scout_duplicate_check", packets["execution_correctness"])
         self.assertIn("phase_review_response", packets["review_readiness"])
         self.assertNotIn("phase_scout_project_comparison", packets["review_readiness"])
+
+    def test_opportunity_packet_keeps_outcome_evidence_when_scout_rows_are_empty(self) -> None:
+        packet = _packet()
+        packet.phase_scout_project_excerpt = ""
+        packet.phase_scout_opportunity_excerpt = ""
+        packet.phase_scout_duplicate_excerpt = ""
+
+        packets = judgement_module.build_judge_dimension_packets(packet)
+        opportunity = packets["opportunity_quality"]
+        duplicate = packets["duplicate_avoidance"]
+
+        self.assertEqual("", opportunity["phase_scout_opportunity_comparison"])
+        self.assertEqual("Fix a small correctness issue.", opportunity["selected_task_summary"])
+        self.assertIn("diff --git", opportunity["patch_excerpt"])
+        self.assertEqual({"status": "pass"}, opportunity["quality_gate"])
+        self.assertEqual("", duplicate["phase_scout_duplicate_check"])
+        self.assertIn("tool_violation_log", duplicate)
 
     def test_discovery_excerpt_preserves_jsonl_line_boundaries(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

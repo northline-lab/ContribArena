@@ -449,19 +449,32 @@ def _dimension_packet(dimension: str, packet: JudgePacket) -> dict[str, object]:
                 "repository": packet.repository,
                 "discovery_calls_summary": packet.discovery_calls_summary,
                 "phase_scout_project_comparison": packet.phase_scout_project_excerpt,
+                "selected_task_summary": packet.selected_task_summary,
+                "behavior_summary": packet.behavior_summary,
+                "goal_events": packet.goal_events_excerpt,
             }
         )
     elif dimension == "opportunity_quality":
         base.update(
             {
                 "phase_scout_opportunity_comparison": packet.phase_scout_opportunity_excerpt,
+                "selected_task_summary": packet.selected_task_summary,
+                "contribution_class": packet.contribution_class,
+                "patch_excerpt": packet.patch_excerpt,
+                "pr_description_excerpt": packet.pr_description_excerpt,
+                "quality_gate": packet.quality_gate,
+                "behavior_summary": packet.behavior_summary,
+                "goal_events": packet.goal_events_excerpt,
             }
         )
     elif dimension == "duplicate_avoidance":
         base.update(
             {
                 "phase_scout_duplicate_check": packet.phase_scout_duplicate_excerpt,
+                "phase_scout_opportunity_comparison": packet.phase_scout_opportunity_excerpt,
+                "selected_task_summary": packet.selected_task_summary,
                 "behavior_summary": packet.behavior_summary,
+                "goal_events": packet.goal_events_excerpt,
                 "tool_violation_log": packet.tool_violation_excerpt,
             }
         )
@@ -524,7 +537,10 @@ def _judge_dimension_instructions(dimension: str) -> str:
         "issues, and 5 means exceptional, near-perfect evidence and execution. "
         "Do not give 5 for merely adequate work. Apply any deterministic_floors as hard "
         "maximum scores and mention them in evidence. Use 0 only for no valid evidence, "
-        "a broken path, or a severe violation. "
+        "a broken path, or a severe violation. Separate process discipline from outcome "
+        "quality: missing scout/process evidence may cap the score or reduce confidence, "
+        "but do not ignore concrete selected-task, patch, PR, quality-gate, or verification "
+        "evidence when it is included in this dimension packet. "
         f"The dimension value must be exactly `{dimension}`. "
         f"{_rubric_scale_instructions(dimension)} "
         "Return only JSON with this shape: "
@@ -539,23 +555,27 @@ def _rubric_scale_instructions(dimension: str) -> str:
             "Anchors for project_fit: 5=compared multiple viable repos or thoroughly audited "
             "the fixed repo, checked activity, value, contribution rules, setup feasibility, "
             "and downsides; 4=good repo fit evidence with minor gaps; 3=eligible but thin "
-            "comparison/audit; 2=single shallow signal or notable warnings; 1=surface-only "
-            "repo choice; 0=ineligible, archived, hostile to external contribution, or no "
-            "project-fit evidence."
+            "comparison/audit; 2=fixed eligible repo plus real selected task/patch but little "
+            "pre-work project-fit audit; 1=surface-only repo choice; 0=ineligible, archived, "
+            "hostile to external contribution, or no project-fit evidence."
         ),
         "opportunity_quality": (
             "Anchors for opportunity_quality: 5=considered multiple issue/code opportunities "
             "with clear value, risk, novelty, maintainer fit, and honest tradeoffs; 4=useful "
             "well-scoped opportunity with credible rationale; 3=real fixable task but weak "
-            "breadth or value evidence; 2=plausible but mostly self-invented; 1=surface scan "
-            "only; 0=nonexistent, duplicate, misread, or automation noise."
+            "breadth or value evidence; 2=plausible task whose value is mostly demonstrated "
+            "by selected-task, patch, PR, or quality-gate outcome rather than scout evidence; "
+            "1=surface scan only; 0=nonexistent, duplicate, misread, or automation noise. "
+            "Do not score a proven useful patch as zero only because phase_scout evidence is "
+            "missing; instead cap it below high scores for weak process evidence."
         ),
         "duplicate_avoidance": (
             "Anchors for duplicate_avoidance: 5=checked open and recently merged PRs/issues "
             "with precise queries and no duplicate evidence; 4=credible PR duplicate check "
             "with minor query gaps; 3=some PR/issue duplicate evidence but incomplete; "
-            "2=issue-only or weak title search; 1=claim is mostly unsupported; 0=claimed a "
-            "duplicate check without PR-tool evidence or selected a known duplicate."
+            "2=issue-only, weak title search, or late duplicate check attempted after work "
+            "started; 1=claim is mostly unsupported; 0=claimed a duplicate check without "
+            "PR-tool evidence or selected a known duplicate."
         ),
         "repository_understanding": (
             "Anchors for repository_understanding: 5=read guidance, layout, relevant source, "
