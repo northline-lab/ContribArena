@@ -2661,6 +2661,37 @@ class RunnerM02Test(unittest.TestCase):
             self.assertEqual("example/repo", clone_state["repo_slug"])
             self.assertEqual(result.run_id, clone_state["run_id"])
 
+    def test_manual_season_run_uses_selected_participant_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _config(tmp_path / "runs")
+            config.run.model = "compatible/qwen36plus"
+            config.run.season_id = "season_0"
+            config.run.participant_id = "season_0:gpt-5.5"
+            config.run.wake_source = "manual"
+            config.season = SeasonConfig(
+                id="season_0",
+                name="Season 0",
+                status="active",
+                state_root=tmp_path / "seasons",
+                participants=[
+                    SeasonParticipantConfig(
+                        id="season_0:qwen-3.6-plus",
+                        model="compatible/qwen36plus",
+                    ),
+                    SeasonParticipantConfig(
+                        id="season_0:gpt-5.5",
+                        model="responses/gpt55",
+                    ),
+                ],
+            )
+
+            result = _run_with_fake_docker(FakeM02Agent(), config, tmp_path)
+
+            summary = json.loads((result.run_dir / "run_summary.json").read_text())
+            self.assertEqual("season_0:gpt-5.5", summary["agent"]["participant_id"])
+            self.assertEqual("responses/gpt55", summary["model"])
+
     def test_season_admission_backfills_default_participant_id_for_state_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

@@ -163,15 +163,16 @@ class Runner:
             )
             raise
         if admission.ranked:
+            run_updates = {
+                "season_id": admission.season_id,
+                "participant_id": admission.participant_id,
+                "wake_source": admission.wake_source,
+            }
+            if admission.participant is not None:
+                run_updates["model"] = admission.participant.model
             config = config.model_copy(
                 update={
-                    "run": config.run.model_copy(
-                        update={
-                            "season_id": admission.season_id,
-                            "participant_id": admission.participant_id,
-                            "wake_source": admission.wake_source,
-                        }
-                    )
+                    "run": config.run.model_copy(update=run_updates)
                 },
                 deep=True,
             )
