@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import unittest
 
+from pydantic import BaseModel
+
 from contribarena.agent.model_view import (
     MODEL_VIEW_MAX_LIST_ITEMS,
     MODEL_VIEW_MAX_STRING_CHARS,
@@ -10,6 +12,11 @@ from contribarena.agent.model_view import (
     to_model_json,
 )
 from contribarena.models import CommandResult
+
+
+class SampleProjectionModel(BaseModel):
+    name: str
+    nested: dict[object, object]
 
 
 class ModelViewTest(unittest.TestCase):
@@ -35,6 +42,32 @@ class ModelViewTest(unittest.TestCase):
         self.assertEqual(0, projected[0]["index"])
         self.assertEqual(10, projected[-1]["truncated_items"])
         self.assertEqual(TRUNCATION_MARKER, projected[-1]["message"])
+
+    def test_string_at_limit_is_preserved_without_marker(self) -> None:
+        projected = json.loads(to_model_json({"text": "x" * MODEL_VIEW_MAX_STRING_CHARS}))
+
+        self.assertEqual("x" * MODEL_VIEW_MAX_STRING_CHARS, projected["text"])
+        self.assertNotIn(TRUNCATION_MARKER, projected["text"])
+
+    def test_dict_projection_coerces_keys_and_caps_nested_strings(self) -> None:
+        projected = json.loads(
+            to_model_json({1: {"nested": "x" * (MODEL_VIEW_MAX_STRING_CHARS + 1)}})
+        )
+
+        self.assertIn("1", projected)
+        self.assertIn(TRUNCATION_MARKER, projected["1"]["nested"])
+
+    def test_pydantic_models_are_dumped_before_projection(self) -> None:
+        value = SampleProjectionModel(
+            name="example",
+            nested={1: ["x" * (MODEL_VIEW_MAX_STRING_CHARS + 1)]},
+        )
+
+        projected = json.loads(to_model_json(value))
+
+        self.assertEqual("example", projected["name"])
+        self.assertIn("1", projected["nested"])
+        self.assertIn(TRUNCATION_MARKER, projected["nested"]["1"][0])
 
 
 if __name__ == "__main__":
