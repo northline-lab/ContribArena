@@ -1085,7 +1085,7 @@ def _doctor_runtime_state(checks: list[DoctorCheck], config: RunConfig, season_i
     checks.append(
         DoctorCheck(
             "exhausted_work",
-            "blocked" if exhausted else "ok",
+            "warning" if exhausted else "ok",
             ", ".join(exhausted[:5]) if exhausted else "none",
         )
     )

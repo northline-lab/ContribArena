@@ -11,6 +11,7 @@ from contribarena.engine.gateway import (
     GatewayCommandResult,
     GatewayPaths,
     _participant_ranking_state,
+    _doctor_runtime_state,
     _write_gateway_state,
     load_gateway_state,
     resolve_gateway_paths,
@@ -19,6 +20,7 @@ from contribarena.engine.gateway import (
     stop_gateway,
 )
 from contribarena.config import load_run_config
+from contribarena.config.schema import ArtifactConfig, DiscoveryConfig, RepoCandidate, RunConfig, RunSection, WorkspaceConfig
 from contribarena.errors import ContribArenaError
 
 
@@ -113,6 +115,29 @@ class GatewayLifecycleTests(unittest.TestCase):
             _participant_ranking_state("WAITING", {}, {"status": "failed"}),
         )
 
+    def test_doctor_exhausted_work_warns_without_blocking_startup(self) -> None:
+        checks = []
+        snapshot = {
+            "participants": [
+                {
+                    "display_name": "mimov25pro",
+                    "state": "EXHAUSTED",
+                    "replacement": {
+                        "status": "exhausted",
+                        "attempts": 6,
+                        "max_attempts": 5,
+                    },
+                }
+            ]
+        }
+
+        with patch("contribarena.engine.gateway._season_status", return_value=snapshot):
+            _doctor_runtime_state(checks, _minimal_config(), "season_0")
+
+        exhausted = next(check for check in checks if check.name == "exhausted_work")
+        self.assertEqual("warning", exhausted.status)
+        self.assertEqual([], DoctorResult(checks).failed)
+
 
 def _paths(config_path: Path) -> GatewayPaths:
     root = config_path.parent
@@ -151,6 +176,23 @@ def _write_config(root: Path) -> Path:
     }
     config_path.write_text(json.dumps(payload), encoding="utf-8")
     return config_path
+
+
+def _minimal_config() -> RunConfig:
+    return RunConfig(
+        run=RunSection(mode="shadow", model="local-stub"),
+        discovery=DiscoveryConfig(
+            candidates=[
+                RepoCandidate(
+                    owner="example",
+                    repo="repo",
+                    url="https://github.com/example/repo",
+                )
+            ]
+        ),
+        workspace=WorkspaceConfig(),
+        artifacts=ArtifactConfig(output_root=Path("runs")),
+    )
 
 
 if __name__ == "__main__":

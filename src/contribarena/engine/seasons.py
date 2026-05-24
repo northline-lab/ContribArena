@@ -701,7 +701,6 @@ def mark_participant_run_started(
         {
             "season_id": season_id,
             "participant_id": participant_id,
-            "last_wake_at": now,
             "last_run_started_at": now,
             "last_repo_slug": repo_slug,
             "last_wake_source": wake_source,
@@ -716,6 +715,8 @@ def mark_participant_run_started(
             "active_runs": int(state.get("active_runs") or 0) + (1 if increment_active else 0),
         }
     )
+    if wake_source == "auto":
+        state["last_wake_at"] = now
     live_retry = state.get("live_submission_retry")
     if isinstance(live_retry, dict) and live_retry.get("status") == "due":
         live_retry = dict(live_retry)
