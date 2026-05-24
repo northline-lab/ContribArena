@@ -31,6 +31,7 @@ from contribarena.engine.seasons import (
     SeasonStore,
     append_post_completion_outcome,
     load_participant_state,
+    mark_live_submission_retry_consumed,
     mark_participant_replacement_consumed,
     mark_participant_run_started,
     mark_stale_participant_run_replacement_due,
@@ -246,7 +247,10 @@ class LocalController:
                     0
                     if isinstance(item[2].get("replacement"), dict)
                     and item[2]["replacement"].get("status") == "due"
-                    else 1,
+                    else 1
+                    if isinstance(item[2].get("live_submission_retry"), dict)
+                    and item[2]["live_submission_retry"].get("status") == "due"
+                    else 2,
                     participant_next_wake_at(
                         season=season,
                         participant=item[1],
@@ -257,6 +261,8 @@ class LocalController:
                 )
             )
             participant_id, participant, participant_state = due[0]
+            replacement = participant_state.get("replacement")
+            live_retry = participant_state.get("live_submission_retry")
             run_config = config.model_copy(
                 update={
                     "run": config.run.model_copy(
@@ -275,15 +281,27 @@ class LocalController:
                 run_config,
                 participant_id=participant_id,
                 status="prepared",
-                detail="wake_dispatched",
+                detail=(
+                    "replacement_dispatched"
+                    if isinstance(replacement, dict) and replacement.get("status") == "due"
+                    else "live_submission_retry_dispatched"
+                    if isinstance(live_retry, dict) and live_retry.get("status") == "due"
+                    else "wake_dispatched"
+                ),
             )
-            replacement = participant_state.get("replacement")
             if isinstance(replacement, dict) and replacement.get("status") == "due":
                 mark_participant_replacement_consumed(
                     store,
                     season.id,
                     participant_id,
                     replacement_run_id="pending",
+                )
+            if isinstance(live_retry, dict) and live_retry.get("status") == "due":
+                mark_live_submission_retry_consumed(
+                    store,
+                    season.id,
+                    participant_id,
+                    retry_run_id="pending",
                 )
             mark_participant_run_started(
                 store,
@@ -301,6 +319,13 @@ class LocalController:
                     season.id,
                     participant_id,
                     replacement_run_id=run_result.run_id,
+                )
+            if isinstance(live_retry, dict) and live_retry.get("status") == "due":
+                mark_live_submission_retry_consumed(
+                    store,
+                    season.id,
+                    participant_id,
+                    retry_run_id=run_result.run_id,
                 )
             status = "run_completed" if run_result.status == "completed" else "run_failed"
             return ControllerTickResult(status=status, run_result=run_result)

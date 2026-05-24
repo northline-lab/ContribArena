@@ -709,7 +709,18 @@ def _judgement_retry_excluded(run: dict[str, Any]) -> bool:
 def _ranking_excluded(run: dict[str, Any]) -> bool:
     if run.get("ranking_eligible") is False:
         return True
-    return _replacement_excluded(run) or _judgement_retry_excluded(run)
+    return (
+        _replacement_excluded(run)
+        or _judgement_retry_excluded(run)
+        or _live_submission_retry_excluded(run)
+    )
+
+
+def _live_submission_retry_excluded(run: dict[str, Any]) -> bool:
+    retry = run.get("live_submission_retry")
+    if not isinstance(retry, dict):
+        return False
+    return str(retry.get("status") or "") in {"due", "running", "exhausted"}
 
 
 def _agent_display_name(run: dict[str, Any], agent: dict[str, Any]) -> str:

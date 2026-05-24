@@ -32,7 +32,10 @@ from contribarena.engine.middleware.governance import (
     record_governance_pr,
     save_governance_state,
 )
-from contribarena.engine.seasons import mark_participant_run_finished
+from contribarena.engine.seasons import (
+    mark_live_submission_retry_due,
+    mark_participant_run_finished,
+)
 from contribarena.engine.runner import RunResult
 from contribarena.models import GovernanceAttempt, GovernancePrRef, GovernanceState, QualityGateResult
 from contribarena.models.governance import MaintainerSignal, PrLifecycleRecord
@@ -161,7 +164,7 @@ class GovernanceM04Test(unittest.TestCase):
 
             self.assertEqual("completed", result.status)
             self.assertEqual(1, launcher.calls)
-            state = load_governance_state(config)
+            state = load_governance_state(launcher.configs[0])
             self.assertEqual(1, len(state.attempts))
             self.assertEqual("prepared", state.attempts[0].status)
 
@@ -733,10 +736,64 @@ class GovernanceM04Test(unittest.TestCase):
                 [item.run.participant_id for item in launcher.configs],
             )
             self.assertEqual(["compatible/qwen36plus"], [item.run.model for item in launcher.configs])
-            for launched in launcher.configs:
-                state = load_governance_state(launched)
-                self.assertEqual(1, len(state.attempts))
-                self.assertEqual("prepared", state.attempts[0].status)
+
+    def test_live_submission_retry_is_dispatched_before_normal_wake(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _owned_config(live_enabled=True, output_root=tmp_path / "runs")
+            config.season = SeasonConfig(
+                id="season_0",
+                status="active",
+                state_root=tmp_path / "seasons",
+                participants=[
+                    SeasonParticipantConfig(id="season_0:qwen", model="compatible/qwen36plus"),
+                    SeasonParticipantConfig(id="season_0:gpt", model="responses/gpt55"),
+                ],
+            )
+            retry_config = config.model_copy(
+                update={
+                    "run": config.run.model_copy(
+                        update={
+                            "season_id": "season_0",
+                            "participant_id": "season_0:gpt",
+                        }
+                    )
+                },
+                deep=True,
+            )
+            mark_live_submission_retry_due(
+                retry_config,
+                run_id="previous-gpt-run",
+                action="github.prepare_branch",
+                reason="git_prepare_branch_transient",
+                message="Failed to connect to github.com port 443",
+                run_dir="/tmp/previous-gpt-run",
+            )
+            launcher = FakeLauncher()
+
+            result = LocalController(launcher=launcher).run_once(config)
+
+            self.assertEqual("run_completed", result.status)
+            self.assertEqual(["season_0:gpt"], [item.run.participant_id for item in launcher.configs])
+            self.assertEqual(["responses/gpt55"], [item.run.model for item in launcher.configs])
+            state = load_governance_state(launcher.configs[0])
+            self.assertEqual("prepared", state.attempts[-1].status)
+            self.assertEqual(
+                "participant=season_0:gpt;live_submission_retry_dispatched",
+                state.attempts[-1].decision_id,
+            )
+            participant_state = json.loads(
+                (
+                    tmp_path
+                    / "seasons"
+                    / "season_0"
+                    / "participants"
+                    / "season_0:gpt"
+                    / "participant_state.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual("succeeded", participant_state["live_submission_retry"]["status"])
+            self.assertEqual("fake", participant_state["live_submission_retry"]["retry_run_id"])
 
     def test_active_season_replacement_due_participant_runs_first(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

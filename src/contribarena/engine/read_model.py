@@ -1175,7 +1175,11 @@ def _judgement_retry_excluded(run: dict[str, Any]) -> bool:
 def _ranking_excluded(run: dict[str, Any]) -> bool:
     if run.get("ranking_eligible") is False:
         return True
-    return _replacement_excluded(run) or _judgement_retry_excluded(run)
+    return (
+        _replacement_excluded(run)
+        or _judgement_retry_excluded(run)
+        or _live_submission_retry_excluded(run)
+    )
 
 
 def _ranking_exclusion_reason(run: dict[str, Any]) -> str:
@@ -1196,7 +1200,21 @@ def _ranking_exclusion_reason(run: dict[str, Any]) -> str:
     judgement = run.get("judgement", {}) if isinstance(run.get("judgement"), dict) else {}
     if str(judgement.get("status") or "") == "deferred":
         return "judgement_deferred"
+    live_retry = run.get("live_submission_retry")
+    if isinstance(live_retry, dict) and str(live_retry.get("status") or "") in {
+        "due",
+        "running",
+        "exhausted",
+    }:
+        return f"live_submission_retry_{live_retry.get('status')}"
     return ""
+
+
+def _live_submission_retry_excluded(run: dict[str, Any]) -> bool:
+    retry = run.get("live_submission_retry")
+    if not isinstance(retry, dict):
+        return False
+    return str(retry.get("status") or "") in {"due", "running", "exhausted"}
 
 
 def _annotate_ranking_state(run: dict[str, Any]) -> dict[str, Any]:

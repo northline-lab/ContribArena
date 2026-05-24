@@ -102,6 +102,7 @@ def build_run_summary(
         },
         replacement=_replacement_payload(run_dir, terminal),
         judgement_retry=_judgement_retry_payload(run_dir),
+        live_submission_retry=_live_submission_retry_payload(run_dir),
         submission_outcome=submission_outcome,
         score_status=score_status,
         ranking_eligible=ranking_eligible,
@@ -140,6 +141,14 @@ def _replacement_payload(run_dir: Path, terminal: TerminalState) -> dict[str, ob
 
 def _judgement_retry_payload(run_dir: Path) -> dict[str, object]:
     path = run_dir / "judgement_retry_state.json"
+    if not path.exists():
+        return {}
+    payload = _read_json(path)
+    return payload if isinstance(payload, dict) else {}
+
+
+def _live_submission_retry_payload(run_dir: Path) -> dict[str, object]:
+    path = run_dir / "live_submission_retry_state.json"
     if not path.exists():
         return {}
     payload = _read_json(path)
@@ -246,6 +255,7 @@ def _submission_outcome(run_dir: Path, terminal: TerminalState) -> str:
         return "no_pr_governance_blocked_agent"
     if any(
         str(row.get("error_kind") or "") in {
+            "git_prepare_branch_transient",
             "git_push_transient",
             "git_push_nontransient",
             "branch_history_invalid",

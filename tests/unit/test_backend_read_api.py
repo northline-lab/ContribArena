@@ -388,6 +388,48 @@ class BackendReadApiTests(unittest.TestCase):
             self.assertTrue(excluded["ranking_excluded"])
             self.assertEqual("replacement_replaced", excluded["ranking_exclusion_reason"])
 
+    def test_live_submission_retry_due_run_is_excluded_from_default_rankings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runs_dir = root / "runs"
+            _write_run(
+                runs_dir / "run-a",
+                run_id="run-a",
+                agent_handle="qwen-3.6-plus",
+                season_id="season_0",
+            )
+            _write_run(
+                runs_dir / "run-b",
+                run_id="run-b",
+                agent_handle="gpt-5.5",
+                season_id="season_0",
+            )
+            summary_path = runs_dir / "run-b" / "run_summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary["ranking_eligible"] = False
+            summary["ranking_exclusion_reason"] = "submission_no_pr_infrastructure_failure"
+            summary["live_submission_retry"] = {
+                "status": "due",
+                "reason": "git_prepare_branch_transient",
+            }
+            summary_path.write_text(
+                json.dumps(summary, indent=2, ensure_ascii=True) + "\n",
+                encoding="utf-8",
+            )
+
+            model = SurfaceReadModel(root / "read.sqlite")
+            model.refresh_from_artifacts(runs_dir)
+
+            self.assertEqual(1, model.stats("season_0")["runs"])
+            self.assertEqual(["qwen-3.6-plus"], [row["agent_name"] for row in model.leaderboard("season_0")])
+            runs = model.runs(season_id="season_0")
+            excluded = next(run for run in runs if run["run_id"] == "run-b")
+            self.assertTrue(excluded["ranking_excluded"])
+            self.assertEqual(
+                "submission_no_pr_infrastructure_failure",
+                excluded["ranking_exclusion_reason"],
+            )
+
     def test_builtin_agent_name_is_normalized_from_participant_for_read_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

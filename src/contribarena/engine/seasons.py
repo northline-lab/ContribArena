@@ -19,6 +19,7 @@ from contribarena.errors import ConfigError
 
 SeasonStatus = Literal["draft", "active", "observing", "completed"]
 MAX_REPLACEMENT_ATTEMPTS = 5
+MAX_LIVE_SUBMISSION_RETRY_ATTEMPTS = 3
 
 
 @dataclass(frozen=True)
@@ -521,6 +522,58 @@ def mark_participant_replacement_consumed(
     save_participant_state(store, season_id, participant_id, state)
 
 
+def mark_live_submission_retry_due(
+    config: RunConfig,
+    *,
+    run_id: str,
+    action: str,
+    reason: str,
+    message: str = "",
+    run_dir: str = "",
+) -> dict[str, Any]:
+    if not config.run.season_id or not config.run.participant_id:
+        return {}
+    store = SeasonStore.from_config(config)
+    state = load_participant_state(store, config.run.season_id, config.run.participant_id)
+    retry = state.get("live_submission_retry")
+    attempts = int(retry.get("attempts") or 0) if isinstance(retry, dict) else 0
+    next_attempt = attempts + 1
+    status = "due" if next_attempt <= MAX_LIVE_SUBMISSION_RETRY_ATTEMPTS else "exhausted"
+    retry_state = {
+        "status": status,
+        "attempts": next_attempt,
+        "max_attempts": MAX_LIVE_SUBMISSION_RETRY_ATTEMPTS,
+        "source_run_id": run_id,
+        "action": action,
+        "reason": reason,
+        "message": message[:500],
+        "run_dir": run_dir,
+        "scheduled_at": datetime.now(UTC).isoformat(),
+    }
+    state["live_submission_retry"] = retry_state
+    state["live_submission_retry_due"] = status == "due"
+    save_participant_state(store, config.run.season_id, config.run.participant_id, state)
+    return retry_state
+
+
+def mark_live_submission_retry_consumed(
+    store: SeasonStore,
+    season_id: str,
+    participant_id: str,
+    *,
+    retry_run_id: str,
+) -> None:
+    state = load_participant_state(store, season_id, participant_id)
+    retry = state.get("live_submission_retry")
+    if not isinstance(retry, dict) or retry.get("status") not in {"due", "running"}:
+        return
+    retry = dict(retry)
+    retry.update({"status": "running", "retry_run_id": retry_run_id})
+    state["live_submission_retry"] = retry
+    state["live_submission_retry_due"] = False
+    save_participant_state(store, season_id, participant_id, state)
+
+
 def tracked_open_prs(
     store: SeasonStore,
     season_id: str,
@@ -580,6 +633,9 @@ def participant_is_due(
     replacement = state.get("replacement")
     if isinstance(replacement, dict) and replacement.get("status") == "due":
         return True
+    live_retry = state.get("live_submission_retry")
+    if isinstance(live_retry, dict) and live_retry.get("status") == "due":
+        return True
     last_wake_at = str(state.get("last_wake_at") or "")
     if not last_wake_at:
         return True
@@ -604,6 +660,9 @@ def participant_next_wake_at(
     current = now or datetime.now(UTC)
     replacement = state.get("replacement")
     if isinstance(replacement, dict) and replacement.get("status") == "due":
+        return current
+    live_retry = state.get("live_submission_retry")
+    if isinstance(live_retry, dict) and live_retry.get("status") == "due":
         return current
     last_wake_at = str(state.get("last_wake_at") or "")
     if not last_wake_at:
@@ -657,6 +716,12 @@ def mark_participant_run_started(
             "active_runs": int(state.get("active_runs") or 0) + (1 if increment_active else 0),
         }
     )
+    live_retry = state.get("live_submission_retry")
+    if isinstance(live_retry, dict) and live_retry.get("status") == "due":
+        live_retry = dict(live_retry)
+        live_retry.update({"status": "running", "retry_run_id": run_id})
+        state["live_submission_retry"] = live_retry
+        state["live_submission_retry_due"] = False
     save_participant_state(store, season_id, participant_id, state)
     return state
 
@@ -715,6 +780,19 @@ def mark_participant_run_finished(
         )
         state["replacement"] = replacement
         state["replacement_due"] = False
+    live_retry = state.get("live_submission_retry")
+    if isinstance(live_retry, dict) and live_retry.get("status") == "running":
+        live_retry = dict(live_retry)
+        live_retry.update(
+            {
+                "status": "succeeded" if status == "completed" else "failed",
+                "retry_run_id": run_id,
+                "completed_run_id": run_id,
+                "completed_at": now,
+            }
+        )
+        state["live_submission_retry"] = live_retry
+        state["live_submission_retry_due"] = False
     if latest_goal_summary:
         state["latest_goal_summary"] = latest_goal_summary[:1000]
     path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")

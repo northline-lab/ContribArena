@@ -51,6 +51,7 @@ from contribarena.engine.agent_loop import (
     review_invocation,
 )
 from contribarena.engine.seasons import SeasonStore, derive_participant_id, normalize_model_identity
+from contribarena.engine.seasons import load_participant_state
 from contribarena.engine.middleware.artifact import ArtifactCapture
 from contribarena.engine.middleware.governance import load_governance_state, save_governance_state
 from contribarena.errors import AgentError
@@ -562,7 +563,9 @@ class FakeLiveSubmittingAgent(FakeIssueAgent):
         else:
             return result
         branch = "contribarena/fix-configured-problem"
-        tools.github_prepare_branch("example", "repo", "main", branch)  # type: ignore[attr-defined]
+        prepared = tools.github_prepare_branch("example", "repo", "main", branch)  # type: ignore[attr-defined]
+        if not prepared.success:
+            return result
         tools.github_commit("Fix old marker", "Replace the old marker with the new marker.")  # type: ignore[attr-defined]
         push = tools.github_push_branch(push_owner, "repo", branch)  # type: ignore[attr-defined]
         if not push.success:
@@ -576,6 +579,20 @@ class FakeLiveSubmittingAgent(FakeIssueAgent):
             "Replace the old marker with the new marker.",
         )
         return result
+
+
+class FakeLiveSubmissionContextAgent(FakeIssueAgent):
+    def run(
+        self,
+        config: RunConfig,
+        tools: object,
+        prompt: str,
+        model_provider: object = None,
+        **kwargs: object,
+    ) -> AgentFinalResult:
+        context = tools.aci_runtime_get_context("run")  # type: ignore[attr-defined]
+        self.runtime_context = json.loads(context.output) if context.success else {}
+        return super().run(config, tools, prompt, model_provider, **kwargs)
 
 
 class FakeLiveOpeningOnlyAgent(FakeIssueAgent):
@@ -1624,6 +1641,162 @@ class RunnerM02Test(unittest.TestCase):
                 "authenticated actor wrong-bot does not match expected contribarena-bot",
                 live_action_log,
             )
+
+    def test_owned_live_transient_prepare_branch_failure_schedules_agent_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _owned_live_config(tmp_path / "runs", live_enabled=True)
+            config.run.season_id = "season_0"
+            config.run.participant_id = "season_0:gpt-5.5"
+            config.run.wake_source = "manual"
+            config.season = SeasonConfig(
+                id="season_0",
+                status="active",
+                state_root=tmp_path / "seasons",
+                participants=[SeasonParticipantConfig(id="season_0:gpt-5.5", model="responses/gpt55")],
+            )
+            os.environ["GITHUB_TOKEN"] = "test-token"
+            try:
+                result = _run_with_fake_docker(
+                    FakeLiveSubmittingAgent(),
+                    config,
+                    tmp_path,
+                    pr_client=FakePrClient(actor="contribarena-bot"),
+                    prepare_branch_failure_stderr=(
+                        "fatal: unable to access 'https://github.com/example/repo.git/': "
+                        "Failed to connect to github.com port 443"
+                    ),
+                )
+            finally:
+                os.environ.pop("GITHUB_TOKEN", None)
+
+            self.assertEqual("failed", result.status)
+            self.assertEqual("live_pr_infrastructure_failed", result.terminal_reason)
+            self.assertEqual("pr", result.terminal_layer)
+            live_action_entries = [
+                json.loads(line)
+                for line in (result.run_dir / "live_action_log.jsonl").read_text().splitlines()
+                if line.strip()
+            ]
+            prepare_branch = next(
+                entry for entry in live_action_entries if entry["action"] == "github.prepare_branch"
+            )
+            self.assertEqual("failed", prepare_branch["status"])
+            self.assertTrue(prepare_branch["retryable"])
+            self.assertEqual("git_prepare_branch_transient", prepare_branch["error_kind"])
+            retry = json.loads((result.run_dir / "live_submission_retry_state.json").read_text())
+            self.assertEqual("due", retry["status"])
+            self.assertEqual(result.run_id, retry["source_run_id"])
+            self.assertEqual("github.prepare_branch", retry["action"])
+            summary = json.loads((result.run_dir / "run_summary.json").read_text())
+            self.assertEqual("due", summary["live_submission_retry"]["status"])
+            self.assertFalse((result.run_dir / "replacement_state.json").exists())
+            state = load_participant_state(
+                SeasonStore.from_config(config),
+                "season_0",
+                "season_0:gpt-5.5",
+            )
+            self.assertTrue(state["live_submission_retry_due"])
+            self.assertEqual("due", state["live_submission_retry"]["status"])
+            self.assertEqual(1, state["live_submission_retry"]["attempts"])
+
+    def test_runtime_context_exposes_live_submission_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _owned_live_config(tmp_path / "runs", live_enabled=True)
+            config.run.season_id = "season_0"
+            config.run.participant_id = "season_0:gpt-5.5"
+            config.run.wake_source = "manual"
+            config.season = SeasonConfig(
+                id="season_0",
+                status="active",
+                state_root=tmp_path / "seasons",
+                participants=[SeasonParticipantConfig(id="season_0:gpt-5.5", model="responses/gpt55")],
+            )
+            store = SeasonStore.from_config(config)
+            participant_dir = store.participant_dir("season_0", "season_0:gpt-5.5")
+            participant_dir.mkdir(parents=True, exist_ok=True)
+            (participant_dir / "participant_state.json").write_text(
+                json.dumps(
+                    {
+                        "live_submission_retry": {
+                            "status": "running",
+                            "attempts": 1,
+                            "max_attempts": 3,
+                            "source_run_id": "previous-run",
+                            "action": "github.prepare_branch",
+                            "reason": "git_prepare_branch_transient",
+                            "message": "Failed to connect to github.com port 443",
+                            "run_dir": "/tmp/previous-run",
+                        }
+                    },
+                    ensure_ascii=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            agent = FakeLiveSubmissionContextAgent()
+
+            result = _run_with_fake_docker(agent, config, tmp_path)
+
+            self.assertEqual("failed", result.status)
+            retry = agent.runtime_context["live_submission_retry"]
+            self.assertEqual("running", retry["status"])
+            self.assertEqual("previous-run", retry["source_run_id"])
+            self.assertEqual("github.prepare_branch", retry["action"])
+            self.assertIn("agent-owned live submission continuation", retry["instruction"])
+            state = load_participant_state(
+                SeasonStore.from_config(config),
+                "season_0",
+                "season_0:gpt-5.5",
+            )
+            self.assertEqual("failed", state["live_submission_retry"]["status"])
+            self.assertFalse(state["live_submission_retry_due"])
+
+    def test_manual_run_consumes_due_live_submission_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _owned_live_config(tmp_path / "runs", live_enabled=True)
+            config.run.season_id = "season_0"
+            config.run.participant_id = "season_0:gpt-5.5"
+            config.run.wake_source = "manual"
+            config.season = SeasonConfig(
+                id="season_0",
+                status="active",
+                state_root=tmp_path / "seasons",
+                participants=[SeasonParticipantConfig(id="season_0:gpt-5.5", model="responses/gpt55")],
+            )
+            store = SeasonStore.from_config(config)
+            participant_dir = store.participant_dir("season_0", "season_0:gpt-5.5")
+            participant_dir.mkdir(parents=True, exist_ok=True)
+            (participant_dir / "participant_state.json").write_text(
+                json.dumps(
+                    {
+                        "live_submission_retry": {
+                            "status": "due",
+                            "attempts": 1,
+                            "max_attempts": 3,
+                            "source_run_id": "previous-run",
+                            "action": "github.prepare_branch",
+                            "reason": "git_prepare_branch_transient",
+                            "message": "Failed to connect to github.com port 443",
+                            "run_dir": "/tmp/previous-run",
+                        },
+                        "live_submission_retry_due": True,
+                    },
+                    ensure_ascii=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = _run_with_fake_docker(FakeIssueAgent(), config, tmp_path)
+
+            self.assertEqual("failed", result.status)
+            state = load_participant_state(store, "season_0", "season_0:gpt-5.5")
+            self.assertEqual("failed", state["live_submission_retry"]["status"])
+            self.assertEqual(result.run_id, state["live_submission_retry"]["retry_run_id"])
+            self.assertFalse(state["live_submission_retry_due"])
 
     def test_owned_live_fork_failure_records_requested_fork_owner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3283,6 +3456,7 @@ def _run_with_fake_docker(
     tmp_path: Path,
     diff_path: str = "repo/app.py",
     pr_client: object | None = None,
+    prepare_branch_failure_stderr: str = "",
     push_failure_stderr: str = "",
     push_transient_failures_before_success: int = 0,
     push_success_stdout: str = "",
@@ -3292,6 +3466,15 @@ def _run_with_fake_docker(
     bin_dir.mkdir(exist_ok=True)
     docker = bin_dir / "docker"
     push_match = 'git -c http.version=HTTP/1.1 -C repo push contribarena-submit'
+    prepare_branch_fetch_match = (
+        "git -c http.version=HTTP/1.1 -C repo fetch --no-tags --depth 1 origin"
+    )
+    prepare_branch_failure_case = (
+        f'    *"{prepare_branch_fetch_match}"*) '
+        f'printf %s {json.dumps(prepare_branch_failure_stderr)} >&2; exit 1 ;;\n'
+        if prepare_branch_failure_stderr
+        else ""
+    )
     push_failure_case = (
         f'    *"{push_match}"*) '
         f'printf %s {json.dumps(push_failure_stderr)} >&2; exit 1 ;;\n'
@@ -3332,6 +3515,7 @@ def _run_with_fake_docker(
         'if [ "$1" = "rm" ]; then exit 0; fi\n'
         'if [ "$1" = "exec" ]; then\n'
         '  case "$args" in\n'
+        f"{prepare_branch_failure_case}"
         '    *"git -C repo fetch --depth 1 origin"*) exit 0 ;;\n'
         '    *"git -C repo reset --hard FETCH_HEAD"*) exit 0 ;;\n'
         '    *"cat -- repo/app.py"*) printf "def marker():\\n    return \'old\'\\n"; exit 0 ;;\n'

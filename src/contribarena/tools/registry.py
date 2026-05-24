@@ -17,7 +17,11 @@ from contribarena.engine.operator_events import (
     truncate_for_operator,
 )
 from contribarena.engine.workspace import DockerWorkspaceManager
-from contribarena.engine.seasons import shared_signals_for_config
+from contribarena.engine.seasons import (
+    SeasonStore,
+    load_participant_state,
+    shared_signals_for_config,
+)
 from contribarena.memory import MemoryService
 from contribarena.memory.schema import GuidanceContext, MemoryCapabilities
 from contribarena.models import AciResult, AgentStep, CommandResult, PatchResult, RunState
@@ -609,6 +613,7 @@ class ToolRegistry:
                     if memory_working is not None
                     else []
                 ),
+                "live_submission_retry": _live_submission_retry_context(self.config),
                 "shared_signals": shared_signals_for_config(self.config),
             }
             return AciResult(
@@ -1919,6 +1924,35 @@ def _configured_repo_full_name(config: RunConfig) -> str:
     if config.discovery.candidates:
         return config.discovery.candidates[0].full_name
     return config.discovery.query or ""
+
+
+def _live_submission_retry_context(config: RunConfig) -> dict[str, object]:
+    if not config.run.season_id or not config.run.participant_id:
+        return {"status": "none"}
+    store = SeasonStore.from_config(config)
+    state = load_participant_state(store, config.run.season_id, config.run.participant_id)
+    retry = state.get("live_submission_retry")
+    if not isinstance(retry, dict):
+        return {"status": "none"}
+    active = retry.get("status") in {"due", "running"}
+    return {
+        "status": str(retry.get("status") or ""),
+        "source_run_id": str(retry.get("source_run_id") or ""),
+        "action": str(retry.get("action") or ""),
+        "reason": str(retry.get("reason") or ""),
+        "message": str(retry.get("message") or ""),
+        "run_dir": str(retry.get("run_dir") or ""),
+        "attempts": int(retry.get("attempts") or 0),
+        "max_attempts": int(retry.get("max_attempts") or 0),
+        "instruction": (
+            "This is an agent-owned live submission continuation. Inspect the current "
+            "workspace and previous artifacts, reconcile branch/fork state, then decide "
+            "whether to continue the same contribution, adjust it, or abandon it with "
+            "evidence. Do not assume the harness has opened a PR for you."
+            if active
+            else ""
+        ),
+    }
 
 
 _VERIFICATION_COMMAND_MARKERS = (

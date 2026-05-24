@@ -58,6 +58,7 @@ from contribarena.engine.runtime_config import apply_output_dir
 from contribarena.engine.seasons import admit_run
 from contribarena.engine.seasons import (
     SeasonStore,
+    mark_live_submission_retry_due,
     mark_participant_replacement_due,
     mark_participant_run_finished,
     mark_participant_run_started,
@@ -495,6 +496,7 @@ class Runner:
                 },
             )
             _record_replacement_if_due(artifacts, config, run_id, terminal)
+            _record_live_submission_retry_if_due(artifacts, config, run_id, terminal, capture)
             if workspace_started:
                 _finalize_workspace(workspace, trace, terminal, config.workspace.cleanup_policy)
                 workspace_finalized = True
@@ -575,6 +577,7 @@ class Runner:
                 terminal.model_dump(mode="json"),
             )
             _record_replacement_if_due(artifacts, config, run_id, terminal)
+            _record_live_submission_retry_if_due(artifacts, config, run_id, terminal, capture)
             if workspace_started:
                 _finalize_workspace(workspace, trace, terminal, config.workspace.cleanup_policy)
                 workspace_finalized = True
@@ -1254,6 +1257,60 @@ def _record_replacement_if_due(
         layer=terminal.layer,
         message=terminal.message,
     )
+
+
+def _record_live_submission_retry_if_due(
+    artifacts: ArtifactWriter,
+    config: RunConfig,
+    run_id: str,
+    terminal: TerminalState,
+    capture: ArtifactCapture,
+) -> None:
+    if config.run.mode not in {"owned_live", "external_live"}:
+        return
+    if terminal.status == "completed":
+        return
+    if not config.run.season_id or not config.run.participant_id:
+        return
+    if any(
+        str(row.get("action") or "") == "github.open_pr"
+        and str(row.get("status") or "") in {"opened", "existing"}
+        for row in capture.live_action_rows
+        if isinstance(row, dict)
+    ):
+        return
+    retryable = _latest_retryable_live_submission_failure(capture.live_action_rows)
+    if retryable is None:
+        return
+    payload = mark_live_submission_retry_due(
+        config,
+        run_id=run_id,
+        action=str(retryable.get("action") or ""),
+        reason=str(retryable.get("error_kind") or "live_submission_transient_failure"),
+        message=str(retryable.get("error") or "")[:500],
+        run_dir=str(artifacts.run_dir),
+    )
+    if payload:
+        artifacts.write_json("live_submission_retry_state.json", payload, required=False)
+
+
+def _latest_retryable_live_submission_failure(
+    rows: list[dict[str, object]],
+) -> dict[str, object] | None:
+    for row in reversed(rows):
+        if not isinstance(row, dict):
+            continue
+        action = str(row.get("action") or "")
+        if action not in {
+            "github.prepare_branch",
+            "github.push_fork_branch",
+            "github.push_upstream_branch",
+            "github.open_pr",
+        }:
+            continue
+        if row.get("retryable") is True and str(row.get("status") or "") == "failed":
+            return row
+    return None
 
 
 def _replacement_due_terminal(terminal: TerminalState) -> bool:
@@ -2724,6 +2781,7 @@ def _submission_outcome(capture: ArtifactCapture, terminal: TerminalState | None
         return "no_pr_governance_blocked_agent"
     if any(
         str(row.get("error_kind") or "") in {
+            "git_prepare_branch_transient",
             "git_push_transient",
             "git_push_nontransient",
             "branch_history_invalid",

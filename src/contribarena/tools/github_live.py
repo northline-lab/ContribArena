@@ -188,6 +188,7 @@ def github_prepare_branch(
     cmd = workspace.run(command, timeout_seconds=config.workspace.command_timeout_seconds)
     capture.record_command(cmd)
     success = cmd.exit_code == 0
+    transient = _transient_message("\n".join((cmd.stderr, cmd.stdout)))
     payload = {
         "branch": branch,
         "base": base,
@@ -203,8 +204,9 @@ def github_prepare_branch(
         status="prepared" if success else "failed",
         target_repository=target_repository,
         external_write=False,
-        error_kind="" if success else "branch_history_invalid",
+        error_kind="" if success else "git_prepare_branch_transient" if transient else "branch_history_invalid",
         error="" if success else truncate_for_operator(cmd.stderr or cmd.stdout),
+        retryable=not success and transient,
         extra=payload,
     )
     if not success:
@@ -212,7 +214,7 @@ def github_prepare_branch(
             "github_prepare_branch",
             False,
             truncate_for_operator(cmd.stderr or cmd.stdout),
-            "branch_history_invalid",
+            "git_prepare_branch_transient" if transient else "branch_history_invalid",
             payload,
         )
     return _result("github_prepare_branch", True, output=payload)
@@ -813,6 +815,7 @@ def _transient_message(message: str) -> bool:
             "connection reset",
             "socket reset",
             "gnutls recv error",
+            "failed to connect",
             "couldn't connect to server",
             "timeout",
             "timed out",
