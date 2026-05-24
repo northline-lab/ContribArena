@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from contribarena.models import IssueCandidate
+from contribarena.models import IssueCandidate, QualityGateCheck
+from contribarena.tools.github_live import _add_quality_check
 from contribarena.tools.repo_issues import (
     _apply_local_filters,
     _has_assignee,
@@ -138,3 +139,37 @@ class OptionalStrTest(unittest.TestCase):
         self.assertIsNone(_optional_str(0))
         self.assertIsNone(_optional_str(None))
         self.assertIsNone(_optional_str(False))
+
+
+class AddQualityCheckTest(unittest.TestCase):
+    """Verify _add_quality_check uses valid QualityGateCheck status values."""
+
+    def test_passed_check_uses_pass_status(self) -> None:
+        checks: list[QualityGateCheck] = []
+        blockers: list[str] = []
+        _add_quality_check(checks, blockers, "test_check", True, "detail text")
+        self.assertEqual(1, len(checks))
+        self.assertEqual("pass", checks[0].status)
+        self.assertEqual("test_check", checks[0].name)
+        self.assertEqual("detail text", checks[0].detail)
+        self.assertEqual([], blockers)
+
+    def test_failed_check_uses_block_status_not_fail(self) -> None:
+        checks: list[QualityGateCheck] = []
+        blockers: list[str] = []
+        _add_quality_check(checks, blockers, "failed_check", False, "block detail")
+        self.assertEqual(1, len(checks))
+        self.assertEqual("block", checks[0].status)
+        self.assertEqual(["block detail"], blockers)
+
+    def test_multiple_checks_accumulate_blockers(self) -> None:
+        checks: list[QualityGateCheck] = []
+        blockers: list[str] = []
+        _add_quality_check(checks, blockers, "a", True, "ok")
+        _add_quality_check(checks, blockers, "b", False, "b-fail")
+        _add_quality_check(checks, blockers, "c", False, "c-fail")
+        self.assertEqual(3, len(checks))
+        self.assertEqual("pass", checks[0].status)
+        self.assertEqual("block", checks[1].status)
+        self.assertEqual("block", checks[2].status)
+        self.assertEqual(["b-fail", "c-fail"], blockers)
