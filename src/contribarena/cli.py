@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import signal
 import sys
 import shutil
 import importlib.metadata
 import subprocess
 import time
+from contextlib import contextmanager
 from pathlib import Path
+from types import FrameType
 from typing import Any
 
 import typer
@@ -392,7 +395,8 @@ def run(
             max_opportunity_switches=max_opportunity_switches,
             max_review_rounds=max_review_rounds,
         )
-        result = Runner().run(run_config, output_dir=output_dir, verbose=verbose)
+        with _run_interruption_signals():
+            result = Runner().run(run_config, output_dir=output_dir, verbose=verbose)
     except ContribArenaError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(exc.exit_code) from exc
@@ -672,7 +676,8 @@ def run_matrix(
         results = []
         for model_name in selected_models:
             matrix_config = _with_model_override(run_config, model_name)
-            result = Runner().run(matrix_config, output_dir=output_dir, verbose=verbose)
+            with _run_interruption_signals():
+                result = Runner().run(matrix_config, output_dir=output_dir, verbose=verbose)
             results.append((model_name, result))
     except ContribArenaError as exc:
         typer.echo(str(exc), err=True)
@@ -1666,6 +1671,30 @@ def _clip(value: str, width: int) -> str:
 
 def _score_text(value: Any) -> str:
     return "-" if value is None or value == "" else str(value)
+
+
+@contextmanager
+def _run_interruption_signals():
+    previous: dict[signal.Signals, Any] = {}
+
+    def raise_interrupted(signum: int, frame: FrameType | None) -> None:
+        del frame
+        raise KeyboardInterrupt(f"received signal {signum}")
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        try:
+            previous[signum] = signal.getsignal(signum)
+            signal.signal(signum, raise_interrupted)
+        except (OSError, ValueError):
+            continue
+    try:
+        yield
+    finally:
+        for signum, handler in previous.items():
+            try:
+                signal.signal(signum, handler)
+            except (OSError, ValueError):
+                continue
 
 
 app.add_typer(surface_app, name="surface")

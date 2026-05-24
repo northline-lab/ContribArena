@@ -144,6 +144,23 @@ class FakeFailingAgent:
         raise AgentError("synthetic agent failure")
 
 
+class FakeInterruptedAgent:
+    def run(
+        self,
+        config: RunConfig,
+        tools: object,
+        prompt: str,
+        model_provider: object = None,
+        **kwargs: object,
+    ) -> AgentFinalResult:
+        tools.aci_goal_update(  # type: ignore[attr-defined]
+            "Investigate a low-risk contribution.",
+            "active",
+            scope="contribution",
+        )
+        raise KeyboardInterrupt()
+
+
 class FakeProviderErrorAgent:
     def run(
         self,
@@ -3010,6 +3027,55 @@ class RunnerM02Test(unittest.TestCase):
             summary = json.loads((result.run_dir / "run_summary.json").read_text())
             self.assertEqual("season_0:gpt-5.5", summary["agent"]["participant_id"])
             self.assertEqual("responses/gpt55", summary["model"])
+
+    def test_interrupted_ranked_run_finalizes_without_judgement_or_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _config(tmp_path / "runs")
+            config.run.season_id = "season_0"
+            config.run.participant_id = "season_0:local-stub"
+            config.run.wake_source = "manual"
+            config.season = SeasonConfig(
+                id="season_0",
+                name="Season 0",
+                status="active",
+                state_root=tmp_path / "seasons",
+                participants=[SeasonParticipantConfig(model="local-stub")],
+            )
+
+            with self.assertRaises(KeyboardInterrupt):
+                _run_with_fake_docker(FakeInterruptedAgent(), config, tmp_path)
+
+            run_dirs = sorted((tmp_path / "runs").glob("*"))
+            self.assertEqual(1, len(run_dirs))
+            run_dir = run_dirs[0]
+            terminal = json.loads((run_dir / "terminal_state.json").read_text())
+            summary = json.loads((run_dir / "run_summary.json").read_text())
+            participant_state = json.loads(
+                (
+                    tmp_path
+                    / "seasons"
+                    / "season_0"
+                    / "participants"
+                    / "season_0:local-stub"
+                    / "participant_state.json"
+                ).read_text(encoding="utf-8")
+            )
+
+            self.assertEqual("failed", terminal["status"])
+            self.assertEqual("run_interrupted", terminal["reason"])
+            self.assertEqual("run", terminal["layer"])
+            self.assertEqual("run_interrupted", summary["submission_outcome"])
+            self.assertFalse(summary["ranking_eligible"])
+            self.assertEqual("submission_run_interrupted", summary["ranking_exclusion_reason"])
+            self.assertFalse((run_dir / "judgement.json").exists())
+            self.assertFalse((run_dir / "replacement_state.json").exists())
+            self.assertEqual(1, participant_state["runs_count"])
+            self.assertEqual(1, participant_state["failures"])
+            self.assertEqual(0, participant_state["active_runs"])
+            self.assertEqual("failed", participant_state["last_run_status"])
+            self.assertEqual("interrupted", participant_state["pending_run"]["status"])
+            self.assertEqual("interrupted", participant_state["interrupted_run"]["status"])
 
     def test_manual_season_run_repairs_empty_persisted_season_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

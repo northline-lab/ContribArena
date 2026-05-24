@@ -266,6 +266,8 @@ def _submission_outcome(run_dir: Path, terminal: TerminalState) -> str:
         for row in rows
     ):
         return "no_pr_infrastructure_failure"
+    if terminal.reason == "run_interrupted":
+        return "run_interrupted"
     if terminal.layer == "model_runtime":
         return "no_pr_provider_failure"
     if rows or terminal.reason.startswith("live_pr"):

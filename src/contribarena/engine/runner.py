@@ -60,6 +60,7 @@ from contribarena.engine.seasons import (
     SeasonStore,
     mark_live_submission_retry_due,
     mark_participant_replacement_due,
+    mark_participant_run_interrupted,
     mark_participant_run_finished,
     mark_participant_run_started,
     participant_memory_root,
@@ -531,6 +532,25 @@ class Runner:
                 terminal_reason=terminal.reason,
                 terminal_layer=terminal.layer,
             )
+        except (KeyboardInterrupt, SystemExit) as exc:
+            terminal = _terminal_state_for_interruption(exc)
+            _finalize_interrupted_run(
+                artifacts=artifacts,
+                config=config,
+                run_id=run_id,
+                repo_slug=repo_slug,
+                terminal=terminal,
+                trace=trace,
+                operator=operator,
+                capture=capture,
+                memory=memory,
+                goals=goals,
+                workspace=workspace,
+                workspace_started=workspace_started,
+                workspace_finalized=workspace_finalized,
+            )
+            workspace_finalized = workspace_started
+            raise
         except Exception as exc:
             terminal = _terminal_state_for_exception(exc)
             operator.write(
@@ -2885,6 +2905,87 @@ def _terminal_state_for_exception(exc: Exception) -> TerminalState:
         layer="unknown",
         message=str(exc),
     )
+
+
+def _terminal_state_for_interruption(exc: BaseException) -> TerminalState:
+    message = str(exc).strip()
+    if not message:
+        message = "run was interrupted before reaching terminal state"
+    return TerminalState(
+        status="failed",
+        reason="run_interrupted",
+        layer="run",
+        message=message,
+        harness_status="failed",
+    )
+
+
+def _finalize_interrupted_run(
+    *,
+    artifacts: ArtifactWriter,
+    config: RunConfig,
+    run_id: str,
+    repo_slug: str,
+    terminal: TerminalState,
+    trace: TraceWriter,
+    operator: OperatorProgressWriter,
+    capture: ArtifactCapture,
+    memory: MemoryService,
+    goals: GoalService,
+    workspace: DockerWorkspaceManager,
+    workspace_started: bool,
+    workspace_finalized: bool,
+) -> None:
+    try:
+        operator.write(
+            "run",
+            terminal.status,
+            f"run interrupted before normal completion: {terminal.reason}",
+            evidence=["terminal_state.json", "trace.jsonl"],
+            payload=terminal.model_dump(mode="json"),
+        )
+        trace.write(
+            RunState.AGENT_ERROR,
+            "run.interrupted",
+            terminal.model_dump(mode="json"),
+        )
+        _write_capture_artifacts(artifacts, capture)
+        artifacts.write_text("patch.diff", _submitted_patch(capture), kind="diff")
+        artifacts.write_text("test_log.txt", _command_log(capture.commands), required=False)
+        artifacts.write_json("terminal_state.json", terminal.model_dump(mode="json"))
+        artifacts.write_markdown(
+            "quality_report.md",
+            _failure_quality_report(terminal, capture),
+            required=False,
+        )
+        _write_memory_artifacts(artifacts, memory, terminal)
+        _write_goal_artifacts(artifacts, goals)
+        trace.write(
+            RunState.RUN_TERMINAL,
+            "run.terminal",
+            terminal.model_dump(mode="json"),
+        )
+        trace.write(
+            RunState.RUN_COMPLETED,
+            "run.completed",
+            {
+                "status": terminal.status,
+                "terminal_reason": terminal.reason,
+                "terminal_layer": terminal.layer,
+            },
+        )
+        _write_run_summary_artifact(artifacts, config, run_id, repo_slug, terminal)
+        artifacts.finalize_manifest()
+        if workspace_started and not workspace_finalized:
+            _finalize_workspace(workspace, trace, terminal, config.workspace.cleanup_policy)
+    finally:
+        mark_participant_run_interrupted(
+            config,
+            run_id=run_id,
+            repo_slug=repo_slug,
+            message=terminal.message,
+            latest_goal_summary=_latest_goal_summary(goals),
+        )
 
 
 def _enforce_issue_completion(
