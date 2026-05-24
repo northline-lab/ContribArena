@@ -677,7 +677,7 @@ def _add_quality_check(
     passed: bool,
     detail: str,
 ) -> None:
-    checks.append(QualityGateCheck(name=name, status="pass" if passed else "fail", detail=detail))
+    checks.append(QualityGateCheck(name=name, status="pass" if passed else "block", detail=detail))
     if not passed:
         blockers.append(detail)
 
