@@ -193,6 +193,7 @@ def create_app(
                 "runs": status.runs,
                 "db_path": str(status.db_path),
                 "input_dir": str(status.input_dir),
+                "refresh": watcher.diagnostics(),
             },
             "heartbeat": {
                 **heartbeat,
@@ -308,6 +309,12 @@ class _ReadModelWatcher:
         self.debounce_seconds = debounce_seconds
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._last_refresh_at = ""
+        self._last_success_at = ""
+        self._last_error_at = ""
+        self._last_error = ""
+        self._last_error_type = ""
 
     def start(self) -> None:
         if self._thread is not None:
@@ -341,10 +348,33 @@ class _ReadModelWatcher:
                 self._refresh_safely()
 
     def _refresh_safely(self) -> None:
+        now = datetime.now(UTC).isoformat()
+        with self._lock:
+            self._last_refresh_at = now
         try:
             self.model.refresh_from_artifacts(self.input_dir)
-        except Exception:
+        except Exception as exc:
+            with self._lock:
+                self._last_error_at = now
+                self._last_error_type = type(exc).__name__
+                self._last_error = str(exc)[:1000]
             return
+        with self._lock:
+            self._last_success_at = now
+            self._last_error_at = ""
+            self._last_error_type = ""
+            self._last_error = ""
+
+    def diagnostics(self) -> dict[str, object]:
+        with self._lock:
+            return {
+                "watch_enabled": self._thread is not None,
+                "last_refresh_at": self._last_refresh_at,
+                "last_success_at": self._last_success_at,
+                "last_error_at": self._last_error_at,
+                "last_error_type": self._last_error_type,
+                "last_error": redact_text(self._last_error, max_chars=1000) if self._last_error else "",
+            }
 
 
 def _artifact_signature(path: Path) -> str:

@@ -813,6 +813,42 @@ class GovernanceM04Test(unittest.TestCase):
             self.assertEqual("2026-01-01T00:00:00+00:00", state["previous_last_wake_at"])
             self.assertNotEqual(state["previous_last_wake_at"], state["last_wake_at"])
 
+    def test_participant_state_write_uses_atomic_replace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _owned_config(live_enabled=True, output_root=tmp_path / "runs")
+            config.season = SeasonConfig(
+                id="season_0",
+                status="active",
+                state_root=tmp_path / "seasons",
+                participants=[SeasonParticipantConfig(id="season_0:gpt", model="responses/gpt55")],
+            )
+            store = SeasonStore.from_config(config)
+            participant_dir = store.participant_dir("season_0", "season_0:gpt")
+            participant_dir.mkdir(parents=True)
+            state_path = participant_dir / "participant_state.json"
+            state_path.write_text(json.dumps({"active_runs": 7}) + "\n", encoding="utf-8")
+
+            def fail_tmp_write(self: Path, text: str, encoding: str | None = None) -> int:
+                if self.name.endswith(".tmp"):
+                    raise OSError("simulated tmp write failure")
+                return original_write_text(self, text, encoding=encoding)
+
+            original_write_text = Path.write_text
+            with patch("pathlib.Path.write_text", fail_tmp_write):
+                with self.assertRaises(OSError):
+                    mark_participant_run_started(
+                        store,
+                        "season_0",
+                        "season_0:gpt",
+                        run_id="run-a",
+                        repo_slug="example/repo",
+                        wake_source="auto",
+                    )
+
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual({"active_runs": 7}, state)
+
     def test_live_submission_retry_is_dispatched_before_normal_wake(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

@@ -180,7 +180,7 @@ class SeasonStore:
         )
         path = self.state_path(season_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        _atomic_write_text(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
         return state
 
     def record_heartbeat_started(
@@ -223,7 +223,7 @@ class SeasonStore:
         )
         path = self.state_path(season_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        _atomic_write_text(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
         return state
 
     def record_heartbeat_completed(
@@ -271,7 +271,7 @@ class SeasonStore:
         )
         path = self.state_path(season_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        _atomic_write_text(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
         return state
 
     def record_runtime_status(
@@ -307,7 +307,7 @@ class SeasonStore:
         )
         path = self.state_path(season_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        _atomic_write_text(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
         return state
 
     def _load_state(self, season_id: str) -> dict[str, Any]:
@@ -433,7 +433,7 @@ def save_participant_state(
 ) -> None:
     path = store.participant_dir(season_id, participant_id) / "participant_state.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _atomic_write_text(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
 
 
 def mark_participant_replacement_due(
@@ -809,7 +809,7 @@ def mark_participant_run_finished(
         state["live_submission_retry_due"] = False
     if latest_goal_summary:
         state["latest_goal_summary"] = latest_goal_summary[:1000]
-    path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _atomic_write_text(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
 
 
 def mark_participant_run_interrupted(
@@ -863,7 +863,7 @@ def mark_participant_run_interrupted(
         state["pending_run"] = pending
     if latest_goal_summary:
         state["latest_goal_summary"] = latest_goal_summary[:1000]
-    path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _atomic_write_text(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
 
 
 def _participant_pr_counts(path: Path) -> dict[str, int]:

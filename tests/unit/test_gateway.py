@@ -12,6 +12,7 @@ from contribarena.engine.gateway import (
     GatewayPaths,
     _participant_ranking_state,
     _doctor_runtime_state,
+    _run_log_path,
     _write_gateway_state,
     load_gateway_state,
     resolve_gateway_paths,
@@ -21,6 +22,7 @@ from contribarena.engine.gateway import (
 )
 from contribarena.config import load_run_config
 from contribarena.config.schema import ArtifactConfig, DiscoveryConfig, RepoCandidate, RunConfig, RunSection, WorkspaceConfig
+from contribarena.engine.read_model import SurfaceReadModel
 from contribarena.errors import ContribArenaError
 
 
@@ -138,6 +140,23 @@ class GatewayLifecycleTests(unittest.TestCase):
         self.assertEqual("warning", exhausted.status)
         self.assertEqual([], DoctorResult(checks).failed)
 
+    def test_run_log_path_prefers_read_model_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = _paths(root / "config.yaml")
+            indexed_run = root / "outside-artifact-root" / "run-a"
+            indexed_run.mkdir(parents=True)
+            (indexed_run / "operator_events.jsonl").write_text("indexed\n", encoding="utf-8")
+            (indexed_run / "run_summary.json").write_text(
+                json.dumps(_run_summary_payload("run-a", indexed_run), ensure_ascii=True) + "\n",
+                encoding="utf-8",
+            )
+            paths.artifact_root.mkdir(parents=True)
+
+            SurfaceReadModel(paths.read_model_path).refresh_from_artifacts(indexed_run.parent)
+
+            self.assertEqual(indexed_run / "operator_events.jsonl", _run_log_path(paths, "run-a"))
+
 
 def _paths(config_path: Path) -> GatewayPaths:
     root = config_path.parent
@@ -193,6 +212,25 @@ def _minimal_config() -> RunConfig:
         workspace=WorkspaceConfig(),
         artifacts=ArtifactConfig(output_root=Path("runs")),
     )
+
+
+def _run_summary_payload(run_id: str, run_dir: Path) -> dict[str, object]:
+    return {
+        "schema_version": "1",
+        "run_id": run_id,
+        "run_dir": str(run_dir),
+        "season": {"id": "season_0", "name": "Season 0", "phase": "active"},
+        "agent": {"name": "agent-a", "handle": "agent-a", "participant_id": "season_0:agent-a"},
+        "repository": {"full_name": "example/repo", "url": "https://github.com/example/repo"},
+        "started_at": "2026-05-15T00:00:00Z",
+        "completed_at": "2026-05-15T00:01:00Z",
+        "duration_seconds": 60,
+        "run_status": "completed",
+        "terminal_reason": "run_completed",
+        "terminal_layer": "run",
+        "judgement": {"status": "not_judged"},
+        "artifacts": [],
+    }
 
 
 if __name__ == "__main__":

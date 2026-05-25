@@ -16,6 +16,7 @@ from contribarena.config.schema import (
     WorkspaceConfig,
 )
 from contribarena.engine.api import (
+    _ReadModelWatcher,
     _find_run_dir,
     _judgement_summary,
     _operator_counts,
@@ -204,6 +205,26 @@ class BackendReadApiTests(unittest.TestCase):
 
         self.assertEqual(81.5, top[0]["mean_arena_score"])
         self.assertNotIn("arena_score", top[0])
+
+    def test_read_model_watcher_exposes_refresh_errors(self) -> None:
+        class FailingModel:
+            def refresh_from_artifacts(self, _input_dir: Path) -> None:
+                raise RuntimeError("boom secret-token-value")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            watcher = _ReadModelWatcher(
+                model=FailingModel(),  # type: ignore[arg-type]
+                input_dir=Path(tmp),
+                debounce_seconds=1.0,
+            )
+
+            watcher._refresh_safely()
+
+            diagnostics = watcher.diagnostics()
+            self.assertEqual("RuntimeError", diagnostics["last_error_type"])
+            self.assertIn("boom", str(diagnostics["last_error"]))
+            self.assertNotEqual("", diagnostics["last_refresh_at"])
+            self.assertEqual("", diagnostics["last_success_at"])
 
     def test_read_model_dedupes_pr_lifecycle_observations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

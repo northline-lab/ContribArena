@@ -710,7 +710,7 @@ class GatewayLogger:
 def tail_log(paths: GatewayPaths, *, target: str = "all", run_id: str | None = None, lines: int = 80) -> str:
     selected: list[tuple[str, Path]] = []
     if run_id:
-        run_path = _run_log_path(paths.artifact_root, run_id)
+        run_path = _run_log_path(paths, run_id)
         if run_path:
             selected.append((f"run:{run_id}", run_path))
     elif target == "gateway":
@@ -1321,8 +1321,13 @@ def _tail(path: Path, lines: int) -> list[str]:
         return [f"(unreadable: {path}: {exc})"]
 
 
-def _run_log_path(artifact_root: Path, run_id: str) -> Path | None:
-    for path in artifact_root.rglob("run_summary.json"):
+def _run_log_path(paths: GatewayPaths, run_id: str) -> Path | None:
+    if paths.read_model_path.exists():
+        run_dir = SurfaceReadModel(paths.read_model_path).run_dir(run_id)
+        if run_dir is not None:
+            events = run_dir / "operator_events.jsonl"
+            return events if events.exists() else run_dir / "run_summary.json"
+    for path in paths.artifact_root.rglob("run_summary.json"):
         try:
             payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
         except (OSError, json.JSONDecodeError):
