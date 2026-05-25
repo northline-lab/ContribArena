@@ -38,18 +38,49 @@ from contribarena.errors import ContribArenaError
 
 
 class GatewayLifecycleTests(unittest.TestCase):
-    def test_restart_does_not_start_when_stop_times_out(self) -> None:
+    def test_restart_does_not_start_when_stop_fails(self) -> None:
         paths = _paths(Path("/tmp/contribarena-test/config.yaml"))
-        stopping = GatewayCommandResult("stopping", "still stopping", paths, pid=123)
+        stopping = GatewayCommandResult("stop_failed", "still running", paths, pid=123)
 
         with (
             patch("contribarena.engine.gateway.stop_gateway", return_value=stopping),
             patch("contribarena.engine.gateway.start_gateway") as start,
         ):
-            with self.assertRaisesRegex(ContribArenaError, "still stopping"):
+            with self.assertRaisesRegex(ContribArenaError, "still running"):
                 restart_gateway(config_path=paths.config_path)
 
         start.assert_not_called()
+
+    def test_stop_gateway_force_kills_after_graceful_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = _write_config(Path(tmp))
+            config = load_run_config(config_path)
+            paths = resolve_gateway_paths(config_path, config)
+            paths.control_root.mkdir(parents=True)
+            paths.log_root.mkdir(parents=True)
+            paths.pid_path.write_text("111\n", encoding="utf-8")
+            paths.state_path.write_text(
+                json.dumps({"status": "running", "pid": 111, "api_pid": 222}),
+                encoding="utf-8",
+            )
+
+            with (
+                patch("contribarena.engine.gateway.os.kill") as kill,
+                patch("contribarena.engine.gateway.time.sleep", return_value=None),
+                patch("contribarena.engine.gateway.time.monotonic", side_effect=[0.0, 2.0]),
+                patch("contribarena.engine.gateway._pid_alive", return_value=True),
+                patch("contribarena.engine.gateway._kill_pid", return_value=True) as force_kill,
+                patch("contribarena.engine.gateway._terminate_pid", return_value=True) as terminate,
+            ):
+                result = stop_gateway(config_path=config_path, timeout_seconds=1)
+
+            self.assertEqual("force_stopped", result.status)
+            self.assertFalse(paths.pid_path.exists())
+            self.assertIsNone(load_gateway_state(paths).get("pid"))
+            self.assertIsNone(load_gateway_state(paths).get("api_pid"))
+            force_kill.assert_called_once_with(111)
+            terminate.assert_called_once_with(222, timeout_seconds=5)
+            kill.assert_called_once()
 
     def test_stop_stale_gateway_cleans_recorded_api_pid(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

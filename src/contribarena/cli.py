@@ -1398,13 +1398,13 @@ def _state_style(value: str) -> str:
     text = value.lower()
     if text in {"ok", "running", "due", "started", "active", "counted"}:
         return "green"
-    if text in {"waiting", "sleeping", "stopped", "already_running", "starting"}:
+    if text in {"waiting", "sleeping", "stopped", "already_running", "starting", "force_stopped"}:
         return "blue"
     if text in {"retry", "deferred", "replacement", "warning", "stopping", "sleeping_after_error"}:
         return "yellow"
     if text in {"blocked"}:
         return "magenta"
-    if text in {"failed", "error", "exhausted"}:
+    if text in {"failed", "error", "exhausted", "stop_failed"}:
         return "red"
     if text in {"skipped", "none", "missing"}:
         return "dim"

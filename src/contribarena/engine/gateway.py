@@ -220,12 +220,31 @@ def stop_gateway(*, config_path: Path, timeout_seconds: int = 30) -> GatewayComm
                 state=state,
             )
         time.sleep(0.25)
-    return GatewayCommandResult(
-        "stopping",
-        _gateway_stop_message(f"Gateway stop requested pid={pid}; process is still exiting.", config, paths),
+    force_stopped = _kill_pid(pid)
+    _safe_unlink(paths.pid_path)
+    _terminate_pid(api_pid, timeout_seconds=5)
+    _write_gateway_state(
         paths,
-        pid=pid,
-        state=load_gateway_state(paths),
+        {
+            "status": "force_stopped" if force_stopped else "stop_failed",
+            "pid": None,
+            "api_pid": None,
+            "updated_at": _now(),
+        },
+    )
+    state = load_gateway_state(paths)
+    status = "force_stopped" if force_stopped else "stop_failed"
+    message = (
+        f"Gateway force stopped pid={pid} after timeout."
+        if force_stopped
+        else f"Gateway stop timed out and force stop failed pid={pid}."
+    )
+    return GatewayCommandResult(
+        status,
+        _gateway_stop_message(message, config, paths),
+        paths,
+        pid=None if force_stopped else pid,
+        state=state,
     )
 
 
@@ -238,7 +257,7 @@ def restart_gateway(
     verbose: bool = False,
 ) -> GatewayCommandResult:
     stopped = stop_gateway(config_path=config_path)
-    if stopped.status == "stopping":
+    if stopped.status == "stop_failed":
         raise ContribArenaError(stopped.message)
     return start_gateway(
         config_path=config_path,
@@ -1311,6 +1330,21 @@ def _terminate_pid(pid: int | None, *, timeout_seconds: int = 5) -> bool:
     except OSError:
         return False
     return True
+
+
+def _kill_pid(pid: int | None) -> bool:
+    if pid is None or not _pid_alive(pid):
+        return False
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        return False
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if not _pid_alive(pid):
+            return True
+        time.sleep(0.1)
+    return not _pid_alive(pid)
 
 
 def _safe_unlink(path: Path) -> None:
