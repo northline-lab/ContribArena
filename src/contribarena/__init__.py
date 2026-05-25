@@ -1,4 +1,4 @@
-"""ContribArena M0.0 skeleton package."""
+"""ContribArena -- harness for autonomous open-source contribution agents."""
 
 __all__ = ["__version__"]
 
