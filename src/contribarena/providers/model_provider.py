@@ -255,7 +255,25 @@ def _parse_response_string(payload: str) -> object | None:
     try:
         parsed = json.loads(stripped)
     except json.JSONDecodeError:
-        return None
+        return _ResponsePayload(
+            output=[
+                ResponseOutputMessage(
+                    id="msg_0",
+                    type="message",
+                    status="completed",
+                    role="assistant",
+                    content=[
+                        ResponseOutputText(
+                            type="output_text",
+                            text=payload,
+                            annotations=[],
+                        )
+                    ],
+                )
+            ],
+            id="",
+            usage=None,
+        )
     if not isinstance(parsed, dict):
         return None
     output = parsed.get("output")
@@ -283,7 +301,25 @@ def _parse_response_string(payload: str) -> object | None:
             id=response_id if isinstance(response_id, str) else "",
             usage=parsed.get("usage"),
         )
-    return None
+    return _ResponsePayload(
+        output=[
+            ResponseOutputMessage(
+                id="msg_0",
+                type="message",
+                status="completed",
+                role="assistant",
+                content=[
+                    ResponseOutputText(
+                        type="output_text",
+                        text=payload,
+                        annotations=[],
+                    )
+                ],
+            )
+        ],
+        id=response_id if isinstance(response_id, str) else "",
+        usage=parsed.get("usage"),
+    )
 
 
 class _ResponsePayload:

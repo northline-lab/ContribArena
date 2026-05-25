@@ -124,13 +124,13 @@ class ContribArenaModelProviderTest(unittest.TestCase):
 
         self.assertEqual("medium", settings.reasoning.effort)
 
-    def test_responses_model_rejects_non_response_payloads_clearly(self) -> None:
+    def test_responses_model_rejects_non_response_object_payloads_clearly(self) -> None:
         class FakeResponsesModel(SafeOpenAIResponsesModel):
             def __init__(self) -> None:
                 pass
 
             async def _fetch_response(self, *args, **kwargs):  # type: ignore[no-untyped-def]
-                return "not a response object"
+                return 123
 
         async def call_model() -> None:
             await FakeResponsesModel().get_response(
@@ -169,6 +169,30 @@ class ContribArenaModelProviderTest(unittest.TestCase):
 
         self.assertEqual("resp_1", response.response_id)
         self.assertEqual("hello", response.output[0].content[0].text)
+
+    def test_responses_model_accepts_plain_string_text_payload(self) -> None:
+        class FakeResponsesModel(SafeOpenAIResponsesModel):
+            def __init__(self) -> None:
+                pass
+
+            async def _fetch_response(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+                return "plain assistant text"
+
+        async def call_model() -> ModelResponse:
+            return await FakeResponsesModel().get_response(
+                system_instructions=None,
+                input="hello",
+                model_settings=ModelSettings(),
+                tools=[],
+                output_schema=None,
+                handoffs=[],
+                tracing=None,
+            )
+
+        response = asyncio.run(call_model())
+
+        self.assertEqual("", response.response_id)
+        self.assertEqual("plain assistant text", response.output[0].content[0].text)
 
     def test_resolves_anthropic_prefix_to_messages_adapter(self) -> None:
         provider = ContribArenaModelProvider(
