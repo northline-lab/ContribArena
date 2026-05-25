@@ -523,6 +523,7 @@ class Runner:
                 status=terminal.status,
                 repo_slug=repo_slug,
                 latest_goal_summary=_latest_goal_summary(goals),
+                suppress_wake_cooldown=_provider_infrastructure_terminal(terminal),
             )
             return RunResult(
                 run_id=run_id,
@@ -618,6 +619,7 @@ class Runner:
                 status=terminal.status,
                 repo_slug=repo_slug,
                 latest_goal_summary=_latest_goal_summary(goals),
+                suppress_wake_cooldown=_provider_infrastructure_terminal(terminal),
             )
             raise
         finally:
@@ -1337,6 +1339,40 @@ def _replacement_due_terminal(terminal: TerminalState) -> bool:
     if terminal.layer != "model_runtime":
         return False
     return _transient_runtime_message(terminal.message)
+
+
+def _provider_infrastructure_terminal(terminal: TerminalState) -> bool:
+    if terminal.layer != "model_runtime":
+        return False
+    return _provider_infrastructure_message(terminal.message)
+
+
+def _provider_infrastructure_message(message: str) -> bool:
+    text = message.lower()
+    return any(
+        marker in text
+        for marker in (
+            "insufficient_balance",
+            "insufficient account balance",
+            "quota exceeded",
+            "insufficient quota",
+            "rate limit exceeded",
+            "billing",
+            "payment required",
+            "permissiondenied",
+            "permission denied",
+            "unauthorized",
+            "forbidden",
+            "invalid api key",
+            "api key invalid",
+            "authentication",
+            "auth failed",
+            "401",
+            "402",
+            "403",
+            "429",
+        )
+    )
 
 
 def _transient_runtime_message(message: str) -> bool:

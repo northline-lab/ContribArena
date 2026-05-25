@@ -39,6 +39,7 @@ from contribarena.engine.runner import (
     Runner,
     _build_assistant_update,
     _owned_live_push_command,
+    _provider_infrastructure_message,
     _replacement_due_terminal,
     _transient_runtime_message,
 )
@@ -206,6 +207,22 @@ class FakeProviderServerErrorAgent:
             content="Provider invocation failed: empty request.",
             stopped_reason="provider_error",
             error_message="Error code: 500 - {'code': 500, 'message': '请求参数不能为空', 'success': False}",
+        )
+
+
+class FakeProviderBillingErrorAgent:
+    def run(
+        self,
+        config: RunConfig,
+        tools: object,
+        prompt: str,
+        model_provider: object = None,
+        **kwargs: object,
+    ) -> AgentInvocationResult:
+        return AgentInvocationResult(
+            content="Provider invocation failed: insufficient balance.",
+            stopped_reason="provider_error",
+            error_message="Error code: 403 - {'code': 'INSUFFICIENT_BALANCE'}",
         )
 
 
@@ -2235,6 +2252,38 @@ class RunnerM02Test(unittest.TestCase):
             self.assertEqual("due", summary["replacement"]["status"])
             self.assertEqual("not_judged", summary["judgement"]["status"])
 
+    def test_provider_infrastructure_failure_does_not_advance_auto_wake_clock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _config(tmp_path / "runs")
+            config.run.season_id = "season_0"
+            config.run.participant_id = "season_0:gpt-5.5"
+            config.run.wake_source = "auto"
+            config.season = SeasonConfig(
+                id="season_0",
+                name="Season 0",
+                status="active",
+                state_root=tmp_path / "seasons",
+                participants=[SeasonParticipantConfig(id="season_0:gpt-5.5", model="responses/gpt55")],
+            )
+            store = SeasonStore.from_config(config)
+            participant_dir = store.participant_dir("season_0", "season_0:gpt-5.5")
+            participant_dir.mkdir(parents=True)
+            state_path = participant_dir / "participant_state.json"
+            state_path.write_text(
+                json.dumps({"last_wake_at": "2026-01-01T00:00:00+00:00"}) + "\n",
+                encoding="utf-8",
+            )
+
+            _run_with_fake_docker(FakeProviderBillingErrorAgent(), config, tmp_path)
+
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual("2026-01-01T00:00:00+00:00", state["last_wake_at"])
+            self.assertEqual(0, state["active_runs"])
+            self.assertEqual(state["last_run_id"], state["wake_cooldown_suppressed_run_id"])
+            self.assertEqual("completed", state["pending_run"]["status"])
+            self.assertNotIn("previous_last_wake_at", state)
+
     def test_transient_runtime_message_markers_are_conservative(self) -> None:
         self.assertTrue(_transient_runtime_message("APIConnectionError: Connection error."))
         self.assertTrue(_transient_runtime_message("Gateway timeout from provider"))
@@ -2245,6 +2294,13 @@ class RunnerM02Test(unittest.TestCase):
         self.assertFalse(_transient_runtime_message("HTTP 400 bad request"))
         self.assertFalse(_transient_runtime_message("context_length_exceeded"))
         self.assertFalse(_transient_runtime_message("unsupported tool format"))
+
+    def test_provider_infrastructure_message_matches_billing_and_auth_only(self) -> None:
+        self.assertTrue(_provider_infrastructure_message("INSUFFICIENT_BALANCE"))
+        self.assertTrue(_provider_infrastructure_message("PermissionDeniedError: invalid api key"))
+        self.assertTrue(_provider_infrastructure_message("HTTP 429 rate limit exceeded"))
+        self.assertFalse(_provider_infrastructure_message("HTTP 500 internal server error"))
+        self.assertFalse(_provider_infrastructure_message("APIConnectionError: connection reset"))
 
     def test_pr_publish_failure_does_not_trigger_participant_replacement(self) -> None:
         terminal = TerminalState(

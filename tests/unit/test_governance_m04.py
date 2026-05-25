@@ -772,6 +772,47 @@ class GovernanceM04Test(unittest.TestCase):
             self.assertEqual("manual", state["last_wake_source"])
             self.assertEqual("manual-run", state["pending_run"]["run_id"])
 
+    def test_auto_run_started_preserves_previous_wake_for_possible_cooldown_suppression(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _owned_config(live_enabled=True, output_root=tmp_path / "runs")
+            config.season = SeasonConfig(
+                id="season_0",
+                status="active",
+                state_root=tmp_path / "seasons",
+                participants=[SeasonParticipantConfig(id="season_0:gpt", model="responses/gpt55")],
+            )
+            store = SeasonStore.from_config(config)
+            participant_dir = store.participant_dir("season_0", "season_0:gpt")
+            participant_dir.mkdir(parents=True)
+            state_path = participant_dir / "participant_state.json"
+            state_path.write_text(
+                json.dumps({"last_wake_at": "2026-01-01T00:00:00+00:00"}) + "\n",
+                encoding="utf-8",
+            )
+
+            mark_participant_run_started(
+                store,
+                "season_0",
+                "season_0:gpt",
+                run_id="pending",
+                repo_slug="example/repo",
+                wake_source="auto",
+                increment_active=False,
+            )
+            mark_participant_run_started(
+                store,
+                "season_0",
+                "season_0:gpt",
+                run_id="real-run",
+                repo_slug="example/repo",
+                wake_source="auto",
+            )
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+
+            self.assertEqual("2026-01-01T00:00:00+00:00", state["previous_last_wake_at"])
+            self.assertNotEqual(state["previous_last_wake_at"], state["last_wake_at"])
+
     def test_live_submission_retry_is_dispatched_before_normal_wake(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

@@ -203,15 +203,7 @@ def create_app(
             "latest_run": latest_run,
             "leaderboard": {
                 "entries": len(leaderboard_rows),
-                "top": [
-                    {
-                        "agent_name": row.get("agent_name"),
-                        "participant_id": row.get("participant_id"),
-                        "arena_score": row.get("arena_score"),
-                        "runs": row.get("runs"),
-                    }
-                    for row in leaderboard_rows[:5]
-                ],
+                "top": _operator_summary_leaderboard_top(leaderboard_rows),
             },
             "stuck": _stuck_diagnosis(runtime, runs, stale_after_seconds=1800),
         }
@@ -453,6 +445,18 @@ def _compact_run(run: dict[str, Any]) -> dict[str, Any]:
         "ranking_excluded": run.get("ranking_excluded"),
         "ranking_exclusion_reason": run.get("ranking_exclusion_reason"),
     }
+
+
+def _operator_summary_leaderboard_top(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "agent_name": row.get("agent_name"),
+            "participant_id": row.get("participant_id"),
+            "mean_arena_score": row.get("mean_arena_score"),
+            "runs": row.get("runs"),
+        }
+        for row in rows[:5]
+    ]
 
 
 def _operator_counts(runs: list[dict[str, Any]]) -> dict[str, object]:

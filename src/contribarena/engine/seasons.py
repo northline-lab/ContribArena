@@ -716,6 +716,9 @@ def mark_participant_run_started(
         }
     )
     if wake_source == "auto":
+        previous_last_wake_at = str(state.get("last_wake_at") or "")
+        if previous_last_wake_at and not state.get("previous_last_wake_at"):
+            state["previous_last_wake_at"] = previous_last_wake_at
         state["last_wake_at"] = now
     live_retry = state.get("live_submission_retry")
     if isinstance(live_retry, dict) and live_retry.get("status") == "due":
@@ -734,6 +737,7 @@ def mark_participant_run_finished(
     status: str,
     repo_slug: str,
     latest_goal_summary: str = "",
+    suppress_wake_cooldown: bool = False,
 ) -> None:
     path = participant_state_path(config)
     if path is None or not config.run.season_id or not config.run.participant_id:
@@ -768,6 +772,15 @@ def mark_participant_run_finished(
         pending = dict(pending)
         pending.update({"run_id": run_id, "status": "completed", "completed_at": now})
         state["pending_run"] = pending
+    if suppress_wake_cooldown and isinstance(pending, dict) and str(pending.get("wake_source") or "") == "auto":
+        previous = str(state.get("previous_last_wake_at") or "")
+        if previous:
+            state["last_wake_at"] = previous
+        else:
+            state.pop("last_wake_at", None)
+        state["wake_cooldown_suppressed_at"] = now
+        state["wake_cooldown_suppressed_run_id"] = run_id
+    state.pop("previous_last_wake_at", None)
     replacement = state.get("replacement")
     if isinstance(replacement, dict) and replacement.get("status") == "running":
         replacement = dict(replacement)

@@ -19,6 +19,7 @@ from contribarena.engine.api import (
     _find_run_dir,
     _judgement_summary,
     _operator_counts,
+    _operator_summary_leaderboard_top,
     _surface_bundle_for_season,
     _default_season_id,
     create_app,
@@ -187,6 +188,22 @@ class BackendReadApiTests(unittest.TestCase):
             self.assertEqual("judged", judgement["status"])
             self.assertEqual(72, judgement["arena_score"])
             self.assertEqual("judge-a", judgement["judges"][0]["judge_id"])  # type: ignore[index]
+
+    def test_operator_summary_leaderboard_uses_mean_arena_score(self) -> None:
+        rows = [
+            {
+                "agent_name": "agent-a",
+                "participant_id": "season_0:agent-a",
+                "mean_arena_score": 81.5,
+                "arena_score": None,
+                "runs": 2,
+            }
+        ]
+
+        top = _operator_summary_leaderboard_top(rows)
+
+        self.assertEqual(81.5, top[0]["mean_arena_score"])
+        self.assertNotIn("arena_score", top[0])
 
     def test_read_model_dedupes_pr_lifecycle_observations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
