@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+__all__ = [
+    "ContribArenaError",
+    "ConfigError",
+    "InfrastructureError",
+    "AgentError",
+    "BudgetExhausted",
+]
+
 
 class ContribArenaError(Exception):
     exit_code = 1
