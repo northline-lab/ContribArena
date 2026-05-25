@@ -4,6 +4,7 @@ import tempfile
 import json
 import unittest
 import unittest.mock
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from contribarena.config.schema import (
@@ -23,6 +24,7 @@ from contribarena.config.schema import (
 )
 from contribarena.engine import judgement as judgement_module
 from contribarena.engine.judge_refresh import (
+    JudgeRefreshResult,
     mark_transient_judgement_retry_due,
     refresh_due_judgements,
 )
@@ -603,6 +605,45 @@ class JudgementScoringTests(unittest.TestCase):
             self.assertEqual("skipped", retry["status"])
             self.assertEqual("transient_replacement_pending", retry["reason"])
             self.assertEqual("not_judged", updated["judgement"]["status"])
+
+    def test_stale_running_judgement_retry_is_recovered_as_due(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run-a"
+            run_dir.mkdir()
+            summary = {
+                "run_id": "run-a",
+                "season": {"id": "season_0"},
+                "started_at": "2026-05-22T00:00:00+00:00",
+                "run_status": "failed",
+                "judgement": {"status": "not_judged"},
+            }
+            (run_dir / "run_summary.json").write_text(
+                json.dumps(summary, indent=2, ensure_ascii=True) + "\n",
+                encoding="utf-8",
+            )
+            stale_started = (datetime.now(UTC) - timedelta(hours=3)).isoformat()
+            (run_dir / "judgement_retry_state.json").write_text(
+                json.dumps(
+                    {"status": "running", "attempts": 1, "started_at": stale_started},
+                    ensure_ascii=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with unittest.mock.patch(
+                "contribarena.engine.judge_refresh.refresh_judgement",
+                return_value=JudgeRefreshResult(runs_judged=1, skipped=[]),
+            ):
+                result = refresh_due_judgements(
+                    config=_config(Path(tmp)),
+                    input_dir=Path(tmp),
+                    season_id="season_0",
+                )
+
+            self.assertEqual(1, result.runs_judged)
+            retry = json.loads((run_dir / "judgement_retry_state.json").read_text(encoding="utf-8"))
+            self.assertIn("stale_running_recovered_at", retry)
 
 
 def _config(output_root: Path, *, explicit_judges: bool = True) -> RunConfig:

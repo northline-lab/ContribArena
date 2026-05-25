@@ -141,6 +141,24 @@ class GovernanceM04Test(unittest.TestCase):
             self.assertTrue((output_dir / "governance_state.json").exists())
             self.assertFalse((config.artifacts.output_root / "governance_state.json").exists())
 
+    def test_governance_state_write_is_atomic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _owned_config(live_enabled=True, output_root=Path(tmp))
+            state = GovernanceState(
+                attempts=[
+                    GovernanceAttempt(
+                        repository="example/repo",
+                        status="prepared",
+                        action="github.open_pr",
+                    )
+                ]
+            )
+
+            path = save_governance_state(config, state)
+
+            self.assertEqual("prepared", load_governance_state(config).attempts[0].status)
+            self.assertFalse(any(item.name.endswith(".tmp") for item in path.parent.iterdir()))
+
     def test_controller_disabled_does_not_evaluate_or_launch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = _owned_config(

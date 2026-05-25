@@ -25,6 +25,7 @@ from contribarena.engine.middleware.governance import (
     update_governance_pr_state,
     upsert_lifecycle_record,
 )
+from contribarena.engine.persistence import atomic_write_json
 from contribarena.engine.runtime_config import apply_output_dir
 from contribarena.engine.runner import RunResult, Runner
 from contribarena.engine.seasons import (
@@ -688,7 +689,7 @@ def _upsert_run_lifecycle_state(
             "records": records,
         }
     )
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    atomic_write_json(path, payload, sort_keys=True)
 
 
 def _update_run_summary_outcome(
@@ -730,7 +731,7 @@ def _update_run_summary_outcome(
         except (TypeError, ValueError):
             pass
         payload["judgement"] = judgement
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    atomic_write_json(path, payload, sort_keys=True)
 
 
 def _maintainer_outcome_from_lifecycle(record: PrLifecycleRecord) -> dict[str, str]:
@@ -804,11 +805,7 @@ def _refresh_participant_pr_counts(config: RunConfig, state: GovernanceState) ->
         config.run.season_id,
         config.run.participant_id,
     ) / "participant_state.json"
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(
-        json.dumps(participant_state, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_json(state_path, participant_state, sort_keys=True)
 
 
 def _append_external_lifecycle_log(

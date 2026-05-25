@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -14,6 +13,7 @@ from typing import Any, Literal
 import yaml
 
 from contribarena.config.schema import RunConfig, SeasonConfig, SeasonParticipantConfig
+from contribarena.engine.persistence import atomic_write_text
 from contribarena.errors import ConfigError
 
 
@@ -994,6 +994,4 @@ def season_is_completed(config: RunConfig) -> bool:
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write_text(path, text)

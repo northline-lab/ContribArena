@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from contribarena.config.schema import RunConfig
@@ -11,6 +12,8 @@ from contribarena.engine.judgement import (
     judge_run,
 )
 from contribarena.engine.operator_events import OperatorProgressWriter
+from contribarena.engine.persistence import atomic_write_json
+from contribarena.engine.read_model import SurfaceReadModel
 from contribarena.engine.runner import _judgement_progress_reporter
 from contribarena.engine.surface_summary import _judgement
 from contribarena.errors import InfrastructureError
@@ -32,6 +35,7 @@ TRANSIENT_JUDGE_MARKERS = (
     "gateway timeout",
 )
 MAX_JUDGEMENT_RETRY_ATTEMPTS = 3
+STALE_RUNNING_JUDGEMENT_RETRY_SECONDS = 2 * 60 * 60
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,7 @@ def refresh_judgement(
 ) -> JudgeRefreshResult:
     run_dirs = _target_run_dirs(
         input_dir=input_dir,
+        read_model_path=config.backend.read_model_path,
         run_id=run_id,
         all_unjudged=all_unjudged,
         force=force,
@@ -182,6 +187,7 @@ def refresh_due_judgements(
             skipped.append(f"{run_dir}: skipped judgement for transient replacement")
             continue
         state["status"] = "running"
+        state["started_at"] = datetime.now(UTC).isoformat()
         _write_json(run_dir / "judgement_retry_state.json", state)
         try:
             result = refresh_judgement(
@@ -239,7 +245,13 @@ def _due_judgement_run_dirs(input_dir: Path, *, season_id: str | None) -> list[P
     rows: list[tuple[str, Path]] = []
     for state_path in sorted(input_dir.rglob("judgement_retry_state.json")):
         state = _read_json(state_path)
-        if str(state.get("status") or "") != "due":
+        status = str(state.get("status") or "")
+        if status == "running" and _running_retry_is_stale(state):
+            status = "due"
+            state["status"] = "due"
+            state["stale_running_recovered_at"] = datetime.now(UTC).isoformat()
+            _write_json(state_path, state)
+        if status != "due":
             continue
         run_dir = state_path.parent
         summary_path = run_dir / "run_summary.json"
@@ -273,6 +285,7 @@ def _transient_text(text: str) -> bool:
 def _target_run_dirs(
     *,
     input_dir: Path,
+    read_model_path: Path,
     run_id: str | None,
     all_unjudged: bool,
     force: bool,
@@ -280,6 +293,9 @@ def _target_run_dirs(
     if not input_dir.exists():
         raise InfrastructureError(f"judge input directory does not exist: {input_dir}")
     if run_id:
+        indexed = _indexed_run_dir(read_model_path, run_id)
+        if indexed is not None:
+            return [indexed]
         matches = [
             path.parent
             for path in input_dir.rglob("run_summary.json")
@@ -344,4 +360,28 @@ def _read_json(path: Path) -> dict[str, object]:
 
 
 def _write_json(path: Path, payload: object) -> None:
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    atomic_write_json(path, payload, ensure_ascii=True)
+
+
+def _running_retry_is_stale(state: dict[str, object]) -> bool:
+    started_at = str(state.get("started_at") or "")
+    if not started_at:
+        return True
+    try:
+        started = datetime.fromisoformat(started_at)
+    except ValueError:
+        return True
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=UTC)
+    return datetime.now(UTC) - started >= timedelta(
+        seconds=STALE_RUNNING_JUDGEMENT_RETRY_SECONDS
+    )
+
+
+def _indexed_run_dir(read_model_path: Path, run_id: str) -> Path | None:
+    if not read_model_path.exists():
+        return None
+    try:
+        return SurfaceReadModel(read_model_path).run_dir(run_id)
+    except Exception:
+        return None

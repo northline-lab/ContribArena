@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -315,6 +316,7 @@ class _ReadModelWatcher:
         self._last_error_at = ""
         self._last_error = ""
         self._last_error_type = ""
+        self._last_poll_signature_cost_seconds = 0.0
 
     def start(self) -> None:
         if self._thread is not None:
@@ -342,7 +344,10 @@ class _ReadModelWatcher:
     def _poll(self) -> None:
         last_signature = ""
         while not self._stop.wait(max(2.0, self.debounce_seconds)):
+            started = time.monotonic()
             signature = _artifact_signature(self.input_dir)
+            with self._lock:
+                self._last_poll_signature_cost_seconds = round(time.monotonic() - started, 4)
             if signature != last_signature:
                 last_signature = signature
                 self._refresh_safely()
@@ -374,6 +379,7 @@ class _ReadModelWatcher:
                 "last_error_at": self._last_error_at,
                 "last_error_type": self._last_error_type,
                 "last_error": redact_text(self._last_error, max_chars=1000) if self._last_error else "",
+                "poll_signature_cost_seconds": self._last_poll_signature_cost_seconds,
             }
 
 
@@ -382,7 +388,7 @@ def _artifact_signature(path: Path) -> str:
         return ""
     latest = 0
     count = 0
-    for summary in path.rglob("run_summary.json"):
+    for summary in path.glob("*/run_summary.json"):
         try:
             stat = summary.stat()
         except OSError:

@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from contribarena.config.schema import GovernanceConfig, OwnedRepositoryPolicy, RunConfig
+from contribarena.engine.persistence import atomic_write_json
 from contribarena.engine.seasons import participant_governance_state_path
 from contribarena.models import (
     GovernanceAttempt,
@@ -143,11 +144,7 @@ def load_governance_state(config: RunConfig) -> GovernanceState:
 
 def save_governance_state(config: RunConfig, state: GovernanceState) -> Path:
     path = governance_state_path(config)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(state.model_dump(mode="json"), indent=2, ensure_ascii=True) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_json(path, state.model_dump(mode="json"), ensure_ascii=True)
     return path
 
 
