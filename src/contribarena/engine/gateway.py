@@ -24,6 +24,7 @@ from contribarena.engine.seasons import (
     load_participant_state,
     parse_duration_seconds,
     participant_id_for,
+    participant_is_due,
     participant_next_wake_at,
     tracked_open_prs,
 )
@@ -760,6 +761,12 @@ def _participant_status(store: SeasonStore, season: SeasonConfig, participant: A
     pending = state.get("pending_run") if isinstance(state.get("pending_run"), dict) else {}
     judgement_retry = state.get("judgement_retry") if isinstance(state.get("judgement_retry"), dict) else {}
     now = datetime.now(UTC)
+    is_due = participant_is_due(
+        season=season,
+        participant=participant,
+        state=state,
+        now=now,
+    )
     next_at = participant_next_wake_at(
         season=season,
         participant=participant,
@@ -781,9 +788,9 @@ def _participant_status(store: SeasonStore, season: SeasonConfig, participant: A
     elif judgement_retry.get("status") in {"due", "running"}:
         status = "RETRY"
         next_action = f"judge {judgement_retry.get('attempts')}/{judgement_retry.get('max_attempts')}"
-    elif next_at <= now:
+    elif is_due:
         status = "DUE"
-        next_action = "now"
+        next_action = "queued"
     return {
         "id": participant_id,
         "display_name": _display_name(participant.model),
@@ -792,6 +799,7 @@ def _participant_status(store: SeasonStore, season: SeasonConfig, participant: A
         "state": status,
         "next_action": next_action,
         "next_at": next_at.isoformat(),
+        "is_due": is_due,
         "last_run_id": state.get("last_run_id") or pending.get("run_id") or "",
         "last_run_status": state.get("last_run_status") or "",
         "active_runs": int(state.get("active_runs") or 0),

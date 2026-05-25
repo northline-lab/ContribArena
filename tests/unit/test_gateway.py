@@ -11,6 +11,7 @@ from contribarena.engine.gateway import (
     GatewayCommandResult,
     GatewayPaths,
     _participant_ranking_state,
+    _participant_status,
     _doctor_runtime_state,
     _run_log_path,
     _write_gateway_state,
@@ -21,8 +22,18 @@ from contribarena.engine.gateway import (
     stop_gateway,
 )
 from contribarena.config import load_run_config
-from contribarena.config.schema import ArtifactConfig, DiscoveryConfig, RepoCandidate, RunConfig, RunSection, WorkspaceConfig
+from contribarena.config.schema import (
+    ArtifactConfig,
+    DiscoveryConfig,
+    RepoCandidate,
+    RunConfig,
+    RunSection,
+    SeasonConfig,
+    SeasonParticipantConfig,
+    WorkspaceConfig,
+)
 from contribarena.engine.read_model import SurfaceReadModel
+from contribarena.engine.seasons import SeasonStore
 from contribarena.errors import ContribArenaError
 
 
@@ -116,6 +127,31 @@ class GatewayLifecycleTests(unittest.TestCase):
             "none",
             _participant_ranking_state("WAITING", {}, {"status": "failed"}),
         )
+
+    def test_never_run_due_participant_displays_as_queued_not_relative_jitter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            season = SeasonConfig(
+                id="season_0",
+                state_root=Path(tmp) / "seasons",
+                participants=[
+                    SeasonParticipantConfig(
+                        id="season_0:gpt",
+                        model="responses/gpt55",
+                        role=["agent"],
+                    )
+                ],
+            )
+            config = _minimal_config().model_copy(update={"season": season}, deep=True)
+
+            row = _participant_status(
+                SeasonStore.from_config(config),
+                season,
+                season.participants[0],
+            )
+
+        self.assertEqual("DUE", row["state"])
+        self.assertEqual("queued", row["next_action"])
+        self.assertEqual(True, row["is_due"])
 
     def test_doctor_exhausted_work_warns_without_blocking_startup(self) -> None:
         checks = []
