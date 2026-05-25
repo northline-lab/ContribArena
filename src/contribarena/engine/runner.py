@@ -1253,6 +1253,8 @@ def _judgement_eligible_terminal(terminal: TerminalState) -> bool:
         return False
     if _replacement_due_terminal(terminal):
         return False
+    if _provider_infrastructure_terminal(terminal):
+        return False
     return terminal.status == "completed" or terminal.layer in {"agent", "quality", "pr", "model_runtime"}
 
 

@@ -2275,7 +2275,7 @@ class RunnerM02Test(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            _run_with_fake_docker(FakeProviderBillingErrorAgent(), config, tmp_path)
+            result = _run_with_fake_docker(FakeProviderBillingErrorAgent(), config, tmp_path)
 
             state = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertEqual("2026-01-01T00:00:00+00:00", state["last_wake_at"])
@@ -2283,6 +2283,12 @@ class RunnerM02Test(unittest.TestCase):
             self.assertEqual(state["last_run_id"], state["wake_cooldown_suppressed_run_id"])
             self.assertEqual("completed", state["pending_run"]["status"])
             self.assertNotIn("previous_last_wake_at", state)
+            self.assertFalse((result.run_dir / "judgement.json").exists())
+            summary = json.loads((result.run_dir / "run_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual("not_judged", summary["judgement"]["status"])
+            self.assertEqual("no_pr_provider_failure", summary["submission_outcome"])
+            self.assertFalse(summary["ranking_eligible"])
+            self.assertEqual("submission_no_pr_provider_failure", summary["ranking_exclusion_reason"])
 
     def test_transient_runtime_message_markers_are_conservative(self) -> None:
         self.assertTrue(_transient_runtime_message("APIConnectionError: Connection error."))
