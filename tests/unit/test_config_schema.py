@@ -19,6 +19,7 @@ from contribarena.config.schema import (
     RunConfig,
     RunSection,
     WorkspaceConfig,
+    AnthropicModelConfig,
 )
 
 
@@ -70,6 +71,14 @@ class ConfigSchemaTest(unittest.TestCase):
             self.assertEqual(
                 "openai/openai-agents-python", config.discovery.candidates[0].full_name
             )
+
+    def test_anthropic_defaults_enable_high_adaptive_thinking(self) -> None:
+        config = AnthropicModelConfig(base_url="https://example.com/anthropic/v1")
+
+        self.assertEqual(16384, config.max_tokens)
+        self.assertTrue(config.thinking_enabled)
+        self.assertEqual("adaptive", config.thinking_type)
+        self.assertEqual("high", config.thinking_effort)
 
     def test_season_zero_owned_example_loads_five_participants(self) -> None:
         config = load_run_config(Path("examples/season-0-owned.yaml"))

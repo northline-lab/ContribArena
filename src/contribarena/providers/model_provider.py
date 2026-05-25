@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from agents.models.openai_responses import OpenAIResponsesModel
 from agents.tool import Tool
 from agents.usage import Usage
 from openai import AsyncOpenAI
+from openai.types.shared.reasoning import Reasoning
 
 from contribarena.config.schema import ModelsConfig
 from contribarena.providers.adapters import AnthropicMessagesModel, GeminiGenerateContentModel
@@ -203,6 +205,7 @@ class SafeOpenAIResponsesModel(OpenAIResponsesModel):
         conversation_id: str | None = None,
         prompt: Any = None,
     ) -> ModelResponse:
+        model_settings = _responses_model_settings(model_settings)
         response = await self._fetch_response(
             system_instructions,
             input,
@@ -221,6 +224,12 @@ class SafeOpenAIResponsesModel(OpenAIResponsesModel):
             response_id=response.id,
             request_id=getattr(response, "_request_id", None),
         )
+
+
+def _responses_model_settings(model_settings: ModelSettings) -> ModelSettings:
+    if model_settings.reasoning is not None:
+        return model_settings
+    return replace(model_settings, reasoning=Reasoning(effort="high"))
 
 
 def _safe_response_usage(raw_usage: object) -> Usage:

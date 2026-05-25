@@ -5,6 +5,8 @@ from unittest.mock import patch
 
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.models.openai_responses import OpenAIResponsesModel
+from agents import ModelSettings
+from openai.types.shared.reasoning import Reasoning
 
 from contribarena.config.schema import (
     AnthropicModelConfig,
@@ -16,6 +18,7 @@ from contribarena.config.schema import (
 )
 from contribarena.providers.adapters import AnthropicMessagesModel, GeminiGenerateContentModel
 from contribarena.providers import ContribArenaModelProvider
+from contribarena.providers.model_provider import _responses_model_settings
 
 
 class ContribArenaModelProviderTest(unittest.TestCase):
@@ -102,6 +105,19 @@ class ContribArenaModelProviderTest(unittest.TestCase):
 
         self.assertIsInstance(model, OpenAIResponsesModel)
         self.assertEqual("https://example.com/v1/", str(model._client.base_url))
+
+    def test_responses_model_settings_default_reasoning_effort_is_high(self) -> None:
+        settings = _responses_model_settings(ModelSettings())
+
+        self.assertIsNotNone(settings.reasoning)
+        self.assertEqual("high", settings.reasoning.effort)
+
+    def test_responses_model_settings_preserves_explicit_reasoning(self) -> None:
+        settings = _responses_model_settings(
+            ModelSettings(reasoning=Reasoning(effort="medium"))
+        )
+
+        self.assertEqual("medium", settings.reasoning.effort)
 
     def test_resolves_anthropic_prefix_to_messages_adapter(self) -> None:
         provider = ContribArenaModelProvider(

@@ -387,7 +387,11 @@ class AnthropicModelConfig(BaseModel):
     base_url_env: str | None = None
     model: str | None = None
     api_key_env: str = "ANTHROPIC_API_KEY"
-    max_tokens: int = Field(default=4096, ge=1)
+    max_tokens: int = Field(default=16_384, ge=1)
+    thinking_enabled: bool = True
+    thinking_type: Literal["adaptive", "enabled"] = "adaptive"
+    thinking_effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
+    thinking_budget_tokens: int | None = Field(default=None, ge=1024)
 
     @model_validator(mode="after")
     def require_base_url(self) -> AnthropicModelConfig:

@@ -70,6 +70,7 @@ class AnthropicMessagesModel(Model):
             body["temperature"] = model_settings.temperature
         if model_settings.top_p is not None:
             body["top_p"] = model_settings.top_p
+        _apply_anthropic_thinking(body, self.config)
 
         endpoint = _anthropic_messages_endpoint(self.config.base_url)
         response = await self._client.post(
@@ -114,6 +115,23 @@ class AnthropicMessagesModel(Model):
     @property
     def model_name(self) -> str:
         return self.config.model or self.name
+
+
+def _apply_anthropic_thinking(body: dict[str, Any], config: AnthropicModelConfig) -> None:
+    if not config.thinking_enabled:
+        return
+    if config.thinking_type == "adaptive":
+        body["thinking"] = {"type": "adaptive"}
+        body["output_config"] = {"effort": config.thinking_effort}
+        return
+    if config.thinking_budget_tokens is None:
+        body["thinking"] = {"type": "adaptive"}
+        body["output_config"] = {"effort": config.thinking_effort}
+        return
+    body["thinking"] = {
+        "type": "enabled",
+        "budget_tokens": config.thinking_budget_tokens,
+    }
 
 
 class GeminiGenerateContentModel(Model):

@@ -22,6 +22,7 @@ from contribarena.providers.action_guard import (
     visible_text_from_turn,
 )
 from contribarena.providers.adapters import (
+    _apply_anthropic_thinking,
     _anthropic_response_to_chat_message,
     _gemini_response_to_chat_message,
     _repair_structured_output_message,
@@ -29,6 +30,7 @@ from contribarena.providers.adapters import (
     _to_gemini_contents,
     _to_gemini_tools,
 )
+from contribarena.config.schema import AnthropicModelConfig
 from contribarena.models.assistant_updates import AssistantUpdate
 from contribarena.providers.turns import provider_turn_from_response
 
@@ -59,6 +61,48 @@ class ProviderAdapterRepairTest(unittest.TestCase):
 
 
 class ProviderToolSchemaTest(unittest.TestCase):
+    def test_anthropic_thinking_defaults_to_adaptive_high(self) -> None:
+        body: dict[str, object] = {}
+
+        _apply_anthropic_thinking(
+            body,
+            AnthropicModelConfig(base_url="https://example.com/anthropic/v1"),
+        )
+
+        self.assertEqual({"type": "adaptive"}, body["thinking"])
+        self.assertEqual({"effort": "high"}, body["output_config"])
+
+    def test_anthropic_thinking_can_use_legacy_budget_tokens(self) -> None:
+        body: dict[str, object] = {}
+
+        _apply_anthropic_thinking(
+            body,
+            AnthropicModelConfig(
+                base_url="https://example.com/anthropic/v1",
+                thinking_type="enabled",
+                thinking_budget_tokens=4096,
+            ),
+        )
+
+        self.assertEqual(
+            {"type": "enabled", "budget_tokens": 4096},
+            body["thinking"],
+        )
+        self.assertNotIn("output_config", body)
+
+    def test_anthropic_thinking_can_be_disabled(self) -> None:
+        body: dict[str, object] = {}
+
+        _apply_anthropic_thinking(
+            body,
+            AnthropicModelConfig(
+                base_url="https://example.com/anthropic/v1",
+                thinking_enabled=False,
+            ),
+        )
+
+        self.assertEqual({}, body)
+
     def test_anthropic_and_gemini_preserve_aci_apply_patch_schema(self) -> None:
         anthropic_tools = _to_anthropic_tools([_patch_tool])
         gemini_tools = _to_gemini_tools([_patch_tool])
