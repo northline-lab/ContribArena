@@ -2297,6 +2297,12 @@ class RunnerM02Test(unittest.TestCase):
         self.assertTrue(_transient_runtime_message("HTTP 500 internal server error"))
         self.assertTrue(_transient_runtime_message("Error code: 500 - {'message': '请求参数不能为空'}"))
         self.assertTrue(_transient_runtime_message("GnuTLS recv error (-110)"))
+        self.assertTrue(
+            _transient_runtime_message(
+                "responses provider returned an invalid payload: expected Response-like object, got str"
+            )
+        )
+        self.assertTrue(_transient_runtime_message("'str' object has no attribute 'output'"))
         self.assertFalse(_transient_runtime_message("HTTP 400 bad request"))
         self.assertFalse(_transient_runtime_message("context_length_exceeded"))
         self.assertFalse(_transient_runtime_message("unsupported tool format"))

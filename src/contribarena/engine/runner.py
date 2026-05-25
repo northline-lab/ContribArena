@@ -1397,6 +1397,9 @@ def _transient_runtime_message(message: str) -> bool:
             "service unavailable",
             "bad gateway",
             "gateway timeout",
+            "responses provider returned an invalid payload",
+            "expected response-like object",
+            "'str' object has no attribute 'output'",
         )
     )
 

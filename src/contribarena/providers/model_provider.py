@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import replace
 from pathlib import Path
@@ -16,6 +17,7 @@ from agents.models.openai_responses import OpenAIResponsesModel
 from agents.tool import Tool
 from agents.usage import Usage
 from openai import AsyncOpenAI
+from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 from openai.types.shared.reasoning import Reasoning
 
 from contribarena.config.schema import ModelsConfig
@@ -218,6 +220,7 @@ class SafeOpenAIResponsesModel(OpenAIResponsesModel):
             stream=False,
             prompt=prompt,
         )
+        response = _coerce_responses_payload(response)
         return ModelResponse(
             output=response.output,
             usage=_safe_response_usage(getattr(response, "usage", None)),
@@ -230,6 +233,64 @@ def _responses_model_settings(model_settings: ModelSettings) -> ModelSettings:
     if model_settings.reasoning is not None:
         return model_settings
     return replace(model_settings, reasoning=Reasoning(effort="high"))
+
+
+def _coerce_responses_payload(response: object) -> object:
+    if hasattr(response, "output") and hasattr(response, "id"):
+        return response
+    if isinstance(response, str):
+        parsed = _parse_response_string(response)
+        if parsed is not None:
+            return parsed
+    raise TypeError(
+        "responses provider returned an invalid payload: "
+        f"expected Response-like object, got {type(response).__name__}"
+    )
+
+
+def _parse_response_string(payload: str) -> object | None:
+    stripped = payload.strip()
+    if not stripped:
+        return None
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    output = parsed.get("output")
+    response_id = parsed.get("id")
+    if isinstance(output, list) and isinstance(response_id, str):
+        return _ResponsePayload(output=output, id=response_id, usage=parsed.get("usage"))
+    text = parsed.get("output_text") or parsed.get("text")
+    if isinstance(text, str):
+        return _ResponsePayload(
+            output=[
+                ResponseOutputMessage(
+                    id="msg_0",
+                    type="message",
+                    status="completed",
+                    role="assistant",
+                    content=[
+                        ResponseOutputText(
+                            type="output_text",
+                            text=text,
+                            annotations=[],
+                        )
+                    ],
+                )
+            ],
+            id=response_id if isinstance(response_id, str) else "",
+            usage=parsed.get("usage"),
+        )
+    return None
+
+
+class _ResponsePayload:
+    def __init__(self, output: list[object], id: str, usage: object = None) -> None:
+        self.output = output
+        self.id = id
+        self.usage = usage
 
 
 def _safe_response_usage(raw_usage: object) -> Usage:
