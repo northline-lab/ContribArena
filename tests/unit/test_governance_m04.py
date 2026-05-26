@@ -1244,6 +1244,94 @@ class GovernanceM04Test(unittest.TestCase):
             self.assertEqual("completed", state["pending_run"]["status"])
             self.assertEqual(0, state["active_runs"])
 
+    def test_pending_run_without_terminal_artifact_recovers_after_short_restart_grace(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _owned_config(live_enabled=True, output_root=tmp_path / "runs")
+            config.season = SeasonConfig(
+                id="season_0",
+                status="active",
+                state_root=tmp_path / "seasons",
+                defaults={"wake_interval": "6h", "max_concurrent_runs": 1},
+                participants=[SeasonParticipantConfig(model="compatible/qwen36plus")],
+            )
+            participant_dir = tmp_path / "seasons" / "season_0" / "participants" / "season_0:qwen36plus"
+            participant_dir.mkdir(parents=True)
+            (participant_dir / "participant_state.json").write_text(
+                json.dumps(
+                    {
+                        "active_runs": 1,
+                        "last_wake_at": "2026-01-01T00:00:00+00:00",
+                        "pending_run": {
+                            "run_id": "missing-artifact-run",
+                            "repo_slug": "example/repo",
+                            "wake_source": "auto",
+                            "started_at": "2026-01-01T00:00:00+00:00",
+                            "status": "running",
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            launcher = FakeLauncher()
+
+            result = LocalController(launcher=launcher).run_once(config)
+
+            self.assertEqual("run_completed", result.status)
+            self.assertEqual(1, launcher.calls)
+            state = json.loads((participant_dir / "participant_state.json").read_text(encoding="utf-8"))
+            self.assertEqual("run_interrupted", state["replacement"]["reason"])
+            self.assertEqual("missing-artifact-run", state["interrupted_run"]["run_id"])
+
+    def test_pending_run_with_terminal_artifact_waits_for_full_wall_time_grace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _owned_config(live_enabled=True, output_root=tmp_path / "runs")
+            config.run.budget.max_wall_time_seconds = 86400
+            config.season = SeasonConfig(
+                id="season_0",
+                status="active",
+                state_root=tmp_path / "seasons",
+                defaults={"wake_interval": "6h", "max_concurrent_runs": 1},
+                participants=[SeasonParticipantConfig(model="compatible/qwen36plus")],
+            )
+            run_dir = tmp_path / "runs" / "existing-run"
+            run_dir.mkdir(parents=True)
+            (run_dir / "terminal_state.json").write_text(
+                json.dumps({"run_id": "existing-run", "status": "completed"}) + "\n",
+                encoding="utf-8",
+            )
+            participant_dir = tmp_path / "seasons" / "season_0" / "participants" / "season_0:qwen36plus"
+            participant_dir.mkdir(parents=True)
+            (participant_dir / "participant_state.json").write_text(
+                json.dumps(
+                    {
+                        "active_runs": 1,
+                        "last_wake_at": "2026-01-01T00:00:00+00:00",
+                        "pending_run": {
+                            "run_id": "existing-run",
+                            "repo_slug": "example/repo",
+                            "wake_source": "auto",
+                            "started_at": "2999-01-01T00:00:00+00:00",
+                            "status": "running",
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            launcher = FakeLauncher()
+
+            result = LocalController(launcher=launcher).run_once(config)
+
+            self.assertEqual("season_no_eligible_participant", result.status)
+            self.assertEqual(0, launcher.calls)
+            state = json.loads((participant_dir / "participant_state.json").read_text(encoding="utf-8"))
+            self.assertNotIn("replacement", state)
+
     def test_active_season_recovers_stale_prelaunch_pending_wake(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

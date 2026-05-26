@@ -529,7 +529,12 @@ def _mark_stale_pending_run_if_due(
     if run_id != "pending" and str(state.get("last_run_id") or "") == run_id:
         return state
     started_at = str(pending.get("started_at") or state.get("last_run_started_at") or "")
-    if not _pending_run_is_stale(started_at, config.run.budget.max_wall_time_seconds):
+    if not _pending_run_is_stale(
+        started_at,
+        config.run.budget.max_wall_time_seconds,
+        artifact_root=config.artifacts.output_root,
+        run_id=run_id,
+    ):
         return state
     return mark_stale_participant_run_replacement_due(
         store,
@@ -539,15 +544,43 @@ def _mark_stale_pending_run_if_due(
     )
 
 
-def _pending_run_is_stale(started_at: str, max_wall_time_seconds: int | None) -> bool:
+def _pending_run_is_stale(
+    started_at: str,
+    max_wall_time_seconds: int | None,
+    *,
+    artifact_root: Path | None = None,
+    run_id: str = "",
+) -> bool:
     try:
         started = datetime.fromisoformat(started_at)
     except ValueError:
         return True
     if started.tzinfo is None:
         started = started.replace(tzinfo=UTC)
+    elapsed = (datetime.now(UTC) - started).total_seconds()
+    if run_id and _pending_run_has_no_terminal_artifact(artifact_root, run_id):
+        return elapsed >= 600
     grace = int(max_wall_time_seconds or 0) + 600
-    return (datetime.now(UTC) - started).total_seconds() >= max(600, grace)
+    return elapsed >= max(600, grace)
+
+
+def _pending_run_has_no_terminal_artifact(artifact_root: Path | None, run_id: str) -> bool:
+    if artifact_root is None or not artifact_root.exists():
+        return True
+    for run_dir in artifact_root.iterdir():
+        if not run_dir.is_dir():
+            continue
+        for name in ("run_summary.json", "terminal_state.json"):
+            path = run_dir / name
+            if not path.exists():
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(payload, dict) and str(payload.get("run_id") or "") == run_id:
+                return False
+    return True
 
 
 def _season_due_priority(
