@@ -8,7 +8,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
-from contribarena.config.schema import DEFAULT_MEMORY_RELATIVE, MemoryConfig, RunConfig, SeasonParticipantConfig
+from contribarena.config.schema import (
+    DEFAULT_MEMORY_RELATIVE,
+    MemoryConfig,
+    RunConfig,
+    SeasonConfig,
+    SeasonParticipantConfig,
+)
 from contribarena.engine.external_lifecycle import (
     lifecycle_record_for_opened_pr,
     lifecycle_record_due,
@@ -243,24 +249,7 @@ class LocalController:
                 continue
             due.append((participant_id, participant, participant_state))
         if due:
-            due.sort(
-                key=lambda item: (
-                    0
-                    if isinstance(item[2].get("replacement"), dict)
-                    and item[2]["replacement"].get("status") == "due"
-                    else 1
-                    if isinstance(item[2].get("live_submission_retry"), dict)
-                    and item[2]["live_submission_retry"].get("status") == "due"
-                    else 2,
-                    participant_next_wake_at(
-                        season=season,
-                        participant=item[1],
-                        participant_id=item[0],
-                        state=item[2],
-                    ),
-                    item[0],
-                )
-            )
+            due.sort(key=lambda item: _season_due_priority(season, item[0], item[1], item[2]))
             participant_id, participant, participant_state = due[0]
             replacement = participant_state.get("replacement")
             live_retry = participant_state.get("live_submission_retry")
@@ -559,6 +548,34 @@ def _pending_run_is_stale(started_at: str, max_wall_time_seconds: int | None) ->
         started = started.replace(tzinfo=UTC)
     grace = int(max_wall_time_seconds or 0) + 600
     return (datetime.now(UTC) - started).total_seconds() >= max(600, grace)
+
+
+def _season_due_priority(
+    season: SeasonConfig,
+    participant_id: str,
+    participant: SeasonParticipantConfig,
+    state: dict[str, object],
+) -> tuple[object, ...]:
+    replacement = state.get("replacement")
+    live_retry = state.get("live_submission_retry")
+    if isinstance(replacement, dict) and replacement.get("status") == "due":
+        queue_class = 0
+    elif isinstance(live_retry, dict) and live_retry.get("status") == "due":
+        queue_class = 1
+    else:
+        queue_class = 2
+    return (
+        queue_class,
+        int(state.get("prs_opened") or 0),
+        int(state.get("runs_count") or 0),
+        participant_next_wake_at(
+            season=season,
+            participant=participant,
+            participant_id=participant_id,
+            state=state,
+        ),
+        participant_id,
+    )
 
 
 def _active_short_term_goal(config: RunConfig) -> bool:

@@ -968,6 +968,67 @@ class GovernanceM04Test(unittest.TestCase):
             self.assertEqual("fake", state["replacement"]["replacement_run_id"])
             self.assertEqual("fake", state["replacement"]["completed_run_id"])
 
+    def test_replacement_due_catches_up_participant_without_open_pr_first(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = _owned_config(live_enabled=True, output_root=tmp_path / "runs")
+            config.season = SeasonConfig(
+                id="season_0",
+                status="active",
+                state_root=tmp_path / "seasons",
+                participants=[
+                    SeasonParticipantConfig(model="compatible/deepseekv4pro"),
+                    SeasonParticipantConfig(model="responses/gpt55"),
+                ],
+            )
+            deepseek_dir = (
+                tmp_path
+                / "seasons"
+                / "season_0"
+                / "participants"
+                / "season_0:deepseekv4pro"
+            )
+            gpt_dir = tmp_path / "seasons" / "season_0" / "participants" / "season_0:gpt55"
+            deepseek_dir.mkdir(parents=True)
+            gpt_dir.mkdir(parents=True)
+            replacement = {
+                "status": "due",
+                "source_run_id": "failed-run",
+                "reason": "model_runtime",
+                "layer": "model_runtime",
+            }
+            (deepseek_dir / "participant_state.json").write_text(
+                json.dumps(
+                    {
+                        "replacement": replacement,
+                        "replacement_due": True,
+                        "runs_count": 1,
+                        "prs_opened": 1,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (gpt_dir / "participant_state.json").write_text(
+                json.dumps(
+                    {
+                        "replacement": replacement,
+                        "replacement_due": True,
+                        "runs_count": 1,
+                        "prs_opened": 0,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            launcher = FakeLauncher()
+
+            result = LocalController(launcher=launcher).run_once(config)
+
+            self.assertEqual("run_completed", result.status)
+            self.assertEqual(1, launcher.calls)
+            self.assertEqual("season_0:gpt55", launcher.configs[0].run.participant_id)
+
     def test_active_season_exhausted_replacement_does_not_starve_other_participants(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
