@@ -80,7 +80,7 @@ class ContribArenaModelProvider(ModelProvider):
                 )
             ),
         )
-        model = OpenAIChatCompletionsModel(
+        model = SafeOpenAIChatCompletionsModel(
             model=provider_config.model or name,
             openai_client=client,
         )
@@ -227,6 +227,64 @@ class SafeOpenAIResponsesModel(OpenAIResponsesModel):
             response_id=response.id,
             request_id=getattr(response, "_request_id", None),
         )
+
+
+class SafeOpenAIChatCompletionsModel(OpenAIChatCompletionsModel):
+    """Chat completions model tolerant of stricter compatible backends."""
+
+    async def get_response(
+        self,
+        system_instructions: str | None,
+        input: str | list[TResponseInputItem],
+        model_settings: ModelSettings,
+        tools: list[Tool],
+        output_schema: AgentOutputSchemaBase | None,
+        handoffs: list[Handoff],
+        tracing: Any,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
+        prompt: Any = None,
+    ) -> ModelResponse:
+        return await super().get_response(
+            system_instructions=_non_empty_chat_text(system_instructions),
+            input=_compatible_chat_input(input),
+            model_settings=model_settings,
+            tools=tools,
+            output_schema=output_schema,
+            handoffs=handoffs,
+            tracing=tracing,
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+            prompt=prompt,
+        )
+
+
+def _compatible_chat_input(input: str | list[TResponseInputItem]) -> str | list[TResponseInputItem]:
+    if isinstance(input, str):
+        return input
+    normalized: list[TResponseInputItem] = []
+    for item in input:
+        if isinstance(item, dict):
+            normalized.append(_compatible_chat_item(item))
+        else:
+            normalized.append(item)
+    return normalized
+
+
+def _compatible_chat_item(item: dict[str, Any]) -> TResponseInputItem:
+    if item.get("type") == "function_call_output" and not item.get("output"):
+        return {**item, "output": "[tool completed with no output]"}  # type: ignore[return-value]
+    if item.get("role") in {"system", "developer", "assistant"}:
+        content = item.get("content")
+        if content is None or content == "":
+            return {**item, "content": " "}  # type: ignore[return-value]
+    return item  # type: ignore[return-value]
+
+
+def _non_empty_chat_text(value: str | None) -> str | None:
+    if value == "":
+        return " "
+    return value
 
 
 def _responses_model_settings(model_settings: ModelSettings) -> ModelSettings:

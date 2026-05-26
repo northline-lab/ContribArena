@@ -6,8 +6,10 @@ from unittest.mock import patch
 
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.models.openai_responses import OpenAIResponsesModel
+from agents.models.interface import ModelTracing
 from agents import ModelSettings
 from agents.items import ModelResponse
+from openai import AsyncOpenAI
 from openai.types.shared.reasoning import Reasoning
 
 from contribarena.config.schema import (
@@ -21,7 +23,10 @@ from contribarena.config.schema import (
 from contribarena.providers.adapters import AnthropicMessagesModel, GeminiGenerateContentModel
 from contribarena.providers import ContribArenaModelProvider
 from contribarena.providers.model_provider import (
+    SafeOpenAIChatCompletionsModel,
     SafeOpenAIResponsesModel,
+    _compatible_chat_input,
+    _non_empty_chat_text,
     _responses_model_settings,
 )
 
@@ -56,6 +61,102 @@ class ContribArenaModelProviderTest(unittest.TestCase):
         model = provider.get_model("compatible/qwen3-coder")
 
         self.assertIsInstance(model, OpenAIChatCompletionsModel)
+        self.assertIsInstance(model, SafeOpenAIChatCompletionsModel)
+
+    def test_compatible_chat_input_replaces_empty_tool_outputs(self) -> None:
+        normalized = _compatible_chat_input(
+            [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_2",
+                    "output": None,
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_3",
+                    "output": "real output",
+                },
+            ]
+        )
+
+        self.assertEqual("[tool completed with no output]", normalized[0]["output"])
+        self.assertEqual("[tool completed with no output]", normalized[1]["output"])
+        self.assertEqual("real output", normalized[2]["output"])
+
+    def test_compatible_chat_input_replaces_empty_assistant_content(self) -> None:
+        normalized = _compatible_chat_input(
+            [
+                {"role": "assistant", "content": ""},
+                {"role": "system", "content": None},
+                {"role": "user", "content": ""},
+            ]
+        )
+
+        self.assertEqual(" ", normalized[0]["content"])
+        self.assertEqual(" ", normalized[1]["content"])
+        self.assertEqual("", normalized[2]["content"])
+
+    def test_non_empty_chat_text_replaces_empty_system_instruction(self) -> None:
+        self.assertEqual(" ", _non_empty_chat_text(""))
+        self.assertIsNone(_non_empty_chat_text(None))
+        self.assertEqual("hello", _non_empty_chat_text("hello"))
+
+    def test_safe_compatible_chat_model_normalizes_before_fetch(self) -> None:
+        class FakeChatModel(SafeOpenAIChatCompletionsModel):
+            def __init__(self) -> None:
+                super().__init__(
+                    model="test-model",
+                    openai_client=AsyncOpenAI(api_key="test-key", base_url="https://example.com/v1"),
+                )
+                self.seen_system_instructions = None
+                self.seen_input = None
+
+            async def _fetch_response(  # type: ignore[no-untyped-def]
+                self,
+                system_instructions,
+                input,
+                model_settings,
+                tools,
+                output_schema,
+                handoffs,
+                span,
+                tracing,
+                stream=False,
+                prompt=None,
+            ):
+                self.seen_system_instructions = system_instructions
+                self.seen_input = input
+                raise RuntimeError("stop after capture")
+
+        async def call_model(model: FakeChatModel) -> None:
+            await model.get_response(
+                system_instructions="",
+                input=[
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_1",
+                        "output": "",
+                    }
+                ],
+                model_settings=ModelSettings(),
+                tools=[],
+                output_schema=None,
+                handoffs=[],
+                tracing=ModelTracing.DISABLED,
+            )
+
+        model = FakeChatModel()
+
+        with self.assertRaisesRegex(RuntimeError, "stop after capture"):
+            asyncio.run(call_model(model))
+
+        self.assertEqual(" ", model.seen_system_instructions)
+        self.assertEqual("[tool completed with no output]", model.seen_input[0]["output"])
 
     def test_compatible_base_url_env_accepts_full_chat_completions_endpoint(self) -> None:
         provider = ContribArenaModelProvider(
