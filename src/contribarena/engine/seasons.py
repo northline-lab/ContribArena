@@ -105,7 +105,7 @@ class SeasonStore:
     def write_config(self, config: SeasonConfig) -> Path:
         path = self.config_path(config.id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write_text(
+        atomic_write_text(
             path,
             yaml.safe_dump(config.model_dump(mode="json"), sort_keys=False),
         )
@@ -143,7 +143,7 @@ class SeasonStore:
         }
         path = self.state_path(season_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write_text(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
+        atomic_write_text(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
         return state
 
     def state(self, season_id: str) -> dict[str, Any]:
@@ -180,7 +180,7 @@ class SeasonStore:
         )
         path = self.state_path(season_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write_text(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
+        atomic_write_text(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
         return state
 
     def record_heartbeat_started(
@@ -223,7 +223,7 @@ class SeasonStore:
         )
         path = self.state_path(season_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write_text(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
+        atomic_write_text(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
         return state
 
     def record_heartbeat_completed(
@@ -271,7 +271,7 @@ class SeasonStore:
         )
         path = self.state_path(season_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write_text(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
+        atomic_write_text(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
         return state
 
     def record_runtime_status(
@@ -307,7 +307,7 @@ class SeasonStore:
         )
         path = self.state_path(season_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write_text(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
+        atomic_write_text(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
         return state
 
     def _load_state(self, season_id: str) -> dict[str, Any]:
@@ -433,7 +433,7 @@ def save_participant_state(
 ) -> None:
     path = store.participant_dir(season_id, participant_id) / "participant_state.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write_text(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
+    atomic_write_text(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
 
 
 def mark_participant_replacement_due(
@@ -809,7 +809,7 @@ def mark_participant_run_finished(
         state["live_submission_retry_due"] = False
     if latest_goal_summary:
         state["latest_goal_summary"] = latest_goal_summary[:1000]
-    _atomic_write_text(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
+    atomic_write_text(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
 
 
 def mark_participant_run_interrupted(
@@ -863,7 +863,7 @@ def mark_participant_run_interrupted(
         state["pending_run"] = pending
     if latest_goal_summary:
         state["latest_goal_summary"] = latest_goal_summary[:1000]
-    _atomic_write_text(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
+    atomic_write_text(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
 
 
 def _participant_pr_counts(path: Path) -> dict[str, int]:
@@ -991,7 +991,3 @@ def season_is_completed(config: RunConfig) -> bool:
     except ConfigError:
         return False
     return season.status == "completed"
-
-
-def _atomic_write_text(path: Path, text: str) -> None:
-    atomic_write_text(path, text)
