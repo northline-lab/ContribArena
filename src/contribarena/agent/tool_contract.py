@@ -108,6 +108,9 @@ class ContributorTools(Protocol):
         objective: str = "",
         status: str = "active",
         evidence: str = "",
+        scope: str = "",
+        evidence_refs_json: str = "[]",
+        next_objective: str = "",
     ) -> AciResult: ...
 
     def aci_recover_invalid_action(
