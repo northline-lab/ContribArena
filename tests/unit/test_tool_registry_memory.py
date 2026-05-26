@@ -24,11 +24,47 @@ from contribarena.memory.history_index import HistoryIndex
 from contribarena.memory.service import MemoryService
 from contribarena.models import AciResult, CommandResult
 from contribarena.tools.aci import AciExecution
-from contribarena.tools.registry import ToolRegistry
+from contribarena.tools.registry import ToolRegistry, _annotate_recovery_retry
 from contribarena.trace import TraceWriter
 
 
 class ToolRegistryMemoryTest(unittest.TestCase):
+    def test_tool_execution_failures_do_not_accumulate_terminal_retries(self) -> None:
+        capture = ArtifactCapture()
+        for _ in range(3):
+            result = _annotate_recovery_retry(
+                capture,
+                AciResult(
+                    tool="aci_verify",
+                    success=False,
+                    error="command timed out after 900 seconds",
+                    recovery_kind="command_timeout",
+                ),
+            )
+            capture.record_aci_result(result)
+
+        self.assertEqual(0, capture.aci_results[-1].retry_count)
+        self.assertFalse(capture.aci_results[-1].terminal_after_retries)
+        self.assertIsNone(capture.aci_results[-1].terminal_status)
+
+    def test_invalid_agent_actions_still_accumulate_terminal_retries(self) -> None:
+        capture = ArtifactCapture()
+        for _ in range(3):
+            result = _annotate_recovery_retry(
+                capture,
+                AciResult(
+                    tool="aci_recover_invalid_action",
+                    success=False,
+                    error="multiple tool calls",
+                    recovery_kind="multiple_tool_calls",
+                ),
+            )
+            capture.record_aci_result(result)
+
+        self.assertEqual(3, capture.aci_results[-1].retry_count)
+        self.assertTrue(capture.aci_results[-1].terminal_after_retries)
+        self.assertEqual("failed_to_recover", capture.aci_results[-1].terminal_status)
+
     def test_aci_memory_get_context_run_returns_guidance_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

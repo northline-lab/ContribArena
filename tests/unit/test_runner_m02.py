@@ -1143,9 +1143,9 @@ class RunnerM02Test(unittest.TestCase):
             self.assertFalse((result.run_dir / "pr_description.md").exists())
             trajectory = json.loads((result.run_dir / "trajectory.json").read_text())
             submit_step = [step for step in trajectory if step["tool"] == "aci_submit_patch"][-1]
-            self.assertFalse(submit_step["accepted"])
+            self.assertTrue(submit_step["accepted"])
             self.assertEqual("submit_review_failed", submit_step["recovery_kind"])
-            self.assertEqual("blocked", submit_step["terminal_status"])
+            self.assertIsNone(submit_step["terminal_status"])
 
     def test_issue_solving_completed_requires_verification_after_last_edit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

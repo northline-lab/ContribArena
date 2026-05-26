@@ -81,6 +81,40 @@ class AgentLoopRuntimeTest(unittest.TestCase):
             self.assertEqual("failed_to_recover", second.terminal.reason)
             self.assertEqual("failed_to_recover.no_progress", second.sub_reason)
 
+    def test_failed_tool_result_counts_as_progress_for_agent_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(Path(tmp), max_invocations=3)
+            capture = ArtifactCapture()
+            goals = GoalService(config, run_id="run")
+            goals.update(objective="Recover from verification failure.", status="active")
+            state = AgentLoopState()
+            before = capture_cursor(capture, goals, None)
+            capture.record_aci_result(
+                AciResult(
+                    tool="aci_verify",
+                    success=False,
+                    output="command timed out after 900 seconds",
+                    error="command timed out after 900 seconds",
+                    recovery_kind="command_timeout",
+                )
+            )
+
+            review = review_invocation(
+                config=config,
+                capture=capture,
+                goals=goals,
+                memory=None,
+                before=before,
+                state=state,
+                invocation=AgentInvocationResult(content="Verification timed out."),
+            )
+
+            self.assertEqual("continue", review.decision)
+            self.assertIsNotNone(review.delta)
+            self.assertTrue(review.delta.made_progress)
+            self.assertEqual(0, state.counters.consecutive_no_progress)
+            self.assertEqual("", state.recovery_warning)
+
     def test_successful_patch_submission_terminals_into_downstream_gate_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = _config(Path(tmp))

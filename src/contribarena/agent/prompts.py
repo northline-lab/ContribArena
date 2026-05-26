@@ -13,12 +13,14 @@ RECOVERY_TEMPLATES: dict[str, str] = {
     ),
     "blocked_command": (
         "If a command is blocked or unavailable, inspect the smallest useful local "
-        "context, try one narrower alternative when safe, or return blocked with the "
-        "specific command and reason."
+        "context, try a narrower or equivalent alternative when safe, and only record "
+        "a blocker after reasonable agent-owned recovery options are exhausted."
     ),
     "command_timeout": (
-        "If a command times out, rerun only a narrower focused command or classify the "
-        "timeout as a blocker. Do not broaden setup or repeat the same long command."
+        "If a command times out, use the timeout output as feedback: narrow the command, "
+        "try an equivalent cheaper check, or adjust the approach. Do not repeat the same "
+        "long command unchanged; record a blocker only after reasonable recovery options "
+        "are exhausted."
     ),
     "too_large_output": (
         "If output is truncated or too broad, narrow by path, filename, symbol, or line "
@@ -32,7 +34,8 @@ RECOVERY_TEMPLATES: dict[str, str] = {
     "submit_review_failed": (
         "If submit-time review rejects generated or cache files, call aci_clean_generated, "
         "rerun focused verification when needed, then submit again. For other review "
-        "failures, fix the named issue or return blocked."
+        "failures, fix the named issue or continue with an evidence-backed blocker only "
+        "after reasonable recovery options are exhausted."
     ),
 }
 

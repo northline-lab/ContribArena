@@ -18,7 +18,7 @@ workspace:
   backend: docker
   image: contribarena/workspace:latest
   workdir: /workspace
-  command_timeout_seconds: 300
+  command_timeout_seconds: 900
   cleanup_policy: retain_on_failure
   resources:
     cpus: "2"

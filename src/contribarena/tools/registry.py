@@ -1095,7 +1095,6 @@ class ToolRegistry:
                     "error": review_notes,
                     "review_notes": review_notes,
                     "recovery_kind": "submit_review_failed",
-                    "terminal_status": "blocked",
                 }
             )
         else:
@@ -2189,6 +2188,8 @@ def _next_maintainer_review_round(capture: ArtifactCapture) -> int:
 def _annotate_recovery_retry(capture: ArtifactCapture, result: AciResult) -> AciResult:
     if result.success or not result.recovery_kind:
         return result
+    if result.tool != "aci_recover_invalid_action":
+        return result
     retry_count = (
         sum(1 for item in capture.aci_results if item.recovery_kind == result.recovery_kind) + 1
     )
@@ -2223,8 +2224,6 @@ def _classify_recovery(text: str) -> str:
 
 
 def _terminal_status_for_recovery(recovery_kind: str) -> str | None:
-    if recovery_kind in {"command_timeout", "missing_dependency"}:
-        return "blocked"
     return None
 
 
@@ -2233,7 +2232,6 @@ def _step_accepted(result: AciResult) -> bool:
         "invalid_tool_arguments",
         "malformed_action",
         "multi_tool_action",
-        "submit_review_failed",
         "unknown_tool",
     }
 

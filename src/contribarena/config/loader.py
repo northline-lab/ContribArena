@@ -36,7 +36,7 @@ workspace:
   backend: docker
   image: contribarena/workspace:latest
   workdir: /workspace
-  command_timeout_seconds: 300
+  command_timeout_seconds: 900
   resources:
     cpus: "2"
     memory: 4g

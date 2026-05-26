@@ -53,6 +53,7 @@ class InvocationProgressDelta:
         return any(
             [
                 self.commands,
+                self.aci_results,
                 self.successful_discovery,
                 self.successful_edits,
                 self.successful_verifications,

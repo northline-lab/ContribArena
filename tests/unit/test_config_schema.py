@@ -33,6 +33,7 @@ class ConfigSchemaTest(unittest.TestCase):
 
             self.assertEqual("shadow", config.run.mode)
             self.assertEqual("docker", config.workspace.backend)
+            self.assertEqual(900, config.workspace.command_timeout_seconds)
             self.assertEqual("always", config.workspace.cleanup_policy)
             self.assertFalse(config.governance.live_enabled)
             self.assertFalse(config.controller.enabled)
