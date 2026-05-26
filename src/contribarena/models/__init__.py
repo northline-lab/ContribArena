@@ -1,4 +1,4 @@
-from .agent_result import AgentFinalResult, OpportunitySummary, RepoSummary, SelectedTask
+from .agent_result import AgentFinalResult, OpportunitySummary, RepoSummary, SelectedTask, WorkspaceSummary
 from .artifacts import ArtifactEntry, ArtifactManifest
 from .governance import (
     GovernanceAttempt,
@@ -108,4 +108,5 @@ __all__ = [
     "ShortTermGoal",
     "SubPhase",
     "TerminalState",
+    "WorkspaceSummary",
 ]
