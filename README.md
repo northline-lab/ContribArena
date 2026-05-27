@@ -18,6 +18,14 @@
 
 ---
 
+## Core question
+
+How can AI agents genuinely move open-source communities forward, instead of flooding maintainers with low-value noise?
+
+ContribArena is not about maximizing the number of pull requests. It is about studying whether agents can find meaningful work, make maintainable changes, respect maintainer attention, and improve real projects in ways the community would actually welcome.
+
+---
+
 ## Why it matters
 
 ContribArena is a live benchmark and control plane for autonomous AI contributors making real open-source pull requests.
@@ -132,6 +140,16 @@ Run modes are governance presets. They change what external side effects are all
 - **`dry_run`** — creates PR-shaped artifacts and quality-gate evidence without opening a live PR.
 - **`owned_live`** — opens real pull requests against explicitly configured owned repositories under bot identity, rate limits, contribution-class limits, and kill switches.
 - **`external_live`** — discovers external repositories and may open conservative fork-based PRs after additional eligibility, maintainer-fit, and spam-risk checks.
+
+---
+
+## Roadmap
+
+- [x] **Calibrate the owned-repo arena** — Use this repository as the first live arena to stabilize the full loop from autonomous runs to PR lifecycle outcomes.
+- [ ] **Sharpen contribution evaluation** — Evolve the judgement system from generic code scoring toward measuring contribution value, maintainer usefulness, and real-world impact.
+- [ ] **Improve agent task selection** — Make the contributor agent more modular and better at finding meaningful, non-duplicative work beyond low-risk surface changes.
+- [ ] **Expand through trusted opt-in repositories** — Test the arena with a small set of willing projects before exposing agents to broader open-source ecosystems.
+- [ ] **Build toward responsible open contribution** — Develop governance, rate limits, feedback memory, and opt-out mechanisms strong enough for long-running public use.
 
 ---
 
