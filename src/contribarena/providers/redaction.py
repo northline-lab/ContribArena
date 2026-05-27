@@ -14,7 +14,7 @@ class RedactedText:
 _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("github_token", re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}")),
     ("bearer_token", re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._\-]{16,}")),
-    ("api_key", re.compile(r"(?i)\b(api[_-]?key|token|secret)\s*[:=]\s*['\"]?[^'\"\s]{12,}")),
+    ("credential", re.compile(r"(?i)\b(api[_-]?key|token|password|secret)\s*[:=]\s*['\"]?[^'\"\s]{12,}")),
     ("x_access_token_url", re.compile(r"https://x-access-token:[^@\s]+@")),
 ]
 
