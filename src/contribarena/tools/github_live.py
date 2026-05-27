@@ -766,6 +766,14 @@ def _has_successful_verification_after_last_edit(capture: ArtifactCapture) -> bo
     for index, item in enumerate(capture.aci_results):
         if item.tool in {"aci_apply_patch", "aci_replace", "aci_insert", "aci_create", "aci_undo"} and item.success:
             last_edit_index = index
+    accepted_no_command_review = any(
+        item.tool == "aci_submit_patch"
+        and item.success
+        and "no-command verification rationale accepted" in item.review_notes
+        for item in capture.aci_results[last_edit_index + 1 :]
+    )
+    if accepted_no_command_review:
+        return True
     return any(
         item.tool == "aci_verify" and item.success
         for item in capture.aci_results[last_edit_index + 1 :]
