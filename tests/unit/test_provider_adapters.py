@@ -193,6 +193,23 @@ class ProviderActionGuardTest(unittest.TestCase):
         payload = json.loads(recovery.arguments)
         self.assertEqual("multiple_tool_calls", payload["recovery_kind"])
 
+    def test_rejects_recovery_call_inside_multiple_tool_calls(self) -> None:
+        response = _model_response(
+            [
+                _tool_call(RECOVERY_TOOL_NAME, {"recovery_kind": "format_error", "message": "bad"}),
+                _tool_call("sample_tool", {"path": "repo/app.py"}),
+            ]
+        )
+
+        guarded = guard_model_response(response, [_sample_tool, _recovery_tool])
+
+        self.assertEqual(1, len(guarded.output))
+        recovery = guarded.output[0]
+        self.assertIsInstance(recovery, ResponseFunctionToolCall)
+        self.assertEqual(RECOVERY_TOOL_NAME, recovery.name)
+        payload = json.loads(recovery.arguments)
+        self.assertEqual("multiple_tool_calls", payload["recovery_kind"])
+
     def test_captures_visible_text_with_single_tool_call(self) -> None:
         captured: list[AssistantUpdate] = []
         response = _text_and_tool_response("I will inspect the file.", "sample_tool", {"path": "repo/app.py"})

@@ -232,7 +232,7 @@ def _tool_action_violation(
     }
     if RECOVERY_TOOL_NAME not in tool_schemas:
         return None
-    if len([call for call in tool_calls if call.name != RECOVERY_TOOL_NAME]) > 1:
+    if len(tool_calls) > 1:
         return ToolActionViolation(
             recovery_kind="multiple_tool_calls",
             message="Rejected multiple tool calls in one assistant turn. Use exactly one tool call.",
