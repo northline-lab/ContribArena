@@ -1,4 +1,5 @@
 from .agent_result import AgentFinalResult, OpportunitySummary, RepoSummary, SelectedTask, WorkspaceSummary
+from .assistant_updates import AssistantUpdate
 from .artifacts import ArtifactEntry, ArtifactManifest
 from .governance import (
     GovernanceAttempt,
@@ -57,6 +58,7 @@ from .tool_results import (
 )
 
 __all__ = [
+    "AssistantUpdate",
     "AgentFinalResult",
     "AciResult",
     "AgentStep",
