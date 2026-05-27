@@ -5,7 +5,7 @@ ContribArena is a harness for evaluating autonomous open-source contribution age
 ## Ground Rules
 
 - Keep changes small and reviewable.
-- Preserve the harness boundaries in `ARCHITECTURE.md`: agents decide, infrastructure executes, benchmark artifacts observe, and governance controls live writes.
+- Preserve the harness boundaries: agents decide, infrastructure executes, benchmark artifacts observe, and governance controls live writes.
 - Do not commit secrets, real provider base URLs, personal tokens, private repository data, or local `.env` values.
 - Public examples must use placeholders and environment variables.
 - Prefer deterministic tests and artifacts over claims in prose.
