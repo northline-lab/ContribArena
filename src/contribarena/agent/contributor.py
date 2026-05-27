@@ -18,8 +18,8 @@ from contribarena.models import (
     OpportunitySummary,
     RepoSummary,
     SelectedTask,
+    WorkspaceSummary,
 )
-from contribarena.models.agent_result import WorkspaceSummary
 from contribarena.providers.action_guard import (
     RECOVERY_TOOL_NAME,
     ActionGuardingModelProvider,

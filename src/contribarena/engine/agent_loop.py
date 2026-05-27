@@ -18,8 +18,8 @@ from contribarena.models import (
     RunState,
     SelectedTask,
     TerminalState,
+    WorkspaceSummary,
 )
-from contribarena.models.agent_result import WorkspaceSummary
 from contribarena.trace import TraceWriter
 
 
