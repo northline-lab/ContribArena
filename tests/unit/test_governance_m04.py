@@ -471,6 +471,139 @@ class GovernanceM04Test(unittest.TestCase):
             self.assertEqual("merged", summary["maintainer_outcome"]["status"])
             self.assertGreater(summary["judgement"]["arena_score"], 70)
 
+    def test_season_tick_backfills_missing_lifecycle_originating_run_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "runs" / "owned-run"
+            run_dir.mkdir(parents=True)
+            (run_dir / "run_summary.json").write_text(
+                json.dumps(
+                    {
+                        "season": {"id": "season_0"},
+                        "agent": {"participant_id": "season_0:glm-5.1"},
+                        "repository": {"full_name": "example/repo"},
+                        "pull_request": {
+                            "url": "https://github.com/example/repo/pull/48",
+                            "number": 48,
+                            "state": "open",
+                        },
+                        "maintainer_outcome": {
+                            "status": "pending",
+                            "observed_at": "",
+                            "source": "none",
+                        },
+                        "judgement": {
+                            "judge_score": 59.07,
+                            "real_world_adjustment": 2,
+                            "arena_score": 61.07,
+                        },
+                    },
+                    ensure_ascii=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            config = _owned_config(live_enabled=True, output_root=root / "runs")
+            config.season = SeasonConfig(
+                id="season_0",
+                status="active",
+                state_root=root / "seasons",
+                defaults={"wake_interval": "6h", "max_concurrent_runs": 1},
+                participants=[
+                    SeasonParticipantConfig(
+                        id="season_0:glm-5.1",
+                        model="compatible/glm51",
+                    )
+                ],
+            )
+            participant_id = "season_0:glm-5.1"
+            participant_config = config.model_copy(
+                update={
+                    "run": config.run.model_copy(
+                        update={
+                            "season_id": "season_0",
+                            "participant_id": participant_id,
+                        }
+                    )
+                },
+                deep=True,
+            )
+            save_governance_state(
+                participant_config,
+                GovernanceState(
+                    pull_requests=[
+                        GovernancePrRef(
+                            season_id="season_0",
+                            participant_id=participant_id,
+                            repository="example/repo",
+                            number=48,
+                            url="https://github.com/example/repo/pull/48",
+                            branch="contribarena/test",
+                        )
+                    ],
+                    lifecycle_records=[
+                        PrLifecycleRecord(
+                            season_id="season_0",
+                            participant_id=participant_id,
+                            repository="example/repo",
+                            number=48,
+                            url="https://github.com/example/repo/pull/48",
+                            state="merged",
+                            lifecycle_status="merged",
+                            branch="contribarena/test",
+                            head_sha="abc123",
+                            last_observed_at="2026-05-26T06:31:41+00:00",
+                            last_poll_at="2026-05-26T06:31:41+00:00",
+                            next_poll_at="2026-05-27T06:31:41+00:00",
+                        )
+                    ]
+                ),
+            )
+            participant_dir = root / "seasons" / "season_0" / "participants" / participant_id
+            participant_dir.mkdir(parents=True, exist_ok=True)
+            (participant_dir / "participant_state.json").write_text(
+                json.dumps({"active_runs": 1}) + "\n",
+                encoding="utf-8",
+            )
+            (run_dir / "pr_lifecycle_state.json").write_text(
+                json.dumps(
+                    {
+                        "records": [
+                            {
+                                "repository": "example/repo",
+                                "number": 48,
+                                "state": "open",
+                                "lifecycle_status": "tracking",
+                            }
+                        ]
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            lifecycle_client = FakeLifecycleClient(merged=True)
+            result = LocalController(
+                launcher=FakeLauncher(),
+                pr_client=lifecycle_client,
+            ).run_once(config)
+
+            self.assertEqual("lifecycle_terminal", result.status)
+            self.assertEqual(0, lifecycle_client.calls)
+            state = load_governance_state(participant_config)
+            self.assertEqual("merged", state.pull_requests[0].state)
+            self.assertEqual(str(run_dir), state.lifecycle_records[0].originating_run_dir)
+            self.assertEqual("merged", state.lifecycle_records[0].state)
+            participant_state = json.loads((participant_dir / "participant_state.json").read_text())
+            self.assertEqual(1, participant_state["prs_opened"])
+            self.assertEqual(1, participant_state["merged_prs"])
+            lifecycle = json.loads((run_dir / "pr_lifecycle_state.json").read_text())
+            self.assertEqual("merged", lifecycle["records"][0]["lifecycle_status"])
+            summary = json.loads((run_dir / "run_summary.json").read_text())
+            self.assertEqual("merged", summary["pull_request"]["state"])
+            self.assertEqual("merged", summary["maintainer_outcome"]["status"])
+            self.assertGreater(summary["judgement"]["arena_score"], 61.07)
+
     def test_completed_season_records_post_completion_outcome_without_rewriting_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1493,11 +1626,13 @@ class FakeLifecycleClient:
         self.merged = merged
         self.actor = actor
         self.error = error
+        self.calls = 0
 
     def authenticated_actor(self) -> str:
         return self.actor
 
     def get_pr(self, *, owner: str, repo: str, number: int) -> PullRequestStatusResult:
+        self.calls += 1
         if self.error is not None:
             raise self.error
         return PullRequestStatusResult(

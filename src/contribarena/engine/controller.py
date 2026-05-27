@@ -360,17 +360,19 @@ class LocalController:
             )
             return ControllerTickResult(status=status)
         state = load_governance_state(config)
-        if _backfill_lifecycle_records(config, state):
+        pre_poll_changed = _backfill_lifecycle_records(config, state)
+        terminal_state_synced = _sync_terminal_lifecycle_artifacts(config, state)
+        if pre_poll_changed or terminal_state_synced:
             save_governance_state(config, state)
         due_records = [
             record for record in state.lifecycle_records if lifecycle_record_due(record)
         ]
         if not due_records:
-            return None
+            return ControllerTickResult(status="lifecycle_terminal") if terminal_state_synced else None
         client = self.pr_client or GitHubPullRequestClient(
             token_env=config.governance.bot_identity.token_env
         )
-        terminal_seen = False
+        terminal_seen = terminal_state_synced
         for record in due_records:
             owner, repo = record.repository.split("/", 1)
             get_pr = getattr(client, "get_pr", None)
@@ -621,6 +623,16 @@ def _active_short_term_goal(config: RunConfig) -> bool:
 def _backfill_lifecycle_records(config: RunConfig, state: GovernanceState) -> bool:
     existing = {(record.repository, record.number) for record in state.lifecycle_records}
     changed = False
+    for index, record in enumerate(state.lifecycle_records):
+        if record.originating_run_dir:
+            continue
+        run_dir = _originating_run_dir_for_pr(config, record)
+        if not run_dir:
+            continue
+        state.lifecycle_records[index] = record.model_copy(
+            update={"originating_run_dir": run_dir}
+        )
+        changed = True
     for pr in state.pull_requests:
         key = (pr.repository, pr.number)
         if key in existing:
@@ -645,6 +657,58 @@ def _backfill_lifecycle_records(config: RunConfig, state: GovernanceState) -> bo
         existing.add(key)
         changed = True
     return changed
+
+
+def _sync_terminal_lifecycle_artifacts(config: RunConfig, state: GovernanceState) -> bool:
+    saw_terminal = False
+    synced = False
+    for record in state.lifecycle_records:
+        if not _lifecycle_record_is_terminal(record):
+            continue
+        saw_terminal = True
+        if _sync_governance_pr_ref_state(state, record):
+            synced = True
+        if _run_lifecycle_artifacts_need_update(config, record):
+            synced = _update_originating_run_lifecycle_artifacts(config, record) or synced
+        synced = _append_post_completion_outcome_if_needed(config, record) or synced
+    if saw_terminal and _refresh_participant_pr_counts(config, state):
+        synced = True
+    return synced
+
+
+def _lifecycle_record_is_terminal(record: PrLifecycleRecord) -> bool:
+    return record.state in {"closed", "merged"} or record.lifecycle_status in {
+        "closed",
+        "failed",
+        "merged",
+        "rejected",
+    }
+
+
+def _sync_governance_pr_ref_state(
+    state: GovernanceState,
+    record: PrLifecycleRecord,
+) -> bool:
+    expected = _pr_state_from_lifecycle(record)
+    changed = False
+    for index, pr in enumerate(state.pull_requests):
+        if pr.repository != record.repository or pr.number != record.number:
+            continue
+        if pr.state == expected:
+            continue
+        state.pull_requests[index] = pr.model_copy(update={"state": expected})
+        changed = True
+    return changed
+
+
+def _pr_state_from_lifecycle(record: object) -> str:
+    state = str(getattr(record, "state", "") or "open")
+    lifecycle_status = str(getattr(record, "lifecycle_status", "") or "")
+    if state == "merged" or lifecycle_status == "merged":
+        return "merged"
+    if state == "closed" or lifecycle_status == "closed":
+        return "closed"
+    return "open"
 
 
 def _originating_run_dir_for_pr(config: RunConfig, pr: object) -> str:
@@ -689,19 +753,103 @@ def _originating_run_dir_for_pr(config: RunConfig, pr: object) -> str:
     return ""
 
 
+def _run_lifecycle_artifacts_need_update(config: RunConfig, record: PrLifecycleRecord) -> bool:
+    if not record.originating_run_dir:
+        return False
+    run_dir = Path(record.originating_run_dir)
+    lifecycle_path = run_dir / "pr_lifecycle_state.json"
+    if _lifecycle_state_file_needs_update(lifecycle_path, record):
+        return True
+    summary_path = run_dir / "run_summary.json"
+    if not summary_path.exists():
+        return True
+    try:
+        payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    expected_pr_state = _pr_state_from_lifecycle(record)
+    pr = payload.get("pull_request")
+    if not isinstance(pr, dict) or pr.get("state") != expected_pr_state:
+        return True
+    try:
+        pr_number = int(pr.get("number"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return True
+    if pr_number != record.number:
+        return True
+    if record.url and pr.get("url") != record.url:
+        return True
+    outcome = payload.get("maintainer_outcome")
+    expected_outcome = _maintainer_outcome_from_lifecycle(record)
+    if not isinstance(outcome, dict):
+        return True
+    for key, value in expected_outcome.items():
+        if outcome.get(key) != value:
+            return True
+    judgement = payload.get("judgement")
+    if isinstance(judgement, dict):
+        expected_adjustment = _real_world_adjustment_for_lifecycle(config, record, expected_outcome)
+        if judgement.get("real_world_adjustment") != expected_adjustment:
+            return True
+    return False
+
+
+def _lifecycle_state_file_needs_update(path: Path, record: PrLifecycleRecord) -> bool:
+    if not path.exists():
+        return True
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return True
+    if not isinstance(payload, dict):
+        return True
+    records = payload.get("records")
+    if not isinstance(records, list):
+        return True
+    for existing in records:
+        if not isinstance(existing, dict):
+            continue
+        if existing.get("repository") != record.repository:
+            continue
+        try:
+            number = int(existing.get("number"))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+        if number != record.number:
+            continue
+        if existing.get("state") != record.state:
+            return True
+        if existing.get("lifecycle_status") != record.lifecycle_status:
+            return True
+        if record.url and existing.get("url") != record.url:
+            return True
+        if record.last_observed_at and existing.get("last_observed_at") != record.last_observed_at:
+            return True
+        if (
+            record.originating_run_dir
+            and existing.get("originating_run_dir") != record.originating_run_dir
+        ):
+            return True
+        return False
+    return True
+
+
 def _update_originating_run_lifecycle_artifacts(
     config: RunConfig,
     record: PrLifecycleRecord,
-) -> None:
+) -> bool:
     if season_is_completed(config):
-        return
+        return False
     if not record.originating_run_dir:
-        return
+        return False
     run_dir = Path(record.originating_run_dir)
     if not run_dir.exists():
-        return
+        return False
     _upsert_run_lifecycle_state(config, run_dir, record)
     _update_run_summary_outcome(config, run_dir, record)
+    return True
 
 
 def _upsert_run_lifecycle_state(
@@ -763,7 +911,7 @@ def _update_run_summary_outcome(
         {
             "url": record.url or pr.get("url") or "",
             "number": record.number,
-            "state": record.state,
+            "state": _pr_state_from_lifecycle(record),
         }
     )
     payload["pull_request"] = pr
@@ -828,9 +976,9 @@ def _real_world_adjustment_for_lifecycle(
     return 0
 
 
-def _refresh_participant_pr_counts(config: RunConfig, state: GovernanceState) -> None:
+def _refresh_participant_pr_counts(config: RunConfig, state: GovernanceState) -> bool:
     if not config.run.season_id or not config.run.participant_id:
-        return
+        return False
     participant_state = load_participant_state(
         SeasonStore.from_config(config),
         config.run.season_id,
@@ -841,21 +989,23 @@ def _refresh_participant_pr_counts(config: RunConfig, state: GovernanceState) ->
     for record in [*state.pull_requests, *state.lifecycle_records]:
         ref = (record.repository, int(record.number))
         refs.add(ref)
-        if record.state == "merged" or getattr(record, "lifecycle_status", "") == "merged":
+        if _pr_state_from_lifecycle(record) == "merged":
             merged.add(ref)
-    participant_state.update(
-        {
-            "season_id": config.run.season_id,
-            "participant_id": config.run.participant_id,
-            "prs_opened": len(refs),
-            "merged_prs": len(merged),
-        }
-    )
+    expected = {
+        "season_id": config.run.season_id,
+        "participant_id": config.run.participant_id,
+        "prs_opened": len(refs),
+        "merged_prs": len(merged),
+    }
+    if all(participant_state.get(key) == value for key, value in expected.items()):
+        return False
+    participant_state.update(expected)
     state_path = SeasonStore.from_config(config).participant_dir(
         config.run.season_id,
         config.run.participant_id,
     ) / "participant_state.json"
     atomic_write_json(state_path, participant_state, sort_keys=True)
+    return True
 
 
 def _append_external_lifecycle_log(
@@ -929,11 +1079,15 @@ def _record_lifecycle_memory_artifacts(
 def _append_post_completion_outcome_if_needed(
     config: RunConfig,
     record: PrLifecycleRecord,
-) -> None:
+) -> bool:
     if not season_is_completed(config) or not config.run.season_id:
-        return
+        return False
+    store = SeasonStore.from_config(config)
+    path = store.post_completion_outcomes_path(config.run.season_id)
+    if _post_completion_outcome_recorded(path, record):
+        return False
     append_post_completion_outcome(
-        SeasonStore.from_config(config),
+        store,
         config.run.season_id,
         {
             "ts": datetime.now(UTC).isoformat(),
@@ -948,6 +1102,39 @@ def _append_post_completion_outcome_if_needed(
             "originating_run_dir": record.originating_run_dir,
         },
     )
+    return True
+
+
+def _post_completion_outcome_recorded(path: Path, record: PrLifecycleRecord) -> bool:
+    if not path.exists():
+        return False
+    try:
+        rows = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    for row in rows:
+        if not row.strip():
+            continue
+        try:
+            payload = json.loads(row)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("repository") != record.repository:
+            continue
+        try:
+            number = int(payload.get("number"))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+        if number != record.number:
+            continue
+        if payload.get("state") != record.state:
+            continue
+        if payload.get("lifecycle_status") != record.lifecycle_status:
+            continue
+        return True
+    return False
 
 
 def _lifecycle_memory_run_id(record: object) -> str:
