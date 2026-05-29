@@ -396,6 +396,7 @@ class ContributorAgent:
                 aci_verify,
                 aci_suggest_verification,
                 aci_clean_generated,
+                operator_report_progress,
                 aci_runtime_get_context,
                 aci_memory_get_context,
                 aci_memory_search,
