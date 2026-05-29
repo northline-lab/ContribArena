@@ -253,6 +253,8 @@ def _submission_outcome(run_dir: Path, terminal: TerminalState) -> str:
         return "no_pr_quality_blocked"
     if any(row.get("error_kind") == "governance_block" for row in open_rows):
         return "no_pr_governance_blocked_agent"
+    if any(row.get("error_kind") == "pr_identity_mismatch" for row in open_rows):
+        return "no_pr_identity_mismatch"
     if any(
         str(row.get("error_kind") or "") in {
             "git_prepare_branch_transient",

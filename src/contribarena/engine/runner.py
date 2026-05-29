@@ -25,7 +25,6 @@ from contribarena.engine.agent_loop import (
 )
 from contribarena.engine.artifacts import ArtifactWriter
 from contribarena.engine.context import ContextBuilder
-from contribarena.engine.external_lifecycle import lifecycle_record_for_opened_pr
 from contribarena.engine.guidance import guidance_artifact_payload, install_guidance_sidecar
 from contribarena.engine.goals import GoalService
 from contribarena.engine.judgement import (
@@ -45,14 +44,7 @@ from contribarena.engine.lifecycle import (
 )
 from contribarena.engine.middleware.artifact import ArtifactCapture
 from contribarena.engine.middleware.budget import BudgetTracker
-from contribarena.engine.middleware.governance import (
-    GovernanceMiddleware,
-    load_governance_state,
-    record_governance_attempt,
-    record_governance_pr,
-    save_governance_state,
-    upsert_lifecycle_record,
-)
+from contribarena.engine.middleware.governance import load_governance_state
 from contribarena.engine.operator_events import OperatorProgressWriter, truncate_for_operator
 from contribarena.engine.runtime_config import apply_output_dir
 from contribarena.engine.seasons import admit_run
@@ -73,10 +65,8 @@ from contribarena.errors import AgentError, BudgetExhausted, InfrastructureError
 from contribarena.memory import MemoryService
 from contribarena.models import (
     AgentFinalResult,
-    CiCheck,
     CiStatus,
     CommandResult,
-    GovernanceDecision,
     PrLifecycleRecord,
     PullRequestDraft,
     QualityGateResult,
@@ -88,12 +78,7 @@ from contribarena.providers import ContribArenaModelProvider, TracingModelProvid
 from contribarena.providers.action_guard import visible_text_from_turn
 from contribarena.providers.turns import ProviderTurn
 from contribarena.trace import TraceWriter
-from contribarena.tools.github_pr import (
-    ForkEnsureResult,
-    GitHubPullRequestClient,
-    LabelOperationResult,
-    PullRequestCreateResult,
-)
+from contribarena.tools.github_pr import GitHubPullRequestClient
 from contribarena.tools.repo_eligibility import repo_check_eligibility
 from contribarena.tools.repo_metadata import repo_get_metadata
 from contribarena.tools.registry import ToolRegistry
@@ -107,23 +92,6 @@ class RunResult:
     tool_calls: int
     terminal_reason: str = ""
     terminal_layer: str = ""
-
-
-@dataclass
-class OwnedLivePrExecutionResult:
-    strategy: str
-    head: str = ""
-    requested_fork_owner: str = ""
-    fork_result: ForkEnsureResult | None = None
-    push_result: CommandResult | None = None
-    pr_result: PullRequestCreateResult | None = None
-    label_ensure_result: LabelOperationResult | None = None
-    label_set_result: LabelOperationResult | None = None
-    label_skipped_reason: str = ""
-
-
-_LIVE_PR_RETRY_ATTEMPTS = 3
-_LIVE_PR_RETRY_SLEEP_SECONDS = 2.0
 
 
 @dataclass
@@ -164,20 +132,23 @@ class Runner:
                 verbose=verbose,
             )
             raise
+        run_updates = {"id": run_id}
         if admission.ranked:
-            run_updates = {
-                "season_id": admission.season_id,
-                "participant_id": admission.participant_id,
-                "wake_source": admission.wake_source,
-            }
+            run_updates.update(
+                {
+                    "season_id": admission.season_id,
+                    "participant_id": admission.participant_id,
+                    "wake_source": admission.wake_source,
+                }
+            )
             if admission.participant is not None:
                 run_updates["model"] = admission.participant.model
-            config = config.model_copy(
-                update={
-                    "run": config.run.model_copy(update=run_updates)
-                },
-                deep=True,
-            )
+        config = config.model_copy(
+            update={
+                "run": config.run.model_copy(update=run_updates)
+            },
+            deep=True,
+        )
         artifacts = ArtifactWriter(
             config.artifacts.output_root,
             run_id,
@@ -445,19 +416,27 @@ class Runner:
                     "warnings": quality_gate.warnings,
                 },
             )
+            if config.run.mode == "external_live":
+                target = _live_target_candidate(config, result)
+                external_review = _evaluate_external_live_review(
+                    config=config,
+                    result=result,
+                    target=target,
+                    patch=patch,
+                )
+                _write_external_live_review_artifacts(artifacts, external_review)
             pr_draft, terminal = _write_pr_lifecycle_artifacts(
                 config=config,
                 artifacts=artifacts,
                 trace=trace,
                 operator=operator,
                 result=result,
-                workspace=workspace,
                 capture=capture,
                 quality_gate=quality_gate,
                 terminal=terminal,
                 patch=patch,
-                pr_client=self.pr_client,
             )
+            _write_governance_decision_artifact(artifacts, capture)
             terminal = _terminal_state_for_live_submission(
                 config=config,
                 terminal=terminal,
@@ -1000,7 +979,7 @@ def _write_capture_artifacts(artifacts: ArtifactWriter, capture: ArtifactCapture
         _write_jsonl_artifact(
             artifacts,
             "live_action_log.jsonl",
-            capture.live_action_rows,
+            _live_action_rows(capture),
         )
 
 
@@ -1426,13 +1405,6 @@ def _judgement_progress_reporter(
 
     return report
 
-
-def _runner_auto_submit_enabled(config: RunConfig) -> bool:
-    # Legacy escape hatch for historical smoke tests and emergency rollback.
-    # The target live path is agent-owned GitHub submission through tools.
-    return os.environ.get("CONTRIBARENA_LEGACY_RUNNER_AUTO_SUBMIT") == "1"
-
-
 def _operator_judgement_status(event: str, payload: dict[str, object]) -> str:
     if event.endswith(".failed"):
         return "needs_attention"
@@ -1472,252 +1444,59 @@ def _write_pr_lifecycle_artifacts(
     trace: TraceWriter,
     operator: OperatorProgressWriter,
     result: AgentFinalResult,
-    workspace: DockerWorkspaceManager,
     capture: ArtifactCapture,
     quality_gate: QualityGateResult,
     terminal: TerminalState,
     patch: str,
-    pr_client: object | None = None,
 ) -> tuple[PullRequestDraft | None, TerminalState]:
     pr_draft: PullRequestDraft | None = None
-    governance_decision: GovernanceDecision | None = None
-    live_pr_result: OwnedLivePrExecutionResult | None = None
     live_ci_status: CiStatus | None = None
-    live_target: RepoCandidate | None = None
     if quality_gate.status == "pass":
-        trace.write(
-            RunState.PR_DRY_RUN_STARTED,
-            "pr_dry_run.started",
-            {"mode": "dry_run"},
-        )
-        pr_draft = build_pr_draft(config, result, patch)
-        artifacts.write_markdown("pr_description.md", render_pr_description(pr_draft))
-        trace.write(
-            RunState.PR_DRAFT_CREATED,
-            "pr_dry_run.draft_created",
-            {"title": pr_draft.title, "branch": pr_draft.branch, "labels": pr_draft.labels},
-        )
-        operator.write(
-            "pr_draft",
-            "created",
-            "created PR draft from accepted contribution",
-            evidence=["pr_description.md", "trace.jsonl"],
-            payload={"title": pr_draft.title, "branch": pr_draft.branch},
-        )
-        if _runner_auto_submit_enabled(config) and config.run.mode in {"owned_live", "external_live"}:
-            target = _live_target_candidate(config, result)
-            live_target = target
-            external_review = (
-                _evaluate_external_live_review(config, result, target, patch)
-                if config.run.mode == "external_live"
-                else None
+        if config.run.mode in {"shadow", "dry_run"}:
+            trace.write(
+                RunState.PR_DRY_RUN_STARTED,
+                "pr_dry_run.started",
+                {"mode": "dry_run"},
             )
-            if external_review is not None:
-                _write_external_live_review_artifacts(artifacts, external_review)
-            governance_decision = _evaluate_live_pr(
-                config=config,
-                trace=trace,
-                result=result,
-                quality_gate=quality_gate,
-                draft=pr_draft,
-                patch=patch,
-                pr_client=pr_client,
-                target=target,
-                external_review=external_review,
+            pr_draft = build_pr_draft(config, result, patch, run_id=artifacts.run_id)
+            artifacts.write_markdown("pr_description.md", render_pr_description(pr_draft))
+            trace.write(
+                RunState.PR_DRAFT_CREATED,
+                "pr_dry_run.draft_created",
+                {"title": pr_draft.title, "branch": pr_draft.branch, "labels": pr_draft.labels},
             )
-            artifacts.write_json(
-                "governance_decision.json",
-                governance_decision.model_dump(mode="json"),
-                required=False,
+            operator.write(
+                "pr_draft",
+                "created",
+                "created PR draft from accepted contribution",
+                evidence=["pr_description.md", "trace.jsonl"],
+                payload={"title": pr_draft.title, "branch": pr_draft.branch},
             )
-            if not governance_decision.passed:
+        elif config.run.mode in {"owned_live", "external_live"}:
+            live_pr_artifact = _agent_live_pr_description(capture)
+            if live_pr_artifact is not None:
+                artifacts.write_markdown("pr_description.md", live_pr_artifact)
+                trace.write(
+                    RunState.PR_DRAFT_CREATED,
+                    "pr_live_agent_artifact.captured",
+                    {"artifact": "pr_description.md"},
+                )
                 operator.write(
-                    "governance_gate",
-                    "blocked",
-                    "governance blocked live PR submission",
-                    evidence=["governance_decision.json", "trace.jsonl"],
-                    payload=governance_decision.model_dump(mode="json"),
+                    "pr_submit",
+                    "recorded",
+                    "recorded agent-submitted live PR text",
+                    evidence=["pr_description.md", "trace.jsonl"],
                 )
-                result.status = "blocked"
-                result.blockers.extend(
-                    [
-                        f"governance blocked live PR: {reason}"
-                        for reason in governance_decision.reasons
-                    ]
-                )
-                terminal = TerminalState(
-                    status="blocked",
-                    reason="governance_blocked",
-                    layer="governance",
-                    message="; ".join(governance_decision.reasons),
-                    agent_status=terminal.agent_status,
-                    harness_status="blocked",
-                )
-            else:
-                operator.write(
-                    "governance_gate",
-                    "pass",
-                    "governance allowed live PR submission",
-                    evidence=["governance_decision.json", "trace.jsonl"],
-                    payload=governance_decision.model_dump(mode="json"),
-                )
-                live_pr_result = _execute_live_pr(
+            if config.run.mode == "external_live":
+                _write_external_lifecycle_artifacts(
                     config=config,
-                    workspace=workspace,
+                    artifacts=artifacts,
                     capture=capture,
-                    draft=pr_draft,
-                    pr_client=pr_client,
-                    target=target,
+                    ci_status=live_ci_status or build_ci_status(capture, quality_gate),
                 )
-                if live_pr_result.fork_result is not None and not live_pr_result.fork_result.ok:
-                    operator.write(
-                        "pr_submit",
-                        "failed",
-                        "fork preparation failed before PR creation",
-                        evidence=["live_action_log.jsonl", "trace.jsonl"],
-                        payload={"error": truncate_for_operator(live_pr_result.fork_result.error)},
-                    )
-                    result.status = "failed"
-                    result.blockers.append(f"{config.run.mode} fork preparation failed")
-                    terminal = TerminalState(
-                        status="failed",
-                        reason="pr_fork_prepare_failed",
-                        layer="pr",
-                        message=live_pr_result.fork_result.error,
-                        agent_status=terminal.agent_status,
-                        harness_status="failed",
-                    )
-                elif (
-                    live_pr_result.push_result is None or live_pr_result.push_result.exit_code != 0
-                ):
-                    operator.write(
-                        "pr_submit",
-                        "failed",
-                        "branch push failed before PR creation",
-                        evidence=["live_action_log.jsonl", "trace.jsonl"],
-                        payload={
-                            "exit_code": (
-                                live_pr_result.push_result.exit_code
-                                if live_pr_result.push_result is not None
-                                else None
-                            )
-                        },
-                    )
-                    result.status = "failed"
-                    result.blockers.append(f"{config.run.mode} branch push failed")
-                    terminal = TerminalState(
-                        status="failed",
-                        reason="pr_branch_push_failed",
-                        layer="pr",
-                        message=(
-                            live_pr_result.push_result.stderr or live_pr_result.push_result.stdout
-                            if live_pr_result.push_result is not None
-                            else ""
-                        ),
-                        agent_status=terminal.agent_status,
-                        harness_status="failed",
-                    )
-                elif live_pr_result.pr_result is None or not live_pr_result.pr_result.ok:
-                    operator.write(
-                        "pr_submit",
-                        "failed",
-                        "GitHub PR creation failed",
-                        evidence=["live_action_log.jsonl", "trace.jsonl"],
-                        payload={
-                            "error": (
-                                truncate_for_operator(live_pr_result.pr_result.error)
-                                if live_pr_result.pr_result
-                                else ""
-                            )
-                        },
-                    )
-                    result.status = "failed"
-                    result.blockers.append(f"{config.run.mode} PR creation failed")
-                    terminal = TerminalState(
-                        status="failed",
-                        reason="pr_open_failed",
-                        layer="pr",
-                        message=(
-                            live_pr_result.pr_result.error if live_pr_result.pr_result else ""
-                        ),
-                        agent_status=terminal.agent_status,
-                        harness_status="failed",
-                    )
-                elif _live_label_failure(live_pr_result):
-                    live_ci_status = _observe_live_ci(
-                        config=config,
-                        pr_client=pr_client,
-                        pr_result=live_pr_result.pr_result,
-                        target=target,
-                    )
-                    _record_opened_live_pr(
-                        config,
-                        governance_decision,
-                        pr_draft,
-                        live_pr_result.pr_result,
-                        live_pr_result,
-                        live_ci_status,
-                        target,
-                        artifacts.run_dir,
-                    )
-                    label_error = _live_label_error(live_pr_result)
-                    label_permission_boundary = _live_label_permission_boundary(
-                        live_pr_result
-                    )
-                    operator.write(
-                        "pr_labels",
-                        "permission_denied" if label_permission_boundary else "failed",
-                        (
-                            "GitHub PR label application lacked upstream permission"
-                            if label_permission_boundary
-                            else "GitHub PR label application failed"
-                        ),
-                        evidence=["live_action_log.jsonl", "trace.jsonl"],
-                        payload={
-                            "error": truncate_for_operator(label_error),
-                            "nonfatal": True,
-                            "retryable": not label_permission_boundary,
-                        },
-                    )
-                else:
-                    operator.write(
-                        "pr_submit",
-                        "opened",
-                        "opened live pull request",
-                        evidence=["live_action_log.jsonl", "pr_description.md"],
-                        payload={
-                            "number": live_pr_result.pr_result.number,
-                            "url": live_pr_result.pr_result.url,
-                            "head": live_pr_result.head,
-                        },
-                    )
-                    live_ci_status = _observe_live_ci(
-                        config=config,
-                        pr_client=pr_client,
-                        pr_result=live_pr_result.pr_result,
-                        target=target,
-                    )
-                    _record_opened_live_pr(
-                        config,
-                        governance_decision,
-                        pr_draft,
-                        live_pr_result.pr_result,
-                        live_pr_result,
-                        live_ci_status,
-                        target,
-                        artifacts.run_dir,
-                    )
 
     ci_status = live_ci_status or build_ci_status(capture, quality_gate)
     artifacts.write_json("ci_status.json", ci_status.model_dump(mode="json"))
-    if config.run.mode == "external_live":
-        _write_external_lifecycle_artifacts(
-            config=config,
-            artifacts=artifacts,
-            target=live_target,
-            live_pr_result=live_pr_result,
-            ci_status=ci_status,
-        )
     trace.write(RunState.CI_OBSERVED, "ci.observed", ci_status.model_dump(mode="json"))
     operator.write(
         "ci_observe",
@@ -1726,18 +1505,7 @@ def _write_pr_lifecycle_artifacts(
         evidence=["ci_status.json", "trace.jsonl"],
         payload=ci_status.model_dump(mode="json"),
     )
-    live_action_entries = (
-        capture.live_action_rows
-        if capture.live_action_rows
-        else _live_action_log_entries(
-            pr_draft,
-            governance_decision,
-            live_pr_result,
-            live_ci_status,
-        )
-    )
-    if live_action_entries and not capture.live_action_rows:
-        capture.live_action_rows.extend(live_action_entries)
+    live_action_entries = _live_action_rows(capture)
     artifacts.write_text(
         "live_action_log.jsonl",
         "\n".join(json.dumps(entry, ensure_ascii=True) for entry in live_action_entries),
@@ -1762,430 +1530,49 @@ def _write_pr_lifecycle_artifacts(
     return pr_draft, terminal
 
 
-def _execute_live_pr(
-    *,
-    config: RunConfig,
-    workspace: DockerWorkspaceManager,
-    capture: ArtifactCapture,
-    draft: PullRequestDraft,
-    pr_client: object | None,
-    target: RepoCandidate,
-) -> OwnedLivePrExecutionResult:
-    if config.run.mode == "owned_live" and _owned_repo_policy(config) is None:
-        raise ValueError("owned_live PR execution requires an owned repository policy")
-    policy = _owned_repo_policy(config)
-    strategy = "fork" if config.run.mode == "external_live" else policy.pr_submission.strategy
-    actor = config.governance.bot_identity.actor or "contribarena-bot"
-    token_env = config.governance.bot_identity.token_env
-    token = os.environ.get(token_env, "")
-    client = pr_client or GitHubPullRequestClient(token_env=token_env)
-    fork_result: ForkEnsureResult | None = None
-    push_owner = target.owner
-    head = draft.branch
-    if strategy == "fork":
-        fork_owner = (policy.pr_submission.fork_owner if policy is not None else None) or actor
-        ensure_fork = getattr(client, "ensure_fork", None)
-        if ensure_fork is None:
-            fork_result = ForkEnsureResult(
-                ok=False,
-                error="PR client does not support fork submission",
-                source="harness",
-            )
-            return OwnedLivePrExecutionResult(
-                strategy=strategy,
-                requested_fork_owner=fork_owner,
-                fork_result=fork_result,
-            )
-        fork_result = ensure_fork(
-            owner=target.owner,
-            repo=target.repo,
-            fork_owner=fork_owner,
-        )
-        if not fork_result.ok:
-            return OwnedLivePrExecutionResult(
-                strategy=strategy,
-                requested_fork_owner=fork_owner,
-                fork_result=fork_result,
-            )
-        push_owner = fork_result.owner or fork_owner
-        head = f"{push_owner}:{draft.branch}"
-    command = _owned_live_push_command(
-        owner=push_owner,
-        repo=target.repo,
-        branch=draft.branch,
-        title=draft.title,
-        actor=actor,
-        token_env=token_env,
-    )
-    push_result = _run_live_push_with_retry(
-        workspace=workspace,
-        command=command,
-        env={token_env: token},
-        token=token,
-        capture=capture,
-    )
-    if push_result.command_type != "other":
-        push_result = push_result.model_copy(update={"command_type": "other"})
-    if push_result.exit_code != 0:
-        return OwnedLivePrExecutionResult(
-            strategy=strategy,
-            head=head,
-            requested_fork_owner=fork_owner if strategy == "fork" else "",
-            fork_result=fork_result,
-            push_result=push_result,
-        )
-
-    pr_result = _open_live_pr_with_retry(
-        client=client,
-        owner=target.owner,
-        repo=target.repo,
-        title=draft.title,
-        body=draft.body,
-        head=head,
-        base=_live_base_branch(config, target),
-    )
-    label_ensure_result: LabelOperationResult | None = None
-    label_set_result: LabelOperationResult | None = None
-    label_skipped_reason = ""
-    if (
-        pr_result.ok
-        and draft.labels
-        and config.run.mode == "external_live"
-        and not config.governance.external_live.attempt_upstream_labels
-    ):
-        label_skipped_reason = "upstream label submission skipped by external_live policy"
-    elif pr_result.ok and draft.labels:
-        ensure_labels = getattr(client, "ensure_labels", None)
-        set_pr_labels = getattr(client, "set_pr_labels", None)
-        if pr_result.number is None:
-            label_ensure_result = LabelOperationResult(
-                ok=False,
-                labels=draft.labels,
-                error="GitHub PR response did not include a PR number for labels",
-                source="harness",
-            )
-        elif ensure_labels is None or set_pr_labels is None:
-            label_ensure_result = LabelOperationResult(
-                ok=False,
-                labels=draft.labels,
-                error="PR client does not support GitHub label submission",
-                source="harness",
-            )
-        else:
-            label_ensure_result = ensure_labels(
-                owner=target.owner,
-                repo=target.repo,
-                labels=draft.labels,
-            )
-            if label_ensure_result.ok:
-                label_set_result = set_pr_labels(
-                    owner=target.owner,
-                    repo=target.repo,
-                    issue_number=pr_result.number,
-                    labels=draft.labels,
-                )
-    return OwnedLivePrExecutionResult(
-        strategy=strategy,
-        head=head,
-        requested_fork_owner=fork_owner if strategy == "fork" else "",
-        fork_result=fork_result,
-        push_result=push_result,
-        pr_result=pr_result,
-        label_ensure_result=label_ensure_result,
-        label_set_result=label_set_result,
-        label_skipped_reason=label_skipped_reason,
-    )
-
-
-def _run_live_push_with_retry(
-    *,
-    workspace: DockerWorkspaceManager,
-    command: str,
-    env: dict[str, str],
-    token: str,
-    capture: ArtifactCapture,
-) -> CommandResult:
-    result: CommandResult | None = None
-    for attempt in range(1, _LIVE_PR_RETRY_ATTEMPTS + 1):
-        result = _redact_live_command_result(workspace.run_with_env(command, env), token)
-        if result.command_type != "other":
-            result = result.model_copy(update={"command_type": "other"})
-        capture.record_command(result)
-        if result.exit_code == 0 or not _transient_runtime_message(
-            "\n".join((result.stderr, result.stdout))
-        ):
-            return result
-        if attempt < _LIVE_PR_RETRY_ATTEMPTS:
-            sleep(_LIVE_PR_RETRY_SLEEP_SECONDS)
-    if result is None:
-        raise RuntimeError("live PR push did not run")
-    return result
-
-
-def _open_live_pr_with_retry(
-    *,
-    client: object,
-    owner: str,
-    repo: str,
-    title: str,
-    body: str,
-    head: str,
-    base: str,
-) -> PullRequestCreateResult:
-    open_pr = getattr(client, "open_pr")
-    result: PullRequestCreateResult | None = None
-    for attempt in range(1, _LIVE_PR_RETRY_ATTEMPTS + 1):
-        result = open_pr(
-            owner=owner,
-            repo=repo,
+def _agent_live_pr_description(capture: ArtifactCapture) -> str | None:
+    for row in reversed(_live_action_rows(capture)):
+        if row.get("action") != "github.open_pr":
+            continue
+        if row.get("status") not in {"opened", "existing"}:
+            continue
+        title = str(row.get("title") or "").strip()
+        body = str(row.get("body") or "").strip()
+        if not title:
+            continue
+        branch = str(row.get("head") or "").strip()
+        labels = row.get("labels")
+        draft = PullRequestDraft(
             title=title,
+            branch=branch or "agent-submitted-live-pr",
+            labels=[str(item) for item in labels] if isinstance(labels, list) else [],
             body=body,
-            head=head,
-            base=base,
         )
-        if result.ok or not _transient_runtime_message(result.error):
-            return result
-        if attempt < _LIVE_PR_RETRY_ATTEMPTS:
-            sleep(_LIVE_PR_RETRY_SLEEP_SECONDS)
-    if result is None:
-        raise RuntimeError("live PR open did not run")
-    return result
+        return render_pr_description(draft)
+    return None
 
 
-def _observe_live_ci(
-    *,
-    config: RunConfig,
-    pr_client: object | None,
-    pr_result: PullRequestCreateResult,
-    target: RepoCandidate | None = None,
-) -> CiStatus:
-    candidate = target or (config.discovery.candidates[0] if config.discovery.candidates else None)
-    if candidate is None:
-        return CiStatus(
-            status="not_run",
-            source="github",
-            checks=[
-                CiCheck(
-                    name="github_check_runs",
-                    status="skipped",
-                    details="No configured repository was available for CI observation.",
-                )
-            ],
-        )
-    client = pr_client or GitHubPullRequestClient(
-        token_env=config.governance.bot_identity.token_env
-    )
-    get_check_runs = getattr(client, "get_check_runs", None)
-    if get_check_runs is None:
-        return CiStatus(
-            status="not_run",
-            source="github",
-            checks=[
-                CiCheck(
-                    name="github_check_runs",
-                    status="skipped",
-                    details="PR client does not support GitHub check-runs observation.",
-                )
-            ],
-        )
-    ref = pr_result.head_sha or ""
-    if not ref:
-        return CiStatus(
-            status="not_run",
-            source="github",
-            checks=[
-                CiCheck(
-                    name="github_check_runs",
-                    status="skipped",
-                    details="GitHub PR response did not include a head SHA for CI observation.",
-                )
-            ],
-        )
-    return get_check_runs(owner=candidate.owner, repo=candidate.repo, ref=ref)
-
-
-def _live_label_failure(result: OwnedLivePrExecutionResult) -> bool:
-    return (
-        result.label_ensure_result is not None
-        and not result.label_ensure_result.ok
-        or result.label_set_result is not None
-        and not result.label_set_result.ok
-    )
-
-
-def _live_label_error(result: OwnedLivePrExecutionResult) -> str:
-    if result.label_ensure_result is not None and not result.label_ensure_result.ok:
-        return result.label_ensure_result.error
-    if result.label_set_result is not None and not result.label_set_result.ok:
-        return result.label_set_result.error
-    return ""
-
-
-def _live_label_permission_boundary(result: OwnedLivePrExecutionResult) -> bool:
-    return any(
-        _label_operation_status(label_result) == "permission_denied"
-        for label_result in (result.label_ensure_result, result.label_set_result)
-        if label_result is not None and not label_result.ok
-    )
-
-
-def _owned_live_push_command(
-    *,
-    owner: str,
-    repo: str,
-    branch: str,
-    title: str,
-    actor: str,
-    token_env: str,
-) -> str:
-    remote_url = f'"https://x-access-token:${{{token_env}}}@github.com/{owner}/{repo}.git"'
-    remote_name = "contribarena-submit"
-    remote_branch_ref = f"refs/heads/{branch}"
-    tracking_ref = f"refs/remotes/{remote_name}/{branch}"
-    email = f"{actor}@users.noreply.github.com"
-    return " && ".join(
-        [
-            f"git -C repo checkout -B {shlex.quote(branch)}",
-            f"git -C repo config user.name {shlex.quote(actor)}",
-            f"git -C repo config user.email {shlex.quote(email)}",
-            "git -C repo add -A",
-            f"git -C repo commit -m {shlex.quote(title)}",
-            "git -C repo status --short",
-            f"(git -C repo remote remove {remote_name} >/dev/null 2>&1 || true)",
-            f"git -C repo remote add {remote_name} {remote_url}",
-            "(git -c http.version=HTTP/1.1 -C repo fetch --no-tags "
-            f"{remote_name} "
-            f"{shlex.quote('+' + remote_branch_ref + ':' + tracking_ref)} "
-            ">/dev/null 2>&1 || true)",
-            "if git -C repo show-ref --verify --quiet "
-            f"{shlex.quote(tracking_ref)}; then "
-            "lease_arg="
-            f"{shlex.quote('--force-with-lease=' + remote_branch_ref + ':')}"
-            "$(git -C repo rev-parse "
-            f"{shlex.quote(tracking_ref)}); "
-            "else "
-            "lease_arg="
-            f"{shlex.quote('--force-with-lease=' + remote_branch_ref + ':')}; "
-            "fi; "
-            f"git -c http.version=HTTP/1.1 -C repo push {remote_name} "
-            f"{shlex.quote('HEAD:' + remote_branch_ref)} "
-            '"$lease_arg"',
-        ]
-    )
-
-
-def _redact_live_command_result(result: CommandResult, token: str) -> CommandResult:
-    return result.model_copy(
-        update={
-            "command": _redact_secret_text(result.command, token),
-            "stdout": _redact_secret_text(result.stdout, token),
-            "stderr": _redact_secret_text(result.stderr, token),
-        }
-    )
-
-
-def _redact_secret_text(value: str, token: str) -> str:
-    redacted = re.sub(
-        r"https://x-access-token:(?!\$\{)[^@\s]+@",
-        "https://x-access-token:***@",
-        value,
-    )
-    if token:
-        redacted = redacted.replace(token, "***")
-    return redacted
-
-
-def _record_opened_live_pr(
-    config: RunConfig,
-    decision: GovernanceDecision,
-    draft: PullRequestDraft,
-    pr_result: PullRequestCreateResult,
-    live_pr_result: OwnedLivePrExecutionResult,
-    ci_status: CiStatus | None,
-    target: RepoCandidate,
-    run_dir: Path,
+def _write_governance_decision_artifact(
+    artifacts: ArtifactWriter,
+    capture: ArtifactCapture,
 ) -> None:
-    state = load_governance_state(config)
-    record_governance_attempt(
-        state,
-        repository=decision.target_repository,
-        status="opened",
-        decision_id=decision.id,
-        action=decision.action,
-    )
-    if pr_result.number is not None:
-        record_governance_pr(
-            state,
-            repository=decision.target_repository,
-            number=pr_result.number,
-            url=pr_result.url,
-            branch=draft.branch,
-            season_id=config.run.season_id or "",
-            participant_id=config.run.participant_id or "",
-        )
-        upsert_lifecycle_record(
-            state,
-            lifecycle_record_for_opened_pr(
-                repository=decision.target_repository,
-                number=pr_result.number,
-                url=pr_result.url,
-                originating_run_dir=str(run_dir),
-                branch=draft.branch,
-                head=live_pr_result.head,
-                base=_live_base_branch(config, target),
-                head_sha=pr_result.head_sha,
-                ci_status=ci_status,
-                poll_interval_seconds=config.governance.external_live.poll_interval_seconds,
-                initial_poll_delay_seconds=(
-                    config.governance.external_live.initial_poll_delay_seconds
-                ),
-                season_id=config.run.season_id or "",
-                participant_id=config.run.participant_id or "",
-            ),
-        )
-    save_governance_state(config, state)
-
-
-def _evaluate_live_pr(
-    *,
-    config: RunConfig,
-    trace: TraceWriter,
-    result: AgentFinalResult,
-    quality_gate: QualityGateResult,
-    draft: PullRequestDraft,
-    patch: str,
-    target: RepoCandidate,
-    external_review: ExternalLiveReviewResult | None,
-    pr_client: object | None = None,
-) -> GovernanceDecision:
-    state = load_governance_state(config)
-    actor = _authenticated_actor(config, pr_client)
-    decision = GovernanceMiddleware().evaluate_pr_open(
-        config=config,
-        quality_gate=quality_gate,
-        target_owner=target.owner,
-        target_repo=target.repo,
-        base_branch=_live_base_branch(config, target),
-        contribution_class=_contribution_class(patch),
-        state=state,
-        actor=actor,
-        external_review_passed=external_review.passed if external_review is not None else True,
-        external_review_reasons=external_review.reasons if external_review is not None else None,
-    )
-    record_governance_attempt(
-        state,
-        repository=decision.target_repository,
-        status="blocked" if not decision.passed else "prepared",
-        decision_id=decision.id,
-        action=decision.action,
-    )
-    save_governance_state(config, state)
-    trace.write(
-        RunState.GOVERNANCE_BLOCKED if not decision.passed else RunState.CONTRIBUTION_REVIEWED,
-        "governance.blocked" if not decision.passed else "governance.passed",
-        decision.model_dump(mode="json"),
-    )
-    return decision
+    for row in reversed(_live_action_rows(capture)):
+        decision_id = str(row.get("governance_decision_id") or "").strip()
+        if not decision_id:
+            continue
+        decision = {
+            "id": decision_id,
+            "status": str(row.get("governance_status") or ("pass" if row.get("status") in {"opened", "existing"} else "block")),
+            "reasons": row.get("governance_reasons") or [],
+            "target_repository": str(row.get("target_repository") or ""),
+            "action": str(row.get("governance_action") or ""),
+            "contribution_class": str(row.get("contribution_class") or ""),
+            "external_write": bool(row.get("external_write")),
+            "actor": str(row.get("github_actor") or ""),
+            "created_at": str(row.get("ts") or ""),
+        }
+        artifacts.write_json("governance_decision.json", decision, required=False)
+        return
 
 
 def _authenticated_actor(config: RunConfig, pr_client: object | None) -> str:
@@ -2251,13 +1638,33 @@ def _tracked_lifecycle_records_for_runtime(
     except Exception:
         return []
     active_statuses = {"tracking", "needs_response", "stale", "blocked"}
+    participant_id = (config.run.participant_id or "").strip()
+    season_id = (config.run.season_id or "").strip()
     records = [
         record
         for record in state.lifecycle_records
         if record.lifecycle_status in active_statuses
         and (not config.discovery.candidates or record.repository == repo_slug)
+        and _record_belongs_to_runtime_participant(
+            record,
+            participant_id=participant_id,
+            season_id=season_id,
+        )
     ]
     return records[:10]
+
+
+def _record_belongs_to_runtime_participant(
+    record: PrLifecycleRecord,
+    *,
+    participant_id: str,
+    season_id: str,
+) -> bool:
+    if participant_id and record.participant_id and record.participant_id != participant_id:
+        return False
+    if season_id and record.season_id and record.season_id != season_id:
+        return False
+    return True
 
 
 def _metadata_default_branch(target: RepoCandidate) -> str:
@@ -2376,12 +1783,16 @@ def _write_external_lifecycle_artifacts(
     *,
     config: RunConfig,
     artifacts: ArtifactWriter,
-    target: RepoCandidate | None,
-    live_pr_result: OwnedLivePrExecutionResult | None,
+    capture: ArtifactCapture,
     ci_status: CiStatus,
 ) -> None:
     state = load_governance_state(config)
-    repository = target.full_name if target is not None else ""
+    repository = ""
+    for row in reversed(_live_action_rows(capture)):
+        target_repository = str(row.get("target_repository") or "")
+        if target_repository:
+            repository = target_repository
+            break
     records = [
         record.model_dump(mode="json")
         for record in state.lifecycle_records
@@ -2397,16 +1808,26 @@ def _write_external_lifecycle_artifacts(
         required=False,
     )
     entries: list[dict[str, object]] = []
-    if live_pr_result is not None and live_pr_result.pr_result is not None:
+    for row in _live_action_rows(capture):
+        if row.get("action") != "github.open_pr":
+            continue
+        status = str(row.get("status") or "")
+        if status not in {"opened", "existing", "failed"}:
+            continue
         entries.append(
             {
-                "ts": datetime.now(UTC).isoformat(),
-                "event": "pr_opened" if live_pr_result.pr_result.ok else "pr_open_failed",
-                "repository": repository,
-                "number": live_pr_result.pr_result.number,
-                "url": live_pr_result.pr_result.url,
-                "head": live_pr_result.head,
+                "ts": str(row.get("ts") or datetime.now(UTC).isoformat()),
+                "event": (
+                    "pr_opened"
+                    if status in {"opened", "existing"}
+                    else "pr_open_failed"
+                ),
+                "repository": str(row.get("target_repository") or repository),
+                "number": row.get("number") or row.get("pr_number"),
+                "url": row.get("url") or row.get("pr_url"),
+                "head": row.get("head"),
                 "ci_status": ci_status.status,
+                "status": status,
             }
         )
     artifacts.write_text(
@@ -2521,193 +1942,11 @@ def _contribution_class(patch: str) -> str:
     return "low_risk_code"
 
 
-def _live_action_log_entries(
-    draft: PullRequestDraft | None,
-    governance_decision: GovernanceDecision | None,
-    live_pr_result: OwnedLivePrExecutionResult | None = None,
-    ci_status: CiStatus | None = None,
-) -> list[dict[str, object]]:
-    if governance_decision is None:
-        return live_action_log_entries(draft)
-
-    base_entry: dict[str, object] = {
-        "ts": governance_decision.created_at,
-        "mode": "external_live" if _is_external_decision(governance_decision) else "owned_live",
-        "target_repository": governance_decision.target_repository,
-        "governance_decision_id": governance_decision.id,
-        "governance_reasons": governance_decision.reasons,
-        "requested_by_agent": True,
-        "executed_by_harness": governance_decision.passed,
-        "github_actor": governance_decision.actor,
-    }
-    if draft is not None:
-        base_entry.update({"title": draft.title, "branch": draft.branch, "labels": draft.labels})
-
-    if not governance_decision.passed:
-        return [
-            {
-                **base_entry,
-                "action": governance_decision.action,
-                "status": "blocked",
-                "external_write": False,
-            }
-        ]
-
-    entries: list[dict[str, object]] = []
-    if live_pr_result is not None and live_pr_result.fork_result is not None:
-        fork_action = (
-            "github.create_fork" if live_pr_result.fork_result.created else "github.ensure_fork"
-        )
-        entries.append(
-            {
-                **base_entry,
-                "action": fork_action,
-                "status": "ready" if live_pr_result.fork_result.ok else "failed",
-                "external_write": live_pr_result.fork_result.created,
-                "requested_fork_owner": live_pr_result.requested_fork_owner,
-                "fork_owner": live_pr_result.fork_result.owner,
-                "fork_repo": live_pr_result.fork_result.full_name,
-                "fork_url": live_pr_result.fork_result.url,
-                "fork_error": live_pr_result.fork_result.error,
-            }
-        )
-    if live_pr_result is not None and live_pr_result.push_result is not None:
-        push_action = (
-            "github.push_fork_branch"
-            if live_pr_result.strategy == "fork"
-            else "github.push_upstream_branch"
-        )
-        entries.append(
-            {
-                **base_entry,
-                "action": push_action,
-                "status": "pushed" if live_pr_result.push_result.exit_code == 0 else "failed",
-                "external_write": True,
-                "push_exit_code": live_pr_result.push_result.exit_code,
-                "head": live_pr_result.head,
-            }
-        )
-    if live_pr_result is not None and live_pr_result.pr_result is not None:
-        entries.append(
-            {
-                **base_entry,
-                "action": "github.open_pr",
-                "status": "opened" if live_pr_result.pr_result.ok else "failed",
-                "external_write": True,
-                "pr_number": live_pr_result.pr_result.number,
-                "pr_url": live_pr_result.pr_result.url,
-                "pr_error": live_pr_result.pr_result.error,
-                "head": live_pr_result.head,
-            }
-        )
-        if live_pr_result.label_ensure_result is not None:
-            label_status = _label_operation_status(live_pr_result.label_ensure_result)
-            entries.append(
-                {
-                    **base_entry,
-                    "action": "github.ensure_labels",
-                    "status": label_status,
-                    "external_write": True,
-                    "labels": live_pr_result.label_ensure_result.labels,
-                    "label_error": live_pr_result.label_ensure_result.error,
-                    "label_status_code": live_pr_result.label_ensure_result.status_code,
-                    "nonfatal": label_status in {"permission_denied", "failed"},
-                    "retryable": label_status == "failed",
-                    "source": live_pr_result.label_ensure_result.source,
-                    "pr_number": live_pr_result.pr_result.number,
-                }
-            )
-        if live_pr_result.label_skipped_reason:
-            entries.append(
-                {
-                    **base_entry,
-                    "action": "github.ensure_labels",
-                    "status": "skipped",
-                    "external_write": False,
-                    "labels": draft.labels if draft is not None else [],
-                    "reason": live_pr_result.label_skipped_reason,
-                    "nonfatal": True,
-                    "retryable": False,
-                    "source": "policy",
-                    "pr_number": live_pr_result.pr_result.number,
-                }
-            )
-        if live_pr_result.label_set_result is not None:
-            label_status = _label_operation_status(live_pr_result.label_set_result)
-            entries.append(
-                {
-                    **base_entry,
-                    "action": "github.set_pr_labels",
-                    "status": "set" if live_pr_result.label_set_result.ok else label_status,
-                    "external_write": True,
-                    "labels": live_pr_result.label_set_result.labels,
-                    "label_error": live_pr_result.label_set_result.error,
-                    "label_status_code": live_pr_result.label_set_result.status_code,
-                    "nonfatal": label_status in {"permission_denied", "failed"},
-                    "retryable": label_status == "failed",
-                    "source": live_pr_result.label_set_result.source,
-                    "pr_number": live_pr_result.pr_result.number,
-                }
-            )
-        if live_pr_result.pr_result.ok and ci_status is not None:
-            entries.append(
-                {
-                    **base_entry,
-                    "action": "github.observe_checks",
-                    "status": ci_status.status,
-                    "external_write": False,
-                    "head": live_pr_result.head,
-                    "ci_source": ci_status.source,
-                    "check_count": len(ci_status.checks),
-                    "ci_details": [check.details for check in ci_status.checks],
-                }
-            )
-    if entries:
-        return entries
-    return [
-        {
-            **base_entry,
-            "action": governance_decision.action,
-            "status": "prepared",
-            "external_write": False,
-        }
-    ]
-
-
-def _label_operation_status(result: LabelOperationResult) -> str:
-    if result.ok:
-        return "ready"
-    if result.status_code in {401, 403, 404}:
-        return "permission_denied"
-    error = result.error.lower()
-    if any(
-        marker in error
-        for marker in _LABEL_PERMISSION_ERROR_MARKERS
-    ):
-        return "permission_denied"
-    return "failed"
-
-
 def _agent_did_not_converge(capture: ArtifactCapture) -> bool:
     return any(
         item.terminal_after_retries and item.terminal_status == "failed_to_recover"
         for item in capture.aci_results
     )
-
-
-def _is_external_decision(decision: GovernanceDecision) -> bool:
-    return decision.action.startswith("github.external")
-
-
-_LABEL_PERMISSION_ERROR_MARKERS = (
-    "403",
-    "404",
-    "permission",
-    "denied",
-    "repo not found",
-    "resource not accessible",
-    "not found",
-)
 
 
 def _terminal_state_for_result(
@@ -2813,6 +2052,7 @@ def _terminal_state_for_live_submission(
         "no_pr_governance_blocked_system": "live_pr_governance_blocked",
         "no_pr_infrastructure_failure": "live_pr_infrastructure_failed",
         "no_pr_provider_failure": "live_pr_infrastructure_failed",
+        "no_pr_identity_mismatch": "pr_identity_mismatch",
     }.get(outcome, "live_pr_not_attempted")
     return TerminalState(
         status="failed",
@@ -2840,6 +2080,8 @@ def _submission_outcome(capture: ArtifactCapture, terminal: TerminalState | None
         # Global/rate-limit distinctions can be added when governance emits a
         # machine-readable reason code; default to agent-visible failure.
         return "no_pr_governance_blocked_agent"
+    if any(row.get("error_kind") == "pr_identity_mismatch" for row in open_rows):
+        return "no_pr_identity_mismatch"
     if any(
         str(row.get("error_kind") or "") in {
             "git_prepare_branch_transient",
@@ -2861,16 +2103,39 @@ def _submission_outcome(capture: ArtifactCapture, terminal: TerminalState | None
 
 
 def _live_action_rows(capture: ArtifactCapture) -> list[dict[str, object]]:
-    rows = list(capture.live_action_rows)
+    rows: list[dict[str, object]] = []
+    seen: set[tuple[object, object, object, object, object]] = set()
+
+    def append(row: dict[str, object]) -> None:
+        pr_number = row.get("number") or row.get("pr_number")
+        if row.get("action") == "github.open_pr" and not pr_number:
+            pr_number = row.get("url") or row.get("pr_url")
+        head = row.get("head")
+        if row.get("action") == "github.open_pr" and pr_number is not None:
+            head = ""
+        key = (
+            row.get("action"),
+            row.get("status"),
+            pr_number,
+            head,
+            row.get("error_kind") or "",
+        )
+        if key in seen:
+            return
+        seen.add(key)
+        rows.append(row)
+
+    for row in capture.live_action_rows:
+        append(dict(row))
     for item in capture.aci_results:
-        if not item.tool.startswith("github_") or not item.output:
+        if not item.tool.startswith("github_") or not item.success or not item.output:
             continue
         try:
             payload = json.loads(item.output)
         except json.JSONDecodeError:
             continue
         if isinstance(payload, dict) and payload.get("number") and item.tool == "github_open_pr":
-            rows.append(
+            append(
                 {
                     "action": "github.open_pr",
                     "status": "existing" if payload.get("idempotent") else "opened",
@@ -2878,6 +2143,8 @@ def _live_action_rows(capture: ArtifactCapture) -> list[dict[str, object]]:
                     "pr_url": payload.get("url"),
                     "head": payload.get("head"),
                     "head_sha": payload.get("head_sha"),
+                    "title": payload.get("title"),
+                    "body": payload.get("body"),
                 }
             )
     return rows

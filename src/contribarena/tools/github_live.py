@@ -26,7 +26,9 @@ from contribarena.tools.github_pr import (
     GitHubPullRequestClient,
     PullRequestCreateResult,
     PullRequestLookupResult,
+    PullRequestStatusResult,
 )
+from contribarena.tools.repo_eligibility import repo_check_eligibility
 
 
 LIVE_PR_RETRY_ATTEMPTS = 3
@@ -36,8 +38,10 @@ LIVE_PR_RETRY_SLEEP_SECONDS = 2.0
 @dataclass(frozen=True)
 class LiveGithubContext:
     run_id: str
+    run_mode: str = ""
     season_id: str = ""
     participant_id: str = ""
+    run_dir: str = ""
 
 
 def github_prepare_fork(
@@ -154,6 +158,27 @@ def github_prepare_branch(
     path: str = "repo",
 ) -> AciResult:
     target_repository = f"{owner}/{repo}"
+    expected_prefix = f"contribarena/{context.run_id}-"
+    if not branch.startswith(expected_prefix):
+        error = f"Live PR branch must start with {expected_prefix}"
+        payload = {
+            "branch": branch,
+            "base": base,
+            "required_prefix": expected_prefix,
+        }
+        _record_live_action(
+            capture,
+            context,
+            action="github.prepare_branch",
+            status="failed",
+            target_repository=target_repository,
+            external_write=False,
+            error_kind="branch_identity_invalid",
+            error=error,
+            retryable=False,
+            extra=payload,
+        )
+        return _result("github_prepare_branch", False, error, "branch_identity_invalid", payload)
     url = f"https://github.com/{target_repository}.git"
     quoted_path = shlex.quote(path)
     safe_run_id = "".join(
@@ -407,17 +432,31 @@ def github_open_pr(
     )
     actor = _authenticated_actor(pr_client) or config.governance.bot_identity.actor
     state = load_governance_state(config)
+    external_review_passed = True
+    external_review_reasons: list[str] | None = None
+    contribution_class = "low_risk_code"
+    if config.run.mode == "external_live":
+        external_review = _external_live_review(
+            config=config,
+            capture=capture,
+            owner=owner,
+            repo=repo,
+        )
+        external_review_passed = external_review.passed
+        external_review_reasons = external_review.reasons
+        contribution_class = external_review.contribution_class
     decision = GovernanceMiddleware().evaluate_pr_open(
         config=config,
         quality_gate=quality,
         target_owner=owner,
         target_repo=repo,
         base_branch=base,
-        contribution_class="low_risk_code",
+        contribution_class=contribution_class,
         state=state,
         agent_id=config.run.participant_id or "builtin",
         actor=actor,
-        external_review_passed=True,
+        external_review_passed=external_review_passed,
+        external_review_reasons=external_review_reasons,
     )
     if not decision.passed:
         record_governance_attempt(
@@ -438,7 +477,14 @@ def github_open_pr(
             error_kind="governance_block",
             error="; ".join(decision.reasons),
             governance_decision_id=decision.id,
-            extra={"governance_reasons": decision.reasons, "github_actor": decision.actor},
+            extra={
+                "governance_status": decision.status,
+                "governance_reasons": decision.reasons,
+                "governance_action": decision.action,
+                "github_actor": decision.actor,
+                "contribution_class": decision.contribution_class,
+                "target_repository": decision.target_repository,
+            },
         )
         return _result(
             "github_open_pr",
@@ -448,9 +494,42 @@ def github_open_pr(
             decision.model_dump(mode="json"),
         )
 
+    expected_head_sha = _pushed_head_sha(capture, head)
     lookup = _find_existing_pr(pr_client, owner=owner, repo=repo, head=head, base=base)
     if lookup.ok:
-        payload = _pr_payload(lookup, head=head, base=base, idempotent=True)
+        payload = _pr_payload(
+            lookup,
+            head=head,
+            base=base,
+            idempotent=True,
+            title=title,
+            body=body,
+        )
+        identity_error = _verify_pr_identity(
+            pr_client,
+            capture,
+            context,
+            owner=owner,
+            repo=repo,
+            number=lookup.number,
+            expected_head=head,
+            expected_head_sha=expected_head_sha,
+        )
+        if identity_error:
+            _record_live_action(
+                capture,
+                context,
+                action="github.open_pr",
+                status="failed",
+                target_repository=target_repository,
+                external_write=False,
+                error_kind="pr_identity_mismatch",
+                error=identity_error,
+                retryable=False,
+                governance_decision_id=decision.id,
+                extra=payload,
+            )
+            return _result("github_open_pr", False, identity_error, "pr_identity_mismatch", payload)
         _record_open_pr_success(
             config,
             capture,
@@ -517,9 +596,42 @@ def github_open_pr(
         "head": head,
         "base": base,
         "head_sha": pr_result.head_sha,
+        "title": title,
+        "body": body,
         "governance_decision_id": decision.id,
+        "governance_status": decision.status,
+        "governance_reasons": decision.reasons,
+        "governance_action": decision.action,
+        "github_actor": decision.actor,
+        "target_repository": decision.target_repository,
+        "contribution_class": decision.contribution_class,
         "attempts": attempts,
     }
+    identity_error = _verify_pr_identity(
+        pr_client,
+        capture,
+        context,
+        owner=owner,
+        repo=repo,
+        number=pr_result.number,
+        expected_head=head,
+        expected_head_sha=expected_head_sha or pr_result.head_sha,
+    )
+    if identity_error:
+        _record_live_action(
+            capture,
+            context,
+            action="github.open_pr",
+            status="failed",
+            target_repository=target_repository,
+            external_write=False,
+            error_kind="pr_identity_mismatch",
+            error=identity_error,
+            retryable=False,
+            governance_decision_id=decision.id,
+            extra=payload,
+        )
+        return _result("github_open_pr", False, identity_error, "pr_identity_mismatch", payload)
     _record_open_pr_success(
         config,
         capture,
@@ -619,7 +731,7 @@ def _record_open_pr_success(
                 repository=repository,
                 number=number,
                 url=str(payload.get("url") or ""),
-                originating_run_dir="",
+                originating_run_dir=context.run_dir,
                 branch=str(payload.get("head") or ""),
                 head=str(payload.get("head") or ""),
                 base=str(payload.get("base") or "main"),
@@ -701,6 +813,7 @@ def _record_live_action(
         "schema_version": "2",
         "ts": datetime.now(UTC).isoformat(),
         "run_id": context.run_id,
+        "mode": context.run_mode,
         "season_id": context.season_id,
         "participant_id": context.participant_id,
         "action": action,
@@ -717,6 +830,50 @@ def _record_live_action(
     }
     payload.update(extra or {})
     capture.record_live_action(payload)
+
+
+@dataclass(frozen=True)
+class _ExternalLiveReview:
+    passed: bool
+    reasons: list[str]
+    contribution_class: str
+
+
+def _external_live_review(
+    *,
+    config: RunConfig,
+    capture: ArtifactCapture,
+    owner: str,
+    repo: str,
+) -> _ExternalLiveReview:
+    reasons: list[str] = []
+    target = RepoCandidate(
+        owner=owner,
+        repo=repo,
+        url=f"https://github.com/{owner}/{repo}",
+    )
+    patch = _latest_successful_submit(capture).output if _latest_successful_submit(capture) else ""
+    contribution_class = _contribution_class(patch)
+    if not patch.strip():
+        reasons.append("external_live requires a submitted patch before PR submission")
+    try:
+        eligibility = repo_check_eligibility(target)
+    except Exception as exc:
+        reasons.append(f"eligibility check failed: {exc}")
+    else:
+        if not eligibility.eligible:
+            reasons.extend(f"eligibility: {reason}" for reason in eligibility.reasons)
+    if contribution_class not in config.governance.contribution_classes.allowed:
+        reasons.append(f"contribution class is not allowed: {contribution_class}")
+    diff_paths = _patch_paths(patch)
+    if "docs" not in config.governance.contribution_classes.allowed and diff_paths:
+        if not _has_code_or_test_path(diff_paths):
+            reasons.append("external_live code-only run requires at least one code or test path")
+    return _ExternalLiveReview(
+        passed=not reasons,
+        reasons=reasons,
+        contribution_class=contribution_class,
+    )
 
 
 def _result(
@@ -791,6 +948,77 @@ def _suspicious_patch_paths(paths: list[str]) -> list[str]:
         if any(marker in normalized for marker in markers):
             suspicious.append(path)
     return suspicious
+
+
+def _contribution_class(patch: str) -> str:
+    paths = _patch_paths(patch)
+    if not paths:
+        return "low_risk_code"
+    if all(_is_docs_only_path(path) for path in paths):
+        return "docs"
+    if all(_is_test_only_path(path) for path in paths):
+        return "tests"
+    return "low_risk_code"
+
+
+def _normalized_diff_path(path: str) -> str:
+    lowered = path.lower()
+    return lowered.removeprefix("repo/") if lowered.startswith("repo/") else lowered
+
+
+def _is_docs_only_path(path: str) -> bool:
+    lowered = _normalized_diff_path(path)
+    if _is_code_or_test_path(lowered):
+        return False
+    if lowered.startswith(("docs/", "doc/")):
+        return True
+    if lowered in {"readme.md", "readme.rst", "changelog.md", "changelog.rst"}:
+        return True
+    return lowered.endswith((".md", ".rst", ".txt"))
+
+
+def _is_test_only_path(path: str) -> bool:
+    lowered = _normalized_diff_path(path)
+    if lowered.startswith(("tests/", "test/")):
+        return True
+    name = lowered.rsplit("/", maxsplit=1)[-1]
+    return name.startswith("test_") or name.endswith("_test.py")
+
+
+def _is_code_or_test_path(path: str) -> bool:
+    lowered = _normalized_diff_path(path)
+    if _is_test_only_path(lowered):
+        return True
+    if lowered.startswith(("src/", "lib/", "pkg/", "packages/", "app/")):
+        return True
+    return lowered.endswith(
+        (
+            ".py",
+            ".js",
+            ".jsx",
+            ".ts",
+            ".tsx",
+            ".go",
+            ".rs",
+            ".java",
+            ".kt",
+            ".c",
+            ".cc",
+            ".cpp",
+            ".h",
+            ".hpp",
+            ".cs",
+            ".rb",
+            ".php",
+            ".swift",
+            ".scala",
+            ".sh",
+        )
+    )
+
+
+def _has_code_or_test_path(paths: list[str]) -> bool:
+    return any(_is_code_or_test_path(path) for path in paths)
 
 
 def _redact_command_result(result: Any, token: str) -> Any:
@@ -875,6 +1103,8 @@ def _pr_payload(
     head: str,
     base: str,
     idempotent: bool,
+    title: str = "",
+    body: str = "",
 ) -> dict[str, object]:
     return {
         "idempotent": idempotent,
@@ -884,4 +1114,89 @@ def _pr_payload(
         "base": base,
         "head_sha": lookup.head_sha,
         "state": lookup.state,
+        "title": title,
+        "body": body,
     }
+
+
+def _verify_pr_identity(
+    client: object,
+    capture: ArtifactCapture,
+    context: LiveGithubContext,
+    *,
+    owner: str,
+    repo: str,
+    number: int | None,
+    expected_head: str,
+    expected_head_sha: str,
+) -> str:
+    if number is None:
+        return "GitHub PR response did not include a PR number"
+    get_pr = getattr(client, "get_pr", None)
+    if get_pr is None:
+        return ""
+    observed: PullRequestStatusResult = get_pr(owner=owner, repo=repo, number=number)
+    expected_ref = _head_ref_from_pr_head(expected_head)
+    error = _pr_identity_error(
+        observed=observed,
+        expected_ref=expected_ref,
+        expected_head_sha=expected_head_sha,
+    )
+    _record_live_action(
+        capture,
+        context,
+        action="github.verify_pr_identity",
+        status="verified" if not error else "failed",
+        target_repository=f"{owner}/{repo}",
+        external_write=False,
+        error_kind="" if not error else "pr_identity_mismatch",
+        error=error,
+        retryable=False,
+        extra={
+            "number": number,
+            "expected_head": expected_head,
+            "expected_head_ref": expected_ref,
+            "expected_head_sha": expected_head_sha,
+            "observed_head_ref": observed.head_ref,
+            "observed_head_sha": observed.head_sha,
+            "observed_state": observed.state,
+        },
+    )
+    return error
+
+
+def _pushed_head_sha(capture: ArtifactCapture, head: str) -> str:
+    for row in reversed(capture.live_action_rows):
+        if row.get("action") not in {"github.push_fork_branch", "github.push_upstream_branch"}:
+            continue
+        if row.get("status") != "pushed":
+            continue
+        if row.get("head") != head:
+            continue
+        return str(row.get("head_sha") or "")
+    return ""
+
+
+def _head_ref_from_pr_head(head: str) -> str:
+    return head.rsplit(":", 1)[-1]
+
+
+def _pr_identity_error(
+    *,
+    observed: PullRequestStatusResult,
+    expected_ref: str,
+    expected_head_sha: str,
+) -> str:
+    if not observed.ok:
+        return observed.error or "GitHub PR identity observation failed"
+    if expected_ref and observed.head_ref and observed.head_ref != expected_ref:
+        return (
+            f"GitHub PR head ref mismatch: expected {expected_ref}, "
+            f"observed {observed.head_ref}"
+        )
+    if expected_head_sha and observed.head_sha and observed.head_sha != expected_head_sha:
+        return (
+            f"GitHub PR head sha mismatch: expected {expected_head_sha}, "
+            f"observed {observed.head_sha}"
+        )
+    return ""

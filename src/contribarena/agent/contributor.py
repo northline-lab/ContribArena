@@ -231,7 +231,7 @@ class ContributorAgent:
 
         @function_tool
         def aci_runtime_get_context(scope: str = "run") -> str:
-            """Return the run runtime context: goals, guidance, memory handles, and tracked PR summaries."""
+            """Return the run runtime context: goals, guidance, memory handles, and this participant's tracked PR summaries."""
             return _to_json(tools.aci_runtime_get_context(scope))
 
         @function_tool
@@ -581,7 +581,7 @@ def build_agent_instructions(config: RunConfig) -> str:
         "observable action you are taking next; keep it evidence-oriented and do "
         "not expose hidden chain-of-thought. Call "
         "aci_runtime_get_context(scope='run') early; it returns guidance availability, "
-        "goal context, current phase/sub_phase, memory hints, and tracked PR summaries. Treat "
+        "goal context, current phase/sub_phase, memory hints, and your tracked PR summaries. Treat "
         "the long-term goal as direction, not a replacement for this run's concrete task. "
         "Use aci_goal_update only for the single short-term goal; phase transitions derive "
         "from goal scope/status plus draft submission events. Status complete, abandoned, "

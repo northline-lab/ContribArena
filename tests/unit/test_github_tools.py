@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
 from contribarena.config.schema import (
     ArtifactConfig,
+    BotIdentityConfig,
     DiscoveryConfig,
+    GovernanceConfig,
+    GovernanceRateLimits,
+    OwnedRepositoryPolicy,
+    PrSubmissionConfig,
     RepoCandidate,
     RepoSearchFilters,
     RunConfig,
@@ -15,9 +22,15 @@ from contribarena.config.schema import (
     SeasonParticipantConfig,
     WorkspaceConfig,
 )
-from contribarena.models import RepoMetadata
+from contribarena.engine.middleware.artifact import ArtifactCapture
+from contribarena.models import AciResult, RepoMetadata
 from contribarena.tools.github_client import GitHubResponse
-from contribarena.tools.github_pr import GitHubPullRequestClient
+from contribarena.tools.github_live import LiveGithubContext, github_open_pr
+from contribarena.tools.github_pr import (
+    GitHubPullRequestClient,
+    PullRequestLookupResult,
+    PullRequestStatusResult,
+)
 from contribarena.tools.repo_eligibility import repo_check_eligibility
 from contribarena.tools.repo_issues import repo_get_issues
 from contribarena.tools.repo_metadata import repo_get_metadata
@@ -864,6 +877,85 @@ class GithubToolsTest(unittest.TestCase):
             fake.calls[-1],
         )
 
+    def test_github_open_pr_rejects_existing_pr_with_mismatched_head(self) -> None:
+        class FakePrClient:
+            def authenticated_actor(self) -> str:
+                return "contribarena-bot"
+
+            def find_open_pr_by_head(
+                self,
+                *,
+                owner: str,
+                repo: str,
+                head: str,
+                base: str,
+            ) -> PullRequestLookupResult:
+                return PullRequestLookupResult(
+                    ok=True,
+                    number=70,
+                    url=f"https://github.com/{owner}/{repo}/pull/70",
+                    head_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    state="open",
+                    source="fake",
+                )
+
+            def get_pr(self, *, owner: str, repo: str, number: int) -> PullRequestStatusResult:
+                return PullRequestStatusResult(
+                    ok=True,
+                    number=number,
+                    state="open",
+                    url=f"https://github.com/{owner}/{repo}/pull/{number}",
+                    head_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    head_ref="someone-elses-branch",
+                    base_ref="main",
+                    source="fake",
+                )
+
+        config = _owned_live_config()
+        capture = ArtifactCapture()
+        capture.record_aci_result(
+            AciResult(tool="aci_submit_patch", success=True, output="diff --git a/a.py b/a.py\n")
+        )
+        capture.record_aci_result(
+            AciResult(tool="aci_submit_patch_finalize", success=True, output="finalized")
+        )
+        capture.record_aci_result(
+            AciResult(tool="aci_verify", success=True, output="tests passed")
+        )
+        capture.record_live_action(
+            {
+                "action": "github.push_fork_branch",
+                "status": "pushed",
+                "head": "contribarena-bot:contribarena/run-1-expected-branch",
+                "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            }
+        )
+
+        with patch.dict("os.environ", {"GITHUB_TOKEN": "test-token"}):
+            result = github_open_pr(
+                config=config,
+                capture=capture,
+                context=LiveGithubContext(
+                    run_id="run-1",
+                    season_id="season_0",
+                    participant_id="season_0:gpt-5.5",
+                ),
+                client=FakePrClient(),
+                owner="owner",
+                repo="project",
+                head="contribarena-bot:contribarena/run-1-expected-branch",
+                base="main",
+                title="Example",
+                body="Body",
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual("pr_identity_mismatch", result.error_kind)
+        self.assertEqual("github.verify_pr_identity", capture.live_action_rows[-2]["action"])
+        self.assertEqual("failed", capture.live_action_rows[-2]["status"])
+        self.assertEqual("github.open_pr", capture.live_action_rows[-1]["action"])
+        self.assertEqual("failed", capture.live_action_rows[-1]["status"])
+
 
 def _candidate() -> RepoCandidate:
     return RepoCandidate(
@@ -883,6 +975,48 @@ def _config(query: str = "", language: str | None = None) -> RunConfig:
         ),
         workspace=WorkspaceConfig(),
         artifacts=ArtifactConfig(),
+    )
+
+
+def _owned_live_config() -> RunConfig:
+    output_root = Path(tempfile.mkdtemp()) / "runs"
+    return RunConfig(
+        run=RunSection(
+            mode="owned_live",
+            id="run-1",
+            season_id="season_0",
+            participant_id="season_0:gpt-5.5",
+        ),
+        discovery=DiscoveryConfig(
+            candidates=[
+                RepoCandidate(owner="owner", repo="project", url="https://github.com/owner/project")
+            ],
+        ),
+        workspace=WorkspaceConfig(),
+        artifacts=ArtifactConfig(output_root=output_root),
+        governance=GovernanceConfig(
+            live_enabled=True,
+            rate_limits=GovernanceRateLimits(
+                max_open_prs_per_repo=100,
+                min_minutes_between_prs_per_repo=0,
+                max_open_prs_per_org=100,
+                min_minutes_between_prs_per_org=0,
+                max_open_prs_global=100,
+                min_minutes_between_prs_global=0,
+            ),
+            owned_repositories=[
+                OwnedRepositoryPolicy(
+                    owner="owner",
+                    repo="project",
+                    default_branch="main",
+                    pr_submission=PrSubmissionConfig(
+                        strategy="fork",
+                        fork_owner="contribarena-bot",
+                    ),
+                )
+            ],
+            bot_identity=BotIdentityConfig(kind="pat", actor="contribarena-bot"),
+        ),
     )
 
 

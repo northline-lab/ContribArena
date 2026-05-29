@@ -584,7 +584,7 @@ def derive_agent_result(
     candidate = _result_candidate(config, legacy)
     status = _derived_status(capture, terminal, legacy)
     repo_profile = _repo_profile(config, candidate, legacy, loop_state, terminal)
-    selected = _selected_task(config, goals, legacy)
+    selected = _selected_task(config, capture, goals, legacy)
     opportunity = OpportunitySummary(
         title=selected.title,
         rationale=selected.rationale,
@@ -796,17 +796,110 @@ def _repo_profile(
 
 def _selected_task(
     config: RunConfig,
+    capture: ArtifactCapture,
     goals: GoalService,
     legacy: AgentFinalResult | None,
 ) -> SelectedTask:
-    if legacy is not None and legacy.selected_task.title:
-        return legacy.selected_task
+    inspected_paths = _inspected_paths(capture)
+    changed_paths = _changed_paths(capture)
+    live_open = _latest_live_open(capture)
+    verify_count = sum(1 for item in capture.aci_results if item.tool == "aci_verify" and item.success)
+    patch_submitted = _has_successful_submit(capture)
+    observed_prs = [
+        row for row in capture.live_action_rows if row.get("action") == "github.observe_pr"
+    ]
+
+    if live_open is not None:
+        pr_number = live_open.get("pr_number") or live_open.get("number")
+        return SelectedTask(
+            title=(
+                f"Opened governed live PR #{pr_number}"
+                if pr_number is not None
+                else "Opened governed live pull request"
+            ),
+            rationale=_selected_task_rationale_lines(
+                [
+                    "Live GitHub submission completed through github_open_pr.",
+                    _paths_line("Submitted patch paths", changed_paths),
+                    _count_line("Successful verification steps", verify_count),
+                ]
+            ),
+            expected_change=_expected_change_text(changed_paths, submitted=True, live_opened=True),
+            risk="low",
+        )
+    if patch_submitted:
+        return SelectedTask(
+            title="Prepared reviewed patch without live PR submission",
+            rationale=_selected_task_rationale_lines(
+                [
+                    "A patch was submitted for review, but no governed live PR was opened.",
+                    _paths_line("Submitted patch paths", changed_paths),
+                    _count_line("Successful verification steps", verify_count),
+                ]
+            ),
+            expected_change=_expected_change_text(changed_paths, submitted=True, live_opened=False),
+            risk="low",
+        )
+    if changed_paths:
+        return SelectedTask(
+            title=_changed_title_from_paths(changed_paths, verified=verify_count > 0),
+            rationale=_selected_task_rationale_lines(
+                [
+                    "Workspace edits were captured from executed agent actions.",
+                    _paths_line("Changed paths", changed_paths),
+                    _count_line("Successful verification steps", verify_count),
+                ]
+            ),
+            expected_change=_expected_change_text(changed_paths, submitted=False, live_opened=False),
+            risk="low",
+        )
+    if observed_prs:
+        observed_numbers = [
+            str(row.get("number"))
+            for row in observed_prs
+            if row.get("number") not in {None, ""}
+        ]
+        return SelectedTask(
+            title="Inspected existing pull request state",
+            rationale=_selected_task_rationale_lines(
+                [
+                    (
+                        "Observed existing PRs: " + ", ".join(observed_numbers)
+                        if observed_numbers
+                        else "Observed existing PR state through github_observe_pr."
+                    ),
+                    _paths_line("Inspected repository paths", inspected_paths),
+                ]
+            ),
+            expected_change="No patch was submitted.",
+            risk="low",
+        )
+    if inspected_paths:
+        return SelectedTask(
+            title="Inspected repository context for a low-risk contribution",
+            rationale=_selected_task_rationale_lines(
+                [
+                    _paths_line("Inspected repository paths", inspected_paths),
+                    _count_line(
+                        "Successful discovery actions",
+                        sum(
+                            1
+                            for item in capture.aci_results
+                            if item.success
+                            and item.tool in {"aci_view", "aci_search", "aci_find_files"}
+                        ),
+                    ),
+                ]
+            ),
+            expected_change="No patch was submitted.",
+            risk="low",
+        )
     goal = goals.context.short_term
     if goal is not None and goal.objective:
         return SelectedTask(
-            title=goal.objective,
-            rationale=goal.evidence_summary or "Derived from active runtime goal.",
-            expected_change="Submit the smallest verified contribution patch.",
+            title="Initialized contribution goal without executable evidence",
+            rationale="Runtime goal state exists, but no verifiable repository or patch evidence was captured.",
+            expected_change="No patch was submitted.",
             risk="low",
         )
     if config.issue is not None:
@@ -817,11 +910,98 @@ def _selected_task(
             risk="low",
         )
     return SelectedTask(
-        title="Autonomous low-risk contribution",
-        rationale="Derived from configured discovery target and captured run evidence.",
-        expected_change="Submit a small verified patch.",
+        title="No verifiable contribution activity recorded",
+        rationale="The run produced no repository inspection, patch, or live GitHub evidence that could support a task summary.",
+        expected_change="No patch was submitted.",
         risk="low",
     )
+
+
+def _selected_task_rationale_lines(lines: list[str]) -> str:
+    return "\n".join(line for line in lines if line)
+
+
+def _count_line(label: str, count: int) -> str:
+    if count <= 0:
+        return ""
+    noun = "step" if count == 1 else "steps"
+    return f"{label}: {count} {noun}."
+
+
+def _paths_line(label: str, paths: list[str]) -> str:
+    if not paths:
+        return ""
+    return f"{label}: {', '.join(paths[:6])}" + ("." if len(paths) <= 6 else ", ...")
+
+
+def _expected_change_text(
+    paths: list[str],
+    *,
+    submitted: bool,
+    live_opened: bool,
+) -> str:
+    if paths:
+        action = "Submit" if submitted else "Prepare"
+        suffix = " through a governed live PR." if live_opened else "."
+        return f"{action} changes touching {', '.join(paths[:3])}" + (
+            ", ..." if len(paths) > 3 else ""
+        ) + suffix
+    if submitted:
+        return (
+            "Submit the captured reviewed patch through a governed live PR."
+            if live_opened
+            else "Submit the captured reviewed patch."
+        )
+    return "No patch was submitted."
+
+
+def _changed_title_from_paths(paths: list[str], *, verified: bool) -> str:
+    path = paths[0]
+    if len(paths) == 1:
+        if verified:
+            return f"Applied and verified a patch to {path}"
+        return f"Applied a patch to {path}"
+    qualifier = "and verified " if verified else ""
+    return f"Applied {qualifier}changes across {len(paths)} files"
+
+
+def _changed_paths(capture: ArtifactCapture) -> list[str]:
+    paths: list[str] = []
+    for patch in capture.patches:
+        paths.extend(path for path in patch.files_modified if path)
+    for item in capture.aci_results:
+        if item.tool in {
+            "aci_apply_patch",
+            "aci_replace",
+            "aci_insert",
+            "aci_create",
+            "aci_undo",
+            "aci_submit_patch",
+            "aci_submit_patch_finalize",
+        }:
+            paths.extend(path for path in item.files_modified if path)
+    return sorted(dict.fromkeys(paths))
+
+
+def _inspected_paths(capture: ArtifactCapture) -> list[str]:
+    paths: list[str] = []
+    for step in capture.steps:
+        if not step.accepted:
+            continue
+        if step.tool not in {"aci_view", "aci_search", "aci_find_files"}:
+            continue
+        for token in re.findall(r"repo/[A-Za-z0-9_./-]+", step.input_summary):
+            paths.append(token.rstrip(".,)"))
+    return sorted(dict.fromkeys(paths))
+
+
+def _latest_live_open(capture: ArtifactCapture) -> dict[str, object] | None:
+    for row in reversed(capture.live_action_rows):
+        if row.get("action") != "github.open_pr":
+            continue
+        if row.get("status") in {"opened", "existing"}:
+            return row
+    return None
 
 
 def _goal_status(goals: GoalService) -> str:

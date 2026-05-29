@@ -84,7 +84,8 @@ def build_goal_prompt(config: RunConfig) -> str:
             "After aci_submit_patch and aci_submit_patch_finalize pass Review, do not restart "
             "Scout or choose a new task unless the patch itself is invalid. Stay in the current "
             "workspace and complete the live PR workflow through the GitHub tools: prepare fork, "
-            "prepare branch, commit, push, and open the PR. Do not use raw shell GitHub writes. "
+            f"prepare branch, commit, push, and open the PR. Use a branch named contribarena/{config.run.id or '<run_id>'}-<short-slug>. "
+            "Do not use raw shell GitHub writes. "
         )
     elif config.run.mode == "external_live":
         run_label = "M0.5 external-live autonomous contributor run"
@@ -96,7 +97,7 @@ def build_goal_prompt(config: RunConfig) -> str:
             "After aci_submit_patch and aci_submit_patch_finalize pass Review, do not restart "
             "Scout or choose a new task unless the patch itself is invalid. Stay in the current "
             "workspace and complete the fork-only live PR workflow through the GitHub tools: "
-            "prepare fork, prepare branch, commit, push, and open the PR. Do not use raw shell "
+            f"prepare fork, prepare branch, commit, push, and open the PR. Use a branch named contribarena/{config.run.id or '<run_id>'}-<short-slug>. Do not use raw shell "
             "GitHub writes. "
         )
     else:
@@ -124,10 +125,10 @@ def build_goal_prompt(config: RunConfig) -> str:
         'Minimal aci_apply_patch example: operations_json=[{"type":"update_file","path":"repo/app.py","diff":"*** Begin Patch\\n*** Update File: repo/app.py\\n@@\\n old context\\n-old line\\n+new line\\n*** End Patch"}]. '
         "Do not edit files through workspace_run, shell redirection, sed, python scripts, or git commands; "
         "those edits lack unified-editor provenance and submit-time review will reject them. "
-        "Call aci_runtime_get_context(scope='run') early; it returns guidance availability, goal context, current phase/sub_phase, memory hints, and tracked PR summaries. "
+        "Call aci_runtime_get_context(scope='run') early; it returns guidance availability, goal context, current phase/sub_phase, memory hints, and your tracked PR summaries. "
         "Treat the long-term goal as direction, not as permission to ignore this run's concrete task. Use aci_goal_update only for the single short-term goal; status complete/abandoned/superseded requires evidence_refs_json with resolvable citations. Mark a contribution goal complete only after current evidence proves the objective is done. If aci_goal_update returns terminal_status=goal_abandon_limit, repo_switch_limit, or opportunity_switch_limit, end this run with a final structured blocked result. "
         "If guidance is available, read the returned path relative to the workspace root, not repo/. "
-        "If tracked PRs or external-write memory hints are present, inspect them before opening duplicate or conflicting work. "
+        "If your tracked PRs or external-write memory hints are present, inspect them before opening duplicate or conflicting work. "
         "Before editing, check repository-local guidance such as AGENTS.md, CONTRIBUTING.md, or .github templates when present. "
         "If a tool output is truncated or too broad, narrow the query. If a command is missing or the environment is blocked, "
         "record the blocker instead of making broad setup changes."
@@ -159,7 +160,7 @@ def _build_issue_solving_prompt(config: RunConfig) -> str:
             " In owned-live mode, patch review completion and live contribution completion "
             "are separate. After finalize, stay in the same workspace and use "
             "github_prepare_fork, github_prepare_branch, github_commit, github_push_branch, "
-            "and github_open_pr. The live contribution is complete only when github_open_pr "
+            f"and github_open_pr. Use a branch named contribarena/{config.run.id or '<run_id>'}-<short-slug>. The live contribution is complete only when github_open_pr "
             "returns opened or existing."
         )
     elif config.run.mode == "external_live":
@@ -168,7 +169,7 @@ def _build_issue_solving_prompt(config: RunConfig) -> str:
             " In external-live mode, patch review completion and live contribution completion "
             "are separate. After finalize, stay in the same workspace and use the fork-only "
             "GitHub path: github_prepare_fork, github_prepare_branch, github_commit, "
-            "github_push_branch, and github_open_pr. The live contribution is complete only "
+            f"github_push_branch, and github_open_pr. Use a branch named contribarena/{config.run.id or '<run_id>'}-<short-slug>. The live contribution is complete only "
             "when github_open_pr returns opened or existing."
         )
     else:
@@ -201,9 +202,9 @@ def _build_issue_solving_prompt(config: RunConfig) -> str:
         "Return the final structured ContribArena result with problem_statement_summary, reproduction_notes, verification_summary, and blockers.\n\n"
         "Completion rule: status may be completed only if the submitted patch directly addresses "
         "the problem statement and at least one local verification command succeeded. Otherwise "
-        "return blocked or failed with explicit reasons. Call aci_runtime_get_context(scope='run') early; it returns guidance availability, goal context, memory hints, tracked PR summaries, and current phase/sub_phase. "
+        "return blocked or failed with explicit reasons. Call aci_runtime_get_context(scope='run') early; it returns guidance availability, goal context, memory hints, your tracked PR summaries, and current phase/sub_phase. "
         "Treat the long-term goal as direction, not as permission to ignore this issue. Use aci_goal_update only for the single short-term goal; status complete/abandoned/superseded requires evidence_refs_json with resolvable citations. Mark it complete only after current evidence proves the objective is done. If aci_goal_update returns terminal_status=goal_abandon_limit, end this run with a final structured blocked result. "
-        "If guidance is available, read the returned path relative to the workspace root, not repo/. If tracked PRs or external-write memory hints are present, inspect them before opening duplicate or conflicting work. Then check and follow repository-local guidance such as AGENTS.md, CONTRIBUTING.md, or .github templates when present."
+        "If guidance is available, read the returned path relative to the workspace root, not repo/. If your tracked PRs or external-write memory hints are present, inspect them before opening duplicate or conflicting work. Then check and follow repository-local guidance such as AGENTS.md, CONTRIBUTING.md, or .github templates when present."
         f"{live_completion}"
         "\n\nRecovery templates:\n"
         f"{_recovery_template_text()}"
@@ -260,7 +261,7 @@ def _live_prompt_completion_rule(config: RunConfig) -> str:
             "In live modes, patch review completion and live contribution completion are "
             "separate: after finalize, stay in the same workspace and use "
             "github_prepare_fork, github_prepare_branch, github_commit, github_push_branch, "
-            "and github_open_pr. The live contribution is complete only when github_open_pr "
+            f"and github_open_pr. Use a branch named contribarena/{config.run.id or '<run_id>'}-<short-slug>. The live contribution is complete only when github_open_pr "
             "returns opened or existing."
         )
     return "Shadow mode stops at a reviewed patch; do not open a live PR."

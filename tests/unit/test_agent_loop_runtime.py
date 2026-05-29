@@ -7,7 +7,7 @@ from pathlib import Path
 from contribarena.agent import AgentInvocationResult
 from contribarena.config.schema import ArtifactConfig, BudgetConfig, DiscoveryConfig, RepoCandidate
 from contribarena.config.schema import RunConfig
-from contribarena.config.schema import MemoryConfig, RunSection, WorkspaceConfig
+from contribarena.config.schema import IssueConfig, MemoryConfig, RunSection, WorkspaceConfig
 from contribarena.engine.agent_loop import (
     AgentLoopState,
     agent_loop_progress,
@@ -519,6 +519,126 @@ class AgentLoopRuntimeTest(unittest.TestCase):
             self.assertIn("token=***", state.last_invocation_note)
             self.assertEqual(1, len(state.recent_tool_summaries))
             self.assertNotIn("ghp_", state.recent_tool_summaries[0])
+
+    def test_selected_task_prefers_live_pr_evidence_over_configured_issue_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(Path(tmp))
+            config.issue = IssueConfig(
+                title="Configured issue",
+                problem_statement="Use configured issue fallback only when no execution evidence exists.",
+                verification_hint="Fix the configured issue.",
+            )
+            capture = ArtifactCapture()
+            goals = GoalService(config, run_id="run")
+            state = AgentLoopState()
+            capture.record_aci_result(AciResult(tool="aci_replace", success=True, files_modified=["repo/app.py"]))
+            capture.record_aci_result(AciResult(tool="aci_verify", success=True, output="ok"))
+            capture.record_aci_result(
+                AciResult(
+                    tool="aci_submit_patch",
+                    success=True,
+                    output="diff --git a/repo/app.py b/repo/app.py\n",
+                    files_modified=["repo/app.py"],
+                )
+            )
+            capture.record_live_action(
+                {
+                    "action": "github.open_pr",
+                    "status": "opened",
+                    "pr_number": 72,
+                    "head": "contribarena-bot:contribarena/run-fix",
+                    "title": "Fix marker",
+                    "body": "Body",
+                }
+            )
+
+            result = derive_agent_result(
+                config=config,
+                capture=capture,
+                goals=goals,
+                loop_state=state,
+            )
+
+            self.assertEqual("Opened governed live PR #72", result.selected_task.title)
+            self.assertIn("github_open_pr", result.selected_task.rationale)
+            self.assertNotEqual("Configured issue", result.selected_task.title)
+
+    def test_selected_task_observed_pr_is_not_reported_as_opened(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(Path(tmp))
+            capture = ArtifactCapture()
+            goals = GoalService(config, run_id="run")
+            state = AgentLoopState()
+            capture.record_live_action(
+                {
+                    "action": "github.observe_pr",
+                    "status": "observed",
+                    "number": 72,
+                }
+            )
+
+            result = derive_agent_result(
+                config=config,
+                capture=capture,
+                goals=goals,
+                loop_state=state,
+            )
+
+            self.assertEqual("Inspected existing pull request state", result.selected_task.title)
+            self.assertIn("Observed existing PRs: 72", result.selected_task.rationale)
+            self.assertNotIn("Opened governed live PR", result.selected_task.title)
+
+    def test_selected_task_patch_without_live_submission_is_reported_truthfully(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(Path(tmp))
+            capture = ArtifactCapture()
+            goals = GoalService(config, run_id="run")
+            state = AgentLoopState()
+            capture.record_aci_result(AciResult(tool="aci_replace", success=True, files_modified=["repo/app.py"]))
+            capture.record_aci_result(AciResult(tool="aci_verify", success=True, output="ok"))
+            capture.record_aci_result(
+                AciResult(
+                    tool="aci_submit_patch",
+                    success=True,
+                    output="diff --git a/repo/app.py b/repo/app.py\n",
+                    files_modified=["repo/app.py"],
+                )
+            )
+
+            result = derive_agent_result(
+                config=config,
+                capture=capture,
+                goals=goals,
+                loop_state=state,
+            )
+
+            self.assertEqual(
+                "Prepared reviewed patch without live PR submission",
+                result.selected_task.title,
+            )
+            self.assertIn("no governed live PR was opened", result.selected_task.rationale)
+
+    def test_selected_task_falls_back_to_configured_issue_only_without_execution_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(Path(tmp))
+            config.issue = IssueConfig(
+                title="Configured issue",
+                problem_statement="Configured issue problem statement.",
+                verification_hint="Configured issue verification hint.",
+            )
+            capture = ArtifactCapture()
+            goals = GoalService(config, run_id="run")
+            state = AgentLoopState()
+
+            result = derive_agent_result(
+                config=config,
+                capture=capture,
+                goals=goals,
+                loop_state=state,
+            )
+
+            self.assertEqual("Configured issue", result.selected_task.title)
+            self.assertEqual("Configured issue problem statement.", result.selected_task.rationale)
 
 
 def _config(tmp_path: Path, *, max_invocations: int = 5) -> RunConfig:

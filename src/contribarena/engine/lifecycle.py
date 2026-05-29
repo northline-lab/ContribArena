@@ -139,9 +139,15 @@ def apply_quality_gate_to_result(
         result.verification_summary = "; ".join(quality_gate.blockers)
 
 
-def build_pr_draft(config: RunConfig, result: AgentFinalResult, patch: str) -> PullRequestDraft:
+def build_pr_draft(
+    config: RunConfig,
+    result: AgentFinalResult,
+    patch: str,
+    *,
+    run_id: str = "",
+) -> PullRequestDraft:
     title = _pr_title(config, result)
-    branch = _branch_name(result)
+    branch = _branch_name(result, run_id=run_id)
     labels = [_pr_lifecycle_label(config)]
     if config.issue is not None:
         labels.append("issue-solving")
@@ -416,12 +422,20 @@ def _pr_notice(config: RunConfig) -> tuple[str, str]:
     )
 
 
-def _branch_name(result: AgentFinalResult) -> str:
+def _branch_name(result: AgentFinalResult, *, run_id: str = "") -> str:
     slug = "".join(
         char.lower() if char.isalnum() else "-" for char in result.selected_task.title.strip()
     ).strip("-")
     while "--" in slug:
         slug = slug.replace("--", "-")
+    if run_id:
+        safe_run_id = "".join(char.lower() if char.isalnum() else "-" for char in run_id).strip(
+            "-"
+        )
+        while "--" in safe_run_id:
+            safe_run_id = safe_run_id.replace("--", "-")
+        if safe_run_id:
+            return f"contribarena/{safe_run_id}-{slug or 'dry-run'}"
     return f"contribarena/{slug or 'dry-run'}"
 
 

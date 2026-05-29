@@ -1057,8 +1057,10 @@ class ToolRegistry:
     def _live_github_context(self) -> LiveGithubContext:
         return LiveGithubContext(
             run_id=self.trace.run_id,
+            run_mode=self.config.run.mode,
             season_id=self.config.run.season_id or self.config.judgement.season_id,
             participant_id=self.config.run.participant_id or "",
+            run_dir=str(self.trace.path.parent),
         )
 
     def _undo_execution(self) -> AciExecution:

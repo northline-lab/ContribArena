@@ -155,6 +155,8 @@ def _guidance_entry(config: RunConfig) -> str:
                 "- Keep the current repo, branch intent, and workspace after finalize.",
                 "- Do not restart Scout or choose a new task unless the finalized patch",
                 "  is invalid and must change.",
+                "- Name the PR branch contribarena/<run_id>-<short-slug>; the runtime",
+                "  rejects shared or non-run-specific live branches.",
                 "- Use the governed GitHub tools in order:",
                 "  1. github_prepare_fork",
                 "  2. github_prepare_branch",
