@@ -1,8 +1,10 @@
 from .agent_result import AgentFinalResult, OpportunitySummary, RepoSummary, SelectedTask, WorkspaceSummary
 from .artifacts import ArtifactEntry, ArtifactManifest
+from .assistant_updates import AssistantUpdateKind, AssistantUpdatePosition
 from .governance import (
     GovernanceAttempt,
     GovernanceDecision,
+    GovernanceDecisionStatus,
     GovernancePrRef,
     GovernanceState,
     MaintainerSignal,
@@ -24,11 +26,13 @@ from .judgement import (
     JudgePacket,
     JudgementAggregateRubricScore,
     JudgementArtifact,
+    JudgementDimension,
     JudgementJudgeResult,
     JudgementMaintainerOutcome,
     JudgementPanel,
     JudgementRubricScore,
     JudgementSeason,
+    JudgementStatus,
     JudgementTarget,
 )
 from .lifecycle import (
@@ -37,13 +41,22 @@ from .lifecycle import (
     PullRequestDraft,
     QualityGateCheck,
     QualityGateResult,
+    TerminalLayer,
     TerminalState,
+    TerminalStatus,
 )
 from .run_state import RunState
-from .surface import RunSummary
+from .surface import (
+    ContributionClass,
+    MaintainerOutcomeStatus,
+    PipelineStatus,
+    RunSummary,
+    ArtifactVisibility,
+)
 from .tool_results import (
     AciResult,
     AgentStep,
+    CommandType,
     CommandResult,
     EligibilityResult,
     IssueCandidate,
@@ -51,9 +64,9 @@ from .tool_results import (
     PatchOperation,
     PatchResult,
     PullRequestCandidate,
+    RepoMetadata,
     RepoReadmeResult,
     RepoSetupProbeResult,
-    RepoMetadata,
 )
 
 __all__ = [
@@ -62,12 +75,18 @@ __all__ = [
     "AgentStep",
     "ArtifactEntry",
     "ArtifactManifest",
+    "ArtifactVisibility",
+    "AssistantUpdateKind",
+    "AssistantUpdatePosition",
     "CiCheck",
     "CiStatus",
+    "CommandType",
     "CommandResult",
+    "ContributionClass",
     "EligibilityResult",
     "GovernanceAttempt",
     "GovernanceDecision",
+    "GovernanceDecisionStatus",
     "GovernancePrRef",
     "GovernanceState",
     "GoalContext",
@@ -79,13 +98,17 @@ __all__ = [
     "JudgePacket",
     "JudgementAggregateRubricScore",
     "JudgementArtifact",
+    "JudgementDimension",
     "JudgementJudgeResult",
     "JudgementMaintainerOutcome",
     "JudgementPanel",
     "JudgementRubricScore",
     "JudgementSeason",
+    "JudgementStatus",
     "JudgementTarget",
+    "MaintainerOutcomeStatus",
     "MaintainerSignal",
+    "PipelineStatus",
     "PrLifecycleRecord",
     "IssueCandidate",
     "IssueLinkage",
@@ -107,6 +130,8 @@ __all__ = [
     "SelectedTask",
     "ShortTermGoal",
     "SubPhase",
+    "TerminalLayer",
     "TerminalState",
+    "TerminalStatus",
     "WorkspaceSummary",
 ]
