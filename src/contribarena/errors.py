@@ -19,3 +19,12 @@ class AgentError(ContribArenaError):
 
 class BudgetExhausted(ContribArenaError):
     exit_code = 4
+
+
+__all__ = [
+    "AgentError",
+    "BudgetExhausted",
+    "ConfigError",
+    "ContribArenaError",
+    "InfrastructureError",
+]
