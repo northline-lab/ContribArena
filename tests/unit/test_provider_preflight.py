@@ -29,6 +29,8 @@ from contribarena.config.schema import (
     WorkspaceConfig,
 )
 from contribarena.engine.provider_preflight import (
+    ProviderPreflightCheck,
+    ProviderPreflightResult,
     check_season_provider_connectivity,
     raise_for_provider_preflight,
     season_provider_models,
@@ -37,6 +39,28 @@ from contribarena.errors import ContribArenaError
 
 
 class ProviderPreflightTests(unittest.TestCase):
+    def test_uses_run_model_when_no_season_is_configured(self) -> None:
+        config = _config(participants=[SeasonParticipantConfig(model="compatible/qwen")], judges=[])
+        config = config.model_copy(update={"season": None})
+
+        self.assertEqual(["local-stub"], season_provider_models(config))
+
+    def test_uses_run_model_when_requested_season_does_not_match(self) -> None:
+        config = _config(participants=[SeasonParticipantConfig(model="compatible/qwen")], judges=[])
+
+        self.assertEqual(["local-stub"], season_provider_models(config, "other-season"))
+
+    def test_disabled_judgement_omits_explicit_judge_models(self) -> None:
+        config = _config(
+            participants=[SeasonParticipantConfig(model="compatible/qwen", role=["agent"])],
+            judges=[JudgementJudgeConfig(id="judge-a", model="anthropic/opus")],
+        )
+        config = config.model_copy(
+            update={"judgement": config.judgement.model_copy(update={"enabled": False})}
+        )
+
+        self.assertEqual(["compatible/qwen"], season_provider_models(config, "season_0"))
+
     def test_collects_unique_season_agent_and_judge_models(self) -> None:
         config = _config(
             participants=[
@@ -97,6 +121,36 @@ class ProviderPreflightTests(unittest.TestCase):
         self.assertEqual(["compatible/qwen"], [check.model for check in result.failed])
         with self.assertRaisesRegex(ContribArenaError, "season provider preflight failed"):
             raise_for_provider_preflight(result)
+
+    def test_failed_property_filters_only_failed_checks(self) -> None:
+        result = ProviderPreflightResult(
+            checks=[
+                ProviderPreflightCheck(model="local-stub", status="skipped"),
+                ProviderPreflightCheck(model="compatible/qwen", status="ok"),
+                ProviderPreflightCheck(model="anthropic/opus", status="failed"),
+            ]
+        )
+
+        self.assertEqual(["anthropic/opus"], [check.model for check in result.failed])
+
+    def test_raise_for_provider_preflight_includes_failure_detail(self) -> None:
+        result = ProviderPreflightResult(
+            checks=[
+                ProviderPreflightCheck(model="compatible/qwen", status="ok"),
+                ProviderPreflightCheck(
+                    model="anthropic/opus",
+                    status="failed",
+                    detail="RuntimeError: unavailable",
+                ),
+            ]
+        )
+
+        with self.assertRaises(ContribArenaError) as cm:
+            raise_for_provider_preflight(result)
+
+        message = str(cm.exception)
+        self.assertIn("anthropic/opus: failed - RuntimeError: unavailable", message)
+        self.assertNotIn("compatible/qwen", message)
 
     def test_closes_provider_in_same_event_loop_as_probe(self) -> None:
         config = _config(
