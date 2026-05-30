@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shlex
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from time import sleep
 
 from contribarena.agent import AgentInvocationContext, AgentInvocationResult
 from contribarena.agent import ContributorAgent
@@ -37,7 +35,6 @@ from contribarena.engine.lifecycle import (
     build_ci_status,
     build_pr_draft,
     evaluate_contribution_quality,
-    live_action_log_entries,
     render_postmortem,
     render_pr_description,
     render_quality_gate_section,

@@ -207,7 +207,7 @@ def github_prepare_branch(
             f"git -C {quoted_path} merge-base --is-ancestor FETCH_HEAD HEAD",
             f"printf 'base_sha=' && git -C {quoted_path} rev-parse FETCH_HEAD",
             f"printf 'head_sha=' && git -C {quoted_path} rev-parse HEAD",
-            f"printf 'patch_restored=' && printf '%s\\n' \"$patch_saved\"",
+            "printf 'patch_restored=' && printf '%s\\n' \"$patch_saved\"",
         ]
     )
     cmd = workspace.run(command, timeout_seconds=config.workspace.command_timeout_seconds)
