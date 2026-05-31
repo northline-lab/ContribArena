@@ -290,6 +290,41 @@ class GithubToolsTest(unittest.TestCase):
         self.assertEqual("owner/project", readme.full_name)
         self.assertIn("# Project", readme.content)
 
+    def test_repo_readme_reports_rest_failure(self) -> None:
+        class FakeClient:
+            def rest_text(self, path: str) -> GitHubResponse:
+                return GitHubResponse(ok=False, source="httpx", error="README not found")
+
+        with patch("contribarena.tools.repo_readme.GitHubClient", FakeClient):
+            readme = repo_get_readme(_candidate())
+
+        self.assertFalse(readme.success)
+        self.assertEqual("owner/project", readme.full_name)
+        self.assertEqual("README not found", readme.error)
+        self.assertEqual("", readme.content)
+
+    def test_repo_readme_enforces_minimum_content_limit(self) -> None:
+        class FakeClient:
+            def rest_text(self, path: str) -> GitHubResponse:
+                return GitHubResponse(ok=True, source="httpx", data="a" * 600)
+
+        with patch("contribarena.tools.repo_readme.GitHubClient", FakeClient):
+            readme = repo_get_readme(_candidate(), max_chars=10)
+
+        self.assertTrue(readme.success)
+        self.assertEqual(("a" * 500) + "...[truncated]", readme.content)
+
+    def test_repo_readme_enforces_maximum_content_limit(self) -> None:
+        class FakeClient:
+            def rest_text(self, path: str) -> GitHubResponse:
+                return GitHubResponse(ok=True, source="httpx", data="b" * 20_100)
+
+        with patch("contribarena.tools.repo_readme.GitHubClient", FakeClient):
+            readme = repo_get_readme(_candidate(), max_chars=50_000)
+
+        self.assertTrue(readme.success)
+        self.assertEqual(("b" * 20_000) + "...[truncated]", readme.content)
+
     def test_repo_pr_tools_normalize_pr_payloads(self) -> None:
         class FakeClient:
             def gh_json(self, args: list[str]) -> GitHubResponse:
