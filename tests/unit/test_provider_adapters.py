@@ -228,6 +228,74 @@ class ProviderActionGuardTest(unittest.TestCase):
         self.assertEqual("invalid_tool_arguments", payload["recovery_kind"])
         self.assertIn("missing required argument", payload["message"])
 
+    def test_rejects_unknown_tool_call(self) -> None:
+        response = _model_response([_tool_call("unknown_tool", {"path": "repo/app.py"})])
+
+        guarded = guard_model_response(response, [_sample_tool, _recovery_tool])
+
+        recovery = guarded.output[0]
+        self.assertIsInstance(recovery, ResponseFunctionToolCall)
+        payload = json.loads(recovery.arguments)
+        self.assertEqual("unknown_tool", payload["recovery_kind"])
+        self.assertEqual("unknown_tool", payload["attempted_tool"])
+        self.assertIn("Rejected unknown tool call", payload["message"])
+
+    def test_rejects_malformed_tool_arguments_json(self) -> None:
+        response = _model_response(
+            [
+                ResponseFunctionToolCall(
+                    arguments="{not json",
+                    call_id="call-sample_tool",
+                    name="sample_tool",
+                    type="function_call",
+                )
+            ]
+        )
+
+        guarded = guard_model_response(response, [_sample_tool, _recovery_tool])
+
+        recovery = guarded.output[0]
+        self.assertIsInstance(recovery, ResponseFunctionToolCall)
+        payload = json.loads(recovery.arguments)
+        self.assertEqual("malformed_action", payload["recovery_kind"])
+        self.assertEqual("sample_tool", payload["attempted_tool"])
+        self.assertIn("malformed JSON arguments", payload["message"])
+
+    def test_rejects_non_object_tool_arguments_json(self) -> None:
+        response = _model_response(
+            [
+                ResponseFunctionToolCall(
+                    arguments=json.dumps(["repo/app.py"]),
+                    call_id="call-sample_tool",
+                    name="sample_tool",
+                    type="function_call",
+                )
+            ]
+        )
+
+        guarded = guard_model_response(response, [_sample_tool, _recovery_tool])
+
+        recovery = guarded.output[0]
+        self.assertIsInstance(recovery, ResponseFunctionToolCall)
+        payload = json.loads(recovery.arguments)
+        self.assertEqual("invalid_tool_arguments", payload["recovery_kind"])
+        self.assertEqual("sample_tool", payload["attempted_tool"])
+        self.assertIn("non-object arguments", payload["message"])
+
+    def test_rejects_unexpected_tool_argument(self) -> None:
+        response = _model_response(
+            [_tool_call("sample_tool", {"path": "repo/app.py", "extra": "unused"})]
+        )
+
+        guarded = guard_model_response(response, [_sample_tool, _recovery_tool])
+
+        recovery = guarded.output[0]
+        self.assertIsInstance(recovery, ResponseFunctionToolCall)
+        payload = json.loads(recovery.arguments)
+        self.assertEqual("invalid_tool_arguments", payload["recovery_kind"])
+        self.assertEqual("sample_tool", payload["attempted_tool"])
+        self.assertIn("unexpected argument(s) extra", payload["message"])
+
     def test_recovery_tool_call_ids_are_unique(self) -> None:
         response = _model_response([_tool_call("sample_tool", {})])
 
